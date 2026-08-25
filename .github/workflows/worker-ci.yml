@@ -41,10 +41,13 @@ jobs:
       - name: Dockerfile shape gates
         run: |
           set -eu
-          if grep -En '^\s*ARG\b' Dockerfile; then echo "ARG found"; exit 1; fi
-          grep -Eq '^CMD \["python3", "-u", "handler.py"\]$' Dockerfile
-          grep -Eq '^USER oniq:oniq$' Dockerfile
-          if grep -En 'COPY \. ' Dockerfile; then echo "COPY . found"; exit 1; fi
+          # Instructions only: the comments talk ABOUT the forbidden
+          # shapes, so the raw file would trip its own scan.
+          grep -v '^[[:space:]]*#' Dockerfile > /tmp/df-instructions
+          if grep -En '^\s*ARG\b' /tmp/df-instructions; then echo "ARG found"; exit 1; fi
+          grep -Eq '^CMD \["python3", "-u", "handler.py"\]$' /tmp/df-instructions
+          grep -Eq '^USER oniq:oniq$' /tmp/df-instructions
+          if grep -En '^COPY \.([/ ]|$)' /tmp/df-instructions; then echo "COPY . found"; exit 1; fi
           echo "Dockerfile gates hold"
 
       - name: Build the uid-10001 read-only rig
