@@ -191,6 +191,10 @@ def get_endpoint(endpoint_id: str):
     return _get_json(f"{REST_BASE}/endpoints/{endpoint_id}")
 
 
+def get_template(template_id: str):
+    return _get_json(f"{REST_BASE}/templates/{template_id}")
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),

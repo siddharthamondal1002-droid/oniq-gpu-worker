@@ -464,3 +464,31 @@ def test_preflight_refuses_a_non_exclusive_gpu_list():
         _preflight(FakeClient(endpoints=[mixed]))
     assert exc.value.code == "endpoint-gpu-list-not-exclusive"
     assert "NVIDIA L4" in exc.value.message
+
+
+def test_preflight_finds_r2_env_on_the_template():
+    # RunPod may store env vars on the template rather than the endpoint
+    # object; the check must look in both before declaring them missing.
+    ep = _endpoint(env={})
+    ep["templateId"] = "tpl-1"
+    client = FakeClient(endpoints=[ep])
+    client.get_template = lambda tid: (
+        "{}",
+        {"id": tid, "env": {
+            "R2_S3_ENDPOINT": "https://x",
+            "R2_ACCESS_KEY_ID": "id",
+            "R2_SECRET_ACCESS_KEY": "sec",
+        }},
+    )
+    facts = _preflight(client)
+    assert facts["endpoint_id"] == "ep-123"
+
+
+def test_preflight_still_stops_when_neither_carries_r2():
+    ep = _endpoint(env={})
+    ep["templateId"] = "tpl-1"
+    client = FakeClient(endpoints=[ep])
+    client.get_template = lambda tid: ("{}", {"id": tid, "env": {}})
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _preflight(client)
+    assert exc.value.code == "r2-env-missing"

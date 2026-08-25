@@ -39,6 +39,14 @@ TERMINATION_CONFIRMED = "CONFIRMED_TERMINATED"
 TERMINATION_UNKNOWN = "TERMINATION_UNKNOWN"
 
 
+def _env_names(env_obj) -> set:
+    if isinstance(env_obj, dict):
+        return set(env_obj)
+    if isinstance(env_obj, list):
+        return {e.get("key") for e in env_obj if isinstance(e, dict)}
+    return set()
+
+
 class SpendStop(Exception):
     """A gate refused. code is stable; message never carries a secret."""
 
@@ -196,11 +204,18 @@ def preflight(
             "for the boot; restrict the endpoint to the 3090 only",
         )
 
-    # 4. R2 env NAMES present on the endpoint (values never printed).
-    env_obj = endpoint.get("env") or {}
-    env_names = set(env_obj) if isinstance(env_obj, dict) else {
-        e.get("key") for e in env_obj if isinstance(e, dict)
-    }
+    # 4. R2 env NAMES present on the endpoint OR its template (values
+    # never printed) — RunPod may store env on either object.
+    env_names = _env_names(endpoint.get("env"))
+    template_id = endpoint.get("templateId")
+    if not (env_names >= set(R2_ENV_REQUIRED)) and template_id:
+        try:
+            raw_tpl, template = client.get_template(template_id)
+        except Exception as exc:
+            print("template fetch failed:", type(exc).__name__)
+        else:
+            _show("template (raw, redacted)", template)
+            env_names |= _env_names(template.get("env"))
     missing = [name for name in R2_ENV_REQUIRED if name not in env_names]
     if missing:
         raise SpendStop(
