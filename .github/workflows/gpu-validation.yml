@@ -131,8 +131,13 @@ jobs:
     needs: discover
     if: inputs.mode == 'spend'
     runs-on: ubuntu-latest
+    # deployments/actions read: reading back gpu-spend's protection rules
+    # via the environments API needs more than contents — with contents
+    # alone the API answered 403 (measured 2026-08-25). Read-only both.
     permissions:
       contents: read
+      deployments: read
+      actions: read
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
@@ -153,6 +158,12 @@ jobs:
     if: inputs.mode == 'spend' && inputs.spend == 'SPEND'
     runs-on: ubuntu-latest
     environment: gpu-spend
+    # The run path re-preflights (fail-closed), so it re-reads the
+    # environment's protection rules and needs the same read scopes.
+    permissions:
+      contents: read
+      deployments: read
+      actions: read
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}

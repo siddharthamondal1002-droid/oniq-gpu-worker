@@ -164,6 +164,35 @@ def test_environment_unverifiable_is_a_stop_not_a_pass():
     assert exc.value.code == "environment-unverifiable"
 
 
+def test_environment_unverifiable_carries_the_servers_own_words():
+    # Run #16 (2026-08-25) answered a bare "403" and the cause — token
+    # permission vs. plan limitation — was undecidable from the log. The
+    # STOP must quote the API's message so the next 403 diagnoses itself.
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_environment_protection(
+            lambda u, t: (403, {"message": "Resource not accessible by integration"})
+        )
+    assert "Resource not accessible by integration" in exc.value.message
+    assert "deployments: read" in exc.value.message
+
+
+def test_default_env_fetch_keeps_the_error_body(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(
+            req.full_url, 403, "Forbidden", {},
+            io.BytesIO(b'{"message": "Resource not accessible by integration"}'),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    status, doc = spend_run._default_env_fetch("https://api.github.com/x", "tok")
+    assert status == 403
+    assert doc["message"] == "Resource not accessible by integration"
+
+
 def test_environment_with_reviewers_passes():
     assert spend_run.check_environment_protection(_env_ok) == 1
 

@@ -103,7 +103,15 @@ def _default_env_fetch(url: str, token: str):
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        return exc.code, {}
+        # The error body is the diagnosis (GitHub says WHY: missing token
+        # permission vs. plan limitation) — losing it cost a debugging
+        # round on 2026-08-25, the same way the Cloudflare 1010 body did.
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+            return exc.code, json.loads(body)
+        except Exception:
+            return exc.code, {"raw": body[:300]}
     except Exception:
         return 0, {}
 
@@ -131,10 +139,21 @@ def check_environment_protection(fetch=_default_env_fetch) -> int:
             "required reviewer is an owner action",
         )
     if status != 200:
+        detail = ""
+        if isinstance(doc, dict):
+            detail = doc.get("message") or doc.get("raw") or ""
+        hint = (
+            " — 403 here means either the workflow token lacks "
+            "'deployments: read' permission, or environments are not "
+            "available on this repository's plan (private repo)"
+            if status == 403
+            else ""
+        )
         raise SpendStop(
             "environment-unverifiable",
-            f"environments API answered {status}; unverified protection is "
-            "not protection",
+            f"environments API answered {status}"
+            + (f' saying "{detail}"' if detail else "")
+            + f"{hint}; unverified protection is not protection",
         )
     rules = [
         r
