@@ -117,6 +117,13 @@ def _env_ok(url, token):
 def _gh_env(monkeypatch):
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-token-value")
+    monkeypatch.setenv("GITHUB_RUN_ID", "12345")
+
+
+def _approved(url, token):
+    if url.endswith("/approvals"):
+        return 200, [{"state": "approved", "user": {"login": "the-owner"}}]
+    return _env_ok(url, token)
 
 
 def _preflight(client, **kw):
@@ -174,6 +181,81 @@ def test_environment_unverifiable_carries_the_servers_own_words():
         )
     assert "Resource not accessible by integration" in exc.value.message
     assert "deployments: read" in exc.value.message
+
+
+def test_run_approval_passes_on_a_recorded_approval():
+    assert spend_run.check_run_approval(_approved) == "the-owner"
+
+
+def test_run_approval_refuses_a_readable_empty_approvals_list():
+    # GitHub waves a job straight through an unprotected environment, so
+    # a readable-but-empty approvals list means the mandated pause never
+    # happened — even if a reviewer rule was added after dispatch.
+    def fetch(url, token):
+        if url.endswith("/approvals"):
+            return 200, []
+        return _env_ok(url, token)
+
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_run_approval(fetch)
+    assert exc.value.code == "approval-not-recorded"
+
+
+def test_run_approval_falls_back_to_the_reviewer_rule_when_unreadable():
+    def fetch(url, token):
+        if url.endswith("/approvals"):
+            return 403, {"message": "Resource not accessible by integration"}
+        return _env_ok(url, token)
+
+    assert spend_run.check_run_approval(fetch) == "reviewer-rule-verified"
+
+
+def test_run_approval_unreadable_and_unprotected_is_a_stop():
+    def fetch(url, token):
+        if url.endswith("/approvals"):
+            return 403, {}
+        return 200, {"protection_rules": []}
+
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_run_approval(fetch)
+    assert exc.value.code == "environment-unprotected"
+
+
+def test_run_approval_requires_the_run_id(monkeypatch):
+    monkeypatch.delenv("GITHUB_RUN_ID")
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_run_approval(_approved)
+    assert exc.value.code == "approval-unverifiable"
+
+
+def test_preflight_on_the_run_path_uses_approval_evidence():
+    client = FakeClient()
+    facts = spend_run.preflight(
+        client,
+        input_ref="in/test.png",
+        output_prefix="out/validation",
+        env_fetch=_approved,
+        approval_evidence=True,
+    )
+    assert facts["reviewer_rules"] == "approved:the-owner"
+
+
+def test_preflight_on_the_run_path_stops_without_an_approval():
+    def fetch(url, token):
+        if url.endswith("/approvals"):
+            return 200, []
+        return _env_ok(url, token)
+
+    client = FakeClient()
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.preflight(
+            client,
+            input_ref="in/test.png",
+            output_prefix="out/validation",
+            env_fetch=fetch,
+            approval_evidence=True,
+        )
+    assert exc.value.code == "approval-not-recorded"
 
 
 def test_default_env_fetch_keeps_the_error_body(monkeypatch):

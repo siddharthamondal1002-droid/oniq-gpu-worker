@@ -51,7 +51,7 @@ def test_gate4_orphan_sweep_always_runs():
     doc, _ = _load("gpu-validation.yml")
     sweep = doc["jobs"]["sweep"]
     assert sweep["if"].strip() == "always()"
-    assert set(sweep["needs"]) == {"discover", "preflight", "spend"}
+    assert set(sweep["needs"]) == {"discover", "spend"}
 
 
 def test_gate5_no_endpoint_creation_anywhere():
@@ -63,22 +63,19 @@ def test_gate5_no_endpoint_creation_anywhere():
     assert not hasattr(runpod_client, "create_pod")
 
 
-def test_preflight_is_free_of_the_environment_gate():
-    # Phase 9 runs BEFORE approval, so it must not sit behind the
-    # gpu-spend environment — and the gated job must depend on it.
+def test_no_separate_preflight_job_blocks_the_spend_path():
+    # Owner directive 2026-08-25: every check runs INSIDE the spend job,
+    # immediately before provisioning, behind the environment pause — no
+    # separate preflight job may gate (or block) the authorized run.
     doc, _ = _load("gpu-validation.yml")
-    preflight = doc["jobs"]["preflight"]
-    assert "environment" not in preflight
-    assert preflight["if"].strip() == "inputs.mode == 'spend'"
-    assert doc["jobs"]["spend"]["needs"] == "preflight"
+    assert "preflight" not in doc["jobs"]
+    assert "needs" not in doc["jobs"]["spend"]
 
 
 def test_spend_job_runs_the_tested_driver():
     doc, _ = _load("gpu-validation.yml")
     runs = [s.get("run", "") for s in doc["jobs"]["spend"]["steps"]]
     assert any("validation.spend_run run" in r for r in runs)
-    pre = [s.get("run", "") for s in doc["jobs"]["preflight"]["steps"]]
-    assert any("validation.spend_run preflight" in r for r in pre)
 
 
 def test_gate6_r2_credentials_are_not_github_secrets():

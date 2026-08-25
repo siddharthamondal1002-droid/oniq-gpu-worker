@@ -20,11 +20,13 @@
 #    endpoint's environment; CI submits jobs and never touches the bucket.
 #
 # The spend job requires the gpu-spend environment (owner-configured
-# required reviewers — that click is the "gpu-spend approval"), AND the
-# preflight job verifies via the API that the environment actually
-# carries a required-reviewer rule: GitHub auto-creates an unprotected
-# environment on first reference, which would silently turn the approval
-# gate into a no-op. All spend-path decisions live in
+# required reviewers — that click is the "gpu-spend approval"). Owner
+# directive 2026-08-25: no separate preflight job gates the spend path —
+# every check runs INSIDE the spend job, immediately before
+# provisioning, behind the environment pause. Because GitHub waves a job
+# straight through an unprotected environment, the run path verifies
+# EVIDENCE of the pause (this run's recorded approval via the API) and
+# refuses to provision without it. All spend-path decisions live in
 # validation/spend_run.py, which is tested offline — not in YAML.
 
 name: gpu-validation
@@ -126,40 +128,17 @@ jobs:
           path: discovery.json
           if-no-files-found: ignore
 
-  preflight:
-    name: "Phase 9-10: free pre-spend verification (no approval needed, $0)"
-    needs: discover
-    if: inputs.mode == 'spend'
-    runs-on: ubuntu-latest
-    # deployments/actions read: reading back gpu-spend's protection rules
-    # via the environments API needs more than contents — with contents
-    # alone the API answered 403 (measured 2026-08-25). Read-only both.
-    permissions:
-      contents: read
-      deployments: read
-      actions: read
-    env:
-      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-      GITHUB_TOKEN: ${{ github.token }}
-      ENDPOINT_ID: ${{ inputs.endpoint_id }}
-      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || vars.GPU_TEST_INPUT_REF }}
-      GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Preflight — every free gate, no spend
-        run: python -m validation.spend_run preflight
-
   spend:
-    name: "Phase 12-19: gated live validation"
-    needs: preflight
+    name: "Phase 9-19: every check in-job, then gated live validation"
     if: inputs.mode == 'spend' && inputs.spend == 'SPEND'
     runs-on: ubuntu-latest
     environment: gpu-spend
-    # The run path re-preflights (fail-closed), so it re-reads the
-    # environment's protection rules and needs the same read scopes.
+    # The run path performs every check itself, immediately before
+    # provisioning (owner directive 2026-08-25: no separate preflight
+    # job may block the authorized run). actions/deployments read: the
+    # job reads back this run's own recorded approval — evidence the
+    # gpu-spend pause really happened — and refuses to provision
+    # without it; contents-read-only answers 403 there (measured).
     permissions:
       contents: read
       deployments: read
@@ -181,7 +160,7 @@ jobs:
 
   sweep:
     name: "orphan sweep — None is never 0"
-    needs: [discover, preflight, spend]
+    needs: [discover, spend]
     if: always()
     runs-on: ubuntu-latest
     env:

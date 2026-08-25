@@ -13,10 +13,13 @@ Discipline carried over from the ledger and the superloop, encoded:
   (presence may be verified; values must never appear);
 - UNKNOWN termination is never converted to success;
 - the spend gate is two-factor (the literal SPEND input and the
-  gpu-spend environment approval), and preflight additionally verifies
-  the environment HAS a required-reviewer rule — GitHub auto-creates an
-  unprotected environment on first reference, which would have turned
-  the approval gate into a no-op;
+  gpu-spend environment approval). Owner directive 2026-08-25: the
+  checks run INSIDE the spend job (no separate blocking preflight job),
+  so on the run path the gate is verified as EVIDENCE — this run's own
+  recorded approval — because GitHub waves a job straight through an
+  unprotected environment; a readable, empty approvals list means the
+  mandated pause never happened and provisioning is refused. The
+  standalone advisory preflight still reads the reviewer rule back;
 - every stop is a typed SpendStop with a stable code, and the driver
   never auto-recovers around a financial failure.
 """
@@ -169,6 +172,47 @@ def check_environment_protection(fetch=_default_env_fetch) -> int:
     return len(rules)
 
 
+def check_run_approval(fetch=_default_env_fetch) -> str:
+    """Owner directive 2026-08-25: the spend job itself carries every
+    check — no separate preflight job — but it must still have PAUSED for
+    the gpu-spend required reviewer before provisioning. Direct evidence
+    first: this run's own recorded approvals (who clicked). GitHub waves
+    a job straight through an unprotected environment, so a readable,
+    empty approvals list means the mandated pause never happened — stop
+    before provisioning. Only when the approvals API is unreadable does
+    the environment's reviewer rule, read back at job start, stand in:
+    rule present while this job runs implies the pause occurred."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    token = os.environ.get("GITHUB_TOKEN")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if not repo or not token or not run_id:
+        raise SpendStop(
+            "approval-unverifiable",
+            "GITHUB_REPOSITORY/GITHUB_TOKEN/GITHUB_RUN_ID absent; cannot "
+            "verify the gpu-spend approval happened, so provisioning must "
+            "not proceed",
+        )
+    status, doc = fetch(
+        f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/approvals",
+        token,
+    )
+    if status == 200 and isinstance(doc, list):
+        for approval in doc:
+            if isinstance(approval, dict) and approval.get("state") == "approved":
+                user = (approval.get("user") or {}).get("login") or "unknown"
+                return user
+        raise SpendStop(
+            "approval-not-recorded",
+            "this run has NO recorded gpu-spend approval — GitHub never "
+            "paused it, which means the environment carries no required "
+            "reviewer; the owner-mandated approval cannot have happened, so "
+            "provisioning is refused. Fix: gpu-spend -> Required reviewers "
+            "-> Save protection rules, then dispatch again",
+        )
+    check_environment_protection(fetch)
+    return "reviewer-rule-verified"
+
+
 # --------------------------------------------------------------- preflight
 
 
@@ -179,8 +223,15 @@ def preflight(
     input_ref: str = "",
     output_prefix: str = "",
     env_fetch=_default_env_fetch,
+    approval_evidence: bool = False,
 ) -> dict:
     """Phases 9-10: every free verification, in a fixed order, no spend.
+
+    approval_evidence=True is the run path (owner directive 2026-08-25:
+    the checks live inside the spend job, behind the gpu-spend pause):
+    instead of reading the environment's configuration, require evidence
+    that THIS run was paused and approved. False is the standalone
+    advisory preflight, which reads the configuration back.
 
     Returns the facts later stages must re-verify (never merely reuse).
     """
@@ -304,8 +355,14 @@ def preflight(
         price_per_hour=target["secure_price"],
     )
 
-    # 7. The approval gate is real, not auto-created-and-empty.
-    reviewer_rules = check_environment_protection(env_fetch)
+    # 7. The approval gate is real, not auto-created-and-empty. On the
+    # run path this means evidence THIS run paused and was approved; on
+    # the advisory path it means the reviewer rule reads back present.
+    if approval_evidence:
+        approved_by = check_run_approval(env_fetch)
+        reviewer_rules = f"approved:{approved_by}"
+    else:
+        reviewer_rules = check_environment_protection(env_fetch)
 
     facts = {
         "endpoint_id": parsed["id"],
@@ -609,7 +666,7 @@ def main(argv) -> int:
         return 2
     params = _inputs_from_env()
     try:
-        facts = preflight(rp, **params)
+        facts = preflight(rp, **params, approval_evidence=(argv[1] == "run"))
         if argv[1] == "preflight":
             print("PREFLIGHT PASS — every free gate holds; spending remains "
                   "gated on SPEND + gpu-spend approval")
