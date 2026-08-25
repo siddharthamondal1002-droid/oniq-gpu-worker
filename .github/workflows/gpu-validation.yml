@@ -19,9 +19,13 @@
 # 6. R2 credentials are NOT GitHub secrets. They live in the RunPod
 #    endpoint's environment; CI submits jobs and never touches the bucket.
 #
-# The spend job also requires the gpu-spend environment, which the owner
-# configures with required reviewers — that reviewer click is the
-# "gpu-spend approval". No implicit approval, no automatic approval.
+# The spend job requires the gpu-spend environment (owner-configured
+# required reviewers — that click is the "gpu-spend approval"), AND the
+# preflight job verifies via the API that the environment actually
+# carries a required-reviewer rule: GitHub auto-creates an unprotected
+# environment on first reference, which would silently turn the approval
+# gate into a no-op. All spend-path decisions live in
+# validation/spend_run.py, which is tested offline — not in YAML.
 
 name: gpu-validation
 
@@ -29,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = one real job."
+        description: "discover = read-only, $0. spend = the gated live path."
         type: choice
         options: [discover, spend]
         default: discover
@@ -37,16 +41,21 @@ on:
         description: "Type SPEND (exactly) to allow the spend job."
         type: string
         default: ""
+      through_phase:
+        description: "Last phase to run when spending: 16 = one job, 17 = +failure battery, 18 = +5-job, 19 = +20-job."
+        type: choice
+        options: ["16", "17", "18", "19"]
+        default: "16"
       endpoint_id:
-        description: "Existing serverless endpoint id (spend mode only)."
+        description: "Endpoint id (optional; must match the single live endpoint)."
         type: string
         default: ""
       test_input_key:
-        description: "R2 key of the bounded test input (spend mode only)."
+        description: "Overrides the GPU_TEST_INPUT_REF repository variable."
         type: string
         default: ""
-      test_output_key:
-        description: "R2 key for the test output (spend mode only)."
+      test_output_prefix:
+        description: "Overrides the GPU_TEST_OUTPUT_PREFIX repository variable."
         type: string
         default: ""
 
@@ -97,12 +106,12 @@ jobs:
 
           price = target["secure_price"]
           reservation = admission.admit(
-              gpu_name=target["display_name"],
+              gpu_name=target["id"],
               vram_gb=target["memory_gb"],
               runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
               price_per_hour=price,
           )
-          print("LIVE target :", target["display_name"], f"{target['memory_gb']}GB")
+          print("LIVE target :", target["id"], f"{target['memory_gb']}GB")
           print("LIVE price  : $", price, "/h (secure cloud) — quoted now, not historical")
           print("Reservation : $", reservation.reserved_usd,
                 f"for the full {reservation.runtime_seconds}s ceiling")
@@ -117,101 +126,51 @@ jobs:
           path: discovery.json
           if-no-files-found: ignore
 
-  spend:
-    name: "Phase 9-12: one real job (SPEND + gpu-spend approval)"
+  preflight:
+    name: "Phase 9-10: free pre-spend verification (no approval needed, $0)"
     needs: discover
-    if: inputs.mode == 'spend' && inputs.spend == 'SPEND'
+    if: inputs.mode == 'spend'
     runs-on: ubuntu-latest
-    environment: gpu-spend
+    permissions:
+      contents: read
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
       ENDPOINT_ID: ${{ inputs.endpoint_id }}
-      TEST_INPUT_KEY: ${{ inputs.test_input_key }}
-      TEST_OUTPUT_KEY: ${{ inputs.test_output_key }}
+      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || vars.GPU_TEST_INPUT_REF }}
+      GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Preflight — every free gate, no spend
+        run: python -m validation.spend_run preflight
 
-      - name: "Phase 9: pre-spend recheck, then ONE job"
-        run: |
-          python - <<'EOF'
-          import json, os, time
-          import runpod_client as rp
-          from validation import admission
-
-          # The literal-input half of the gate; the environment approval
-          # already happened or this job would not be running.
-          admission.check_spend_gate("${{ inputs.spend }}", True)
-
-          endpoint_id = os.environ["ENDPOINT_ID"]
-          if not endpoint_id or not os.environ["TEST_INPUT_KEY"] or not os.environ["TEST_OUTPUT_KEY"]:
-              print("STOP: endpoint_id/test keys not provided")
-              raise SystemExit(1)
-
-          # Re-query everything immediately before provisioning.
-          _, catalogue = rp.gpu_catalogue()
-          target = admission.require_available(catalogue)
-          reservation = admission.admit(
-              gpu_name=target["display_name"],
-              vram_gb=target["memory_gb"],
-              runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
-              price_per_hour=target["secure_price"],
-          )
-          print("recheck price $", target["secure_price"], "/h; reservation $", reservation.reserved_usd)
-
-          _, ep_raw = rp.get_endpoint(endpoint_id)
-          ep = rp.parse_endpoint(ep_raw)
-          admission.check_endpoint_config(ep["min_workers"], ep["max_workers"])
-          print("endpoint verified: min", ep["min_workers"], "max", ep["max_workers"])
-
-          _, submitted = rp.submit_job(endpoint_id, {
-              "op": "image_preprocess",
-              "input_key": os.environ["TEST_INPUT_KEY"],
-              "output_key": os.environ["TEST_OUTPUT_KEY"],
-          })
-          job_id = submitted["id"]
-          print("job submitted:", job_id)
-
-          deadline = time.monotonic() + admission.RUNTIME_CEILING_SECONDS
-          status = None
-          while time.monotonic() < deadline:
-              raw, status = rp.job_status(endpoint_id, job_id)
-              if status.get("status") in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
-                  break
-              time.sleep(5)
-          else:
-              rp.cancel_job(endpoint_id, job_id)
-              print("STOP: job exceeded the runtime ceiling; cancelled")
-              raise SystemExit(1)
-
-          print("=== RAW status ===")
-          print(json.dumps(status, indent=1))
-          if status.get("status") != "COMPLETED":
-              raise SystemExit(1)
-
-          out = status.get("output") or {}
-          assert out.get("ok") is True, out
-          assert out.get("device") == "cuda", "HTTP 200 alone is insufficient: device must be cuda"
-          assert out.get("gpu_name"), "GPU name missing"
-          assert out.get("vram_peak_mb") is not None, "peak VRAM missing"
-          print("GPU:", out["gpu_name"], "| VRAM peak MB:", out["vram_peak_mb"])
-
-          exec_ms = status.get("executionTime")
-          if exec_ms is not None:
-              from decimal import Decimal
-              billed = admission.reserve_usd(
-                  target["secure_price"], max(1, int(exec_ms / 1000))
-              )
-              print("executionTime ms:", exec_ms, "-> cost-at-price $", billed)
-              assert billed <= reservation.reserved_usd, "actual exceeded reservation"
-          rp.purge_queue(endpoint_id)
-          EOF
+  spend:
+    name: "Phase 12-19: gated live validation"
+    needs: preflight
+    if: inputs.mode == 'spend' && inputs.spend == 'SPEND'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      ENDPOINT_ID: ${{ inputs.endpoint_id }}
+      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || vars.GPU_TEST_INPUT_REF }}
+      GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
+      THROUGH_PHASE: ${{ inputs.through_phase }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
+        run: python -m validation.spend_run run
 
   sweep:
     name: "orphan sweep — None is never 0"
-    needs: [discover, spend]
+    needs: [discover, preflight, spend]
     if: always()
     runs-on: ubuntu-latest
     env:

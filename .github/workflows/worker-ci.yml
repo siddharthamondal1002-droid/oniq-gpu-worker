@@ -27,7 +27,7 @@ jobs:
       - name: Secret and shell-surface scan
         run: |
           set -eu
-          FILES="contract.py preprocess.py storage.py handler.py runpod_client.py validation/admission.py"
+          FILES="contract.py preprocess.py storage.py handler.py runpod_client.py validation/admission.py validation/spend_run.py"
           for pattern in 'eval(' 'exec(' 'subprocess' 'os.system' 'pickle' 'shell=True'; do
             if grep -Fn "$pattern" $FILES; then
               echo "FORBIDDEN CALL FOUND: $pattern"; exit 1

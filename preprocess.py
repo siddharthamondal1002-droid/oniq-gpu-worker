@@ -111,8 +111,14 @@ def run(job: dict, input_path: str, output_path: str) -> dict:
         resized = F.interpolate(
             tensor, size=(out_h, out_w), mode="bilinear", antialias=True
         )
+        # The CUDA proof op of the validation sequence: a real conv2d on
+        # the card, not just a resize. Depthwise 3x3 box kernel — the
+        # output stays the same size and visually near-identical, but a
+        # convolution demonstrably executed on the device.
+        kernel = torch.full((3, 1, 3, 3), 1.0 / 9.0, device=resized.device)
+        convolved = F.conv2d(resized, kernel, padding=1, groups=3)
         out_bytes = (
-            resized.clamp(0, 255)
+            convolved.clamp(0, 255)
             .to(dtype=torch.uint8)
             .squeeze(0)
             .permute(1, 2, 0)

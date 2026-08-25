@@ -51,16 +51,34 @@ def test_gate4_orphan_sweep_always_runs():
     doc, _ = _load("gpu-validation.yml")
     sweep = doc["jobs"]["sweep"]
     assert sweep["if"].strip() == "always()"
-    assert set(sweep["needs"]) == {"discover", "spend"}
+    assert set(sweep["needs"]) == {"discover", "preflight", "spend"}
 
 
 def test_gate5_no_endpoint_creation_anywhere():
     _, raw = _load("gpu-validation.yml")
-    assert "check_endpoint_config" in raw
+    assert "validation.spend_run" in raw  # gates live in tested code
     import runpod_client
 
     assert not hasattr(runpod_client, "create_endpoint")
     assert not hasattr(runpod_client, "create_pod")
+
+
+def test_preflight_is_free_of_the_environment_gate():
+    # Phase 9 runs BEFORE approval, so it must not sit behind the
+    # gpu-spend environment — and the gated job must depend on it.
+    doc, _ = _load("gpu-validation.yml")
+    preflight = doc["jobs"]["preflight"]
+    assert "environment" not in preflight
+    assert preflight["if"].strip() == "inputs.mode == 'spend'"
+    assert doc["jobs"]["spend"]["needs"] == "preflight"
+
+
+def test_spend_job_runs_the_tested_driver():
+    doc, _ = _load("gpu-validation.yml")
+    runs = [s.get("run", "") for s in doc["jobs"]["spend"]["steps"]]
+    assert any("validation.spend_run run" in r for r in runs)
+    pre = [s.get("run", "") for s in doc["jobs"]["preflight"]["steps"]]
+    assert any("validation.spend_run preflight" in r for r in pre)
 
 
 def test_gate6_r2_credentials_are_not_github_secrets():
