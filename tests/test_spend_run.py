@@ -452,3 +452,15 @@ def test_economics_refuses_zero_rows():
 def test_actual_cost_rounds_up():
     assert spend_run.actual_cost_usd(1000, Decimal("0.5")) == Decimal("0.01")
     assert spend_run.actual_cost_usd(80_000, Decimal("0.5")) == Decimal("0.02")
+
+
+def test_preflight_refuses_a_non_exclusive_gpu_list():
+    # Measured 2026-08-25: the created endpoint listed A5000 and L4
+    # beside the 3090 — a scheduler could allocate the wrong card and
+    # bill its boot before Phase 14 refuses it.
+    mixed = _endpoint(gpus=["NVIDIA RTX A5000", "NVIDIA L4",
+                            "NVIDIA GeForce RTX 3090"])
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _preflight(FakeClient(endpoints=[mixed]))
+    assert exc.value.code == "endpoint-gpu-list-not-exclusive"
+    assert "NVIDIA L4" in exc.value.message

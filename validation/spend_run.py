@@ -187,6 +187,14 @@ def preflight(
             "endpoint-not-3090",
             f"endpoint gpuTypeIds {gpu_ids} does not include the target",
         )
+    extras = [g for g in gpu_ids if g != admission.TARGET_GPU]
+    if extras:
+        raise SpendStop(
+            "endpoint-gpu-list-not-exclusive",
+            f"endpoint can also allocate {extras} — the scheduler may hand "
+            "the job a non-3090, which fails the success gate AFTER paying "
+            "for the boot; restrict the endpoint to the 3090 only",
+        )
 
     # 4. R2 env NAMES present on the endpoint (values never printed).
     env_obj = endpoint.get("env") or {}
