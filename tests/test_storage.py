@@ -95,6 +95,25 @@ def test_http_endpoint_is_a_typed_misconfiguration(monkeypatch):
     assert exc.value.code == "r2-misconfigured"
 
 
+def test_read_failure_carries_the_servers_error_code(monkeypatch, tmp_path):
+    # Run #24 (2026-08-25) said only "ClientError" — absent object and
+    # denied access were indistinguishable. The S3 error code is server
+    # metadata, safe to print, and settles it.
+    _configure(monkeypatch)
+
+    class CodedError(Exception):
+        def __init__(self):
+            super().__init__("boom")
+            self.response = {"Error": {"Code": "404", "Message": "Not Found"}}
+
+    fake = FakeS3(head_error=CodedError())
+    monkeypatch.setattr(storage, "client", lambda: fake)
+    with pytest.raises(storage.StorageError) as exc:
+        storage.download("validation/input.jpg", str(tmp_path / "in.bin"))
+    assert exc.value.code == "r2-read-failed"
+    assert "CodedError(404)" in exc.value.message
+
+
 def test_download_bounds_size_before_body(monkeypatch, tmp_path):
     _configure(monkeypatch)
     fake = FakeS3(size=contract.MAX_INPUT_BYTES + 1)

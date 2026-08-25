@@ -89,6 +89,22 @@ def client():
         ) from exc
 
 
+def _error_name(exc) -> str:
+    """Class name, plus the S3 error code when the server sent one.
+
+    "ClientError" alone left run #24 (2026-08-25) unable to say whether
+    the input object was absent (404/NoSuchKey) or unreadable
+    (AccessDenied). The server's error code is metadata, not a value —
+    safe to print, and it makes the stop self-diagnosing.
+    """
+    code = None
+    response = getattr(exc, "response", None)
+    if isinstance(response, dict):
+        code = (response.get("Error") or {}).get("Code")
+    name = type(exc).__name__
+    return f"{name}({code})" if code else name
+
+
 def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES) -> int:
     """Fetch one object by reference, bounding its size BEFORE the body.
 
@@ -101,7 +117,7 @@ def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES
         size = int(head["ContentLength"])
     except Exception as exc:
         raise StorageError(
-            "r2-read-failed", f"could not stat input object: {type(exc).__name__}"
+            "r2-read-failed", f"could not stat input object: {_error_name(exc)}"
         ) from exc
     if size > max_bytes:
         raise contract.ContractError(
@@ -112,7 +128,7 @@ def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES
         s3.download_file(BUCKET, key, dest_path)
     except Exception as exc:
         raise StorageError(
-            "r2-read-failed", f"could not read input object: {type(exc).__name__}"
+            "r2-read-failed", f"could not read input object: {_error_name(exc)}"
         ) from exc
     return size
 
@@ -124,6 +140,6 @@ def upload(src_path: str, key: str) -> int:
         s3.upload_file(src_path, BUCKET, key)
     except Exception as exc:
         raise StorageError(
-            "r2-write-failed", f"could not write output object: {type(exc).__name__}"
+            "r2-write-failed", f"could not write output object: {_error_name(exc)}"
         ) from exc
     return size
