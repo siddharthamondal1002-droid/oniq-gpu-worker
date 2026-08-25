@@ -1,0 +1,241 @@
+# GPU validation — the ONLY workflow that can hold the RunPod credential,
+# and therefore the one whose shape is load-bearing. The gates, in order
+# of how much they matter (worker-ci's harness tests verify them by
+# parsing this file, not by reading it):
+#
+# 1. workflow_dispatch ONLY. No push, no schedule, no pull_request:
+#    a merge must never be able to rent a GPU.
+# 2. Default mode is read-only discovery and costs $0.00. Spending
+#    additionally requires typing SPEND into an input.
+# 3. cancel-in-progress: false — cancelling a run that holds a worker is
+#    precisely how an orphan is created; the cleanup step never runs.
+# 4. The orphan sweep runs if: always() and FAILS the run when it cannot
+#    confirm zero: a sweep that cannot reach the API reports None, never
+#    0 — "cannot confirm terminated" and "confirmed terminated" are
+#    never the same value.
+# 5. CI cannot create an endpoint, only verify one: min_workers=0 /
+#    max_workers=1 is checked against the live endpoint before any job is
+#    sent, and refused otherwise.
+# 6. R2 credentials are NOT GitHub secrets. They live in the RunPod
+#    endpoint's environment; CI submits jobs and never touches the bucket.
+#
+# The spend job also requires the gpu-spend environment, which the owner
+# configures with required reviewers — that reviewer click is the
+# "gpu-spend approval". No implicit approval, no automatic approval.
+
+name: gpu-validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "discover = read-only, $0. spend = one real job."
+        type: choice
+        options: [discover, spend]
+        default: discover
+      spend:
+        description: "Type SPEND (exactly) to allow the spend job."
+        type: string
+        default: ""
+      endpoint_id:
+        description: "Existing serverless endpoint id (spend mode only)."
+        type: string
+        default: ""
+      test_input_key:
+        description: "R2 key of the bounded test input (spend mode only)."
+        type: string
+        default: ""
+      test_output_key:
+        description: "R2 key for the test output (spend mode only)."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-validation
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    name: "Phase 4-7: read-only discovery, $0"
+    runs-on: ubuntu-latest
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Credential present (owner action if not)
+        run: |
+          if [ -z "$RUNPOD_API_KEY" ]; then
+            echo "::error::RUNPOD_API_KEY secret is not configured on this repository. Adding it is an owner action (repo Settings -> Secrets and variables -> Actions). Discovery cannot run without it; nothing was spent."
+            exit 1
+          fi
+          echo "credential present"
+
+      - name: Discover — RAW first, parsed second
+        run: python runpod_client.py discover --json discovery.json
+
+      - name: "Phase 6-7: live 3090 figures and the financial gate"
+        run: |
+          python - <<'EOF'
+          import json
+          from validation import admission
+
+          report = json.load(open("discovery.json"))
+          catalogue = report["gpu_catalogue_parsed"]
+
+          try:
+              target = admission.require_available(catalogue)
+          except admission.UnavailableGpu as exc:
+              print("STOP:", exc)
+              raise SystemExit(1)
+
+          price = target["secure_price"]
+          reservation = admission.admit(
+              gpu_name=target["display_name"],
+              vram_gb=target["memory_gb"],
+              runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+              price_per_hour=price,
+          )
+          print("LIVE target :", target["display_name"], f"{target['memory_gb']}GB")
+          print("LIVE price  : $", price, "/h (secure cloud) — quoted now, not historical")
+          print("Reservation : $", reservation.reserved_usd,
+                f"for the full {reservation.runtime_seconds}s ceiling")
+          print("Job cap     : $", admission.JOB_CAP_USD, "-> ADMITTED")
+          EOF
+
+      - name: Keep the raw payloads
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discovery
+          path: discovery.json
+          if-no-files-found: ignore
+
+  spend:
+    name: "Phase 9-12: one real job (SPEND + gpu-spend approval)"
+    needs: discover
+    if: inputs.mode == 'spend' && inputs.spend == 'SPEND'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      ENDPOINT_ID: ${{ inputs.endpoint_id }}
+      TEST_INPUT_KEY: ${{ inputs.test_input_key }}
+      TEST_OUTPUT_KEY: ${{ inputs.test_output_key }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "Phase 9: pre-spend recheck, then ONE job"
+        run: |
+          python - <<'EOF'
+          import json, os, time
+          import runpod_client as rp
+          from validation import admission
+
+          # The literal-input half of the gate; the environment approval
+          # already happened or this job would not be running.
+          admission.check_spend_gate("${{ inputs.spend }}", True)
+
+          endpoint_id = os.environ["ENDPOINT_ID"]
+          if not endpoint_id or not os.environ["TEST_INPUT_KEY"] or not os.environ["TEST_OUTPUT_KEY"]:
+              print("STOP: endpoint_id/test keys not provided")
+              raise SystemExit(1)
+
+          # Re-query everything immediately before provisioning.
+          _, catalogue = rp.gpu_catalogue()
+          target = admission.require_available(catalogue)
+          reservation = admission.admit(
+              gpu_name=target["display_name"],
+              vram_gb=target["memory_gb"],
+              runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+              price_per_hour=target["secure_price"],
+          )
+          print("recheck price $", target["secure_price"], "/h; reservation $", reservation.reserved_usd)
+
+          _, ep_raw = rp.get_endpoint(endpoint_id)
+          ep = rp.parse_endpoint(ep_raw)
+          admission.check_endpoint_config(ep["min_workers"], ep["max_workers"])
+          print("endpoint verified: min", ep["min_workers"], "max", ep["max_workers"])
+
+          _, submitted = rp.submit_job(endpoint_id, {
+              "op": "image_preprocess",
+              "input_key": os.environ["TEST_INPUT_KEY"],
+              "output_key": os.environ["TEST_OUTPUT_KEY"],
+          })
+          job_id = submitted["id"]
+          print("job submitted:", job_id)
+
+          deadline = time.monotonic() + admission.RUNTIME_CEILING_SECONDS
+          status = None
+          while time.monotonic() < deadline:
+              raw, status = rp.job_status(endpoint_id, job_id)
+              if status.get("status") in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
+                  break
+              time.sleep(5)
+          else:
+              rp.cancel_job(endpoint_id, job_id)
+              print("STOP: job exceeded the runtime ceiling; cancelled")
+              raise SystemExit(1)
+
+          print("=== RAW status ===")
+          print(json.dumps(status, indent=1))
+          if status.get("status") != "COMPLETED":
+              raise SystemExit(1)
+
+          out = status.get("output") or {}
+          assert out.get("ok") is True, out
+          assert out.get("device") == "cuda", "HTTP 200 alone is insufficient: device must be cuda"
+          assert out.get("gpu_name"), "GPU name missing"
+          assert out.get("vram_peak_mb") is not None, "peak VRAM missing"
+          print("GPU:", out["gpu_name"], "| VRAM peak MB:", out["vram_peak_mb"])
+
+          exec_ms = status.get("executionTime")
+          if exec_ms is not None:
+              from decimal import Decimal
+              billed = admission.reserve_usd(
+                  target["secure_price"], max(1, int(exec_ms / 1000))
+              )
+              print("executionTime ms:", exec_ms, "-> cost-at-price $", billed)
+              assert billed <= reservation.reserved_usd, "actual exceeded reservation"
+          rp.purge_queue(endpoint_id)
+          EOF
+
+  sweep:
+    name: "orphan sweep — None is never 0"
+    needs: [discover, spend]
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Sweep
+        run: |
+          python - <<'EOF'
+          import runpod_client as rp
+          result = None
+          try:
+              result = rp.sweep_orphans()
+          except Exception as exc:
+              print("sweep raised:", type(exc).__name__)
+          if result is None:
+              print("STOP: cannot confirm zero orphans (sweep reports None, never 0)")
+              raise SystemExit(1)
+          print("pods:", result["pods"], "endpoint min workers:", result["endpoint_min_workers"])
+          if result["pods"] != 0 or result["endpoint_min_workers"] != 0:
+              print("ORPHAN ALARM: something can still bill")
+              raise SystemExit(1)
+          print("orphan count = 0, confirmed")
+          EOF

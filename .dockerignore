@@ -1,0 +1,8 @@
+# Second lock: deny everything, then admit exactly what the Dockerfile
+# COPYs. The first lock is that COPY names the five files individually.
+*
+!requirements.txt
+!contract.py
+!preprocess.py
+!storage.py
+!handler.py

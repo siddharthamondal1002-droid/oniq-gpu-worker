@@ -1,0 +1,118 @@
+# Worker CI — builds and proves the artifact WITHOUT CUDA hardware and
+# WITHOUT any provider credential. This workflow holds no secrets: it can
+# run on every push precisely because nothing it does can spend money.
+# The workflow that can spend is gpu-validation.yml, and that one is
+# workflow_dispatch-only.
+
+name: worker-ci
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (uid 10001, read-only /app)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Secret and shell-surface scan
+        run: |
+          set -eu
+          FILES="contract.py preprocess.py storage.py handler.py runpod_client.py validation/admission.py"
+          for pattern in 'eval(' 'exec(' 'subprocess' 'os.system' 'pickle' 'shell=True'; do
+            if grep -Fn "$pattern" $FILES; then
+              echo "FORBIDDEN CALL FOUND: $pattern"; exit 1
+            fi
+          done
+          if grep -RInE '(AKIA[0-9A-Z]{16}|-----BEGIN|api_key\s*=\s*["'"'"'][A-Za-z0-9]{16,})' $FILES; then
+            echo "CREDENTIAL-SHAPED STRING FOUND"; exit 1
+          fi
+          echo "scan clean"
+
+      - name: Dockerfile shape gates
+        run: |
+          set -eu
+          if grep -En '^\s*ARG\b' Dockerfile; then echo "ARG found"; exit 1; fi
+          grep -Eq '^CMD \["python3", "-u", "handler.py"\]$' Dockerfile
+          grep -Eq '^USER oniq:oniq$' Dockerfile
+          if grep -En 'COPY \. ' Dockerfile; then echo "COPY . found"; exit 1; fi
+          echo "Dockerfile gates hold"
+
+      - name: Build the uid-10001 read-only rig
+        run: |
+          set -eu
+          sudo groupadd --gid 10001 oniq
+          sudo useradd --uid 10001 --gid 10001 --create-home --home-dir /home/oniq oniq
+          sudo mkdir -p /opt/app
+          sudo cp -r . /opt/app/
+          sudo chown -R root:root /opt/app
+          sudo chmod -R a+rX,go-w /opt/app
+          python -m venv /opt/venv
+          /opt/venv/bin/pip install --quiet -r requirements.txt -r requirements-dev.txt
+          sudo chown -R root:root /opt/venv
+
+      - name: Worker + harness tests as uid 10001
+        run: |
+          set -eu
+          sudo -u oniq env HOME=/home/oniq PYTHONDONTWRITEBYTECODE=1 \
+            /opt/venv/bin/python -m pytest /opt/app/tests -q --rootdir=/opt/app -p no:cacheprovider
+          if sudo -u oniq sh -c 'touch /opt/app/probe 2>/dev/null'; then
+            echo "runtime user can WRITE to /app — rig invalid"; exit 1
+          fi
+          if find /opt/app -name '__pycache__' | grep -q .; then
+            echo "__pycache__ written into /app"; exit 1
+          fi
+          echo "39-suite rig holds: tests pass, /app read-only, no bytecode"
+
+  image:
+    name: docker build + in-image proofs (no CUDA gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t oniq-gpu-worker:ci .
+
+      - name: torch is the cu121 build
+        run: |
+          docker run --rm oniq-gpu-worker:ci python3 -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+
+      - name: CUDA availability is reported, never gated here
+        run: |
+          # On a CPU runner is_available() is FALSE whatever the image
+          # contains; the answer carries no information about the image
+          # and must not be read as a failed gate. The meaningful check
+          # runs on the rented card, in gpu-validation.yml.
+          docker run --rm oniq-gpu-worker:ci python3 -c "import torch; print('cuda available on this runner:', torch.cuda.is_available())"
+
+      - name: Imports and serverless entrypoint
+        run: |
+          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler; import runpod; assert hasattr(runpod.serverless, 'start'); print('imports ok')"
+
+      - name: Runtime user is uid 10001 and /app is not writable
+        run: |
+          test "$(docker run --rm oniq-gpu-worker:ci id -u)" = "10001"
+          docker run --rm oniq-gpu-worker:ci python3 -c "
+          import os
+          assert not os.access('/app', os.W_OK), '/app writable by runtime user'
+          print('uid 10001, /app read-only')
+          "
+
+      - name: Image carries only the five shipped files
+        run: |
+          docker run --rm oniq-gpu-worker:ci python3 -c "
+          import os
+          found = sorted(os.listdir('/app'))
+          expect = ['contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py']
+          assert found == expect, found
+          print('payload exact:', found)
+          "
