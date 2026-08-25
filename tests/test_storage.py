@@ -73,6 +73,28 @@ def test_client_constructs_when_configured(monkeypatch):
     assert s3.meta.endpoint_url.startswith("https://example.r2")
 
 
+def test_schemeless_endpoint_is_a_typed_misconfiguration(monkeypatch):
+    # Regression for the first live job (2026-08-25, ea308ecd…-u1): a
+    # scheme-less R2_S3_ENDPOINT made boto3 raise a bare ValueError at
+    # client construction, which surfaced as unexpected-exception. The
+    # stop must name the variable — and never echo its value.
+    _configure(monkeypatch)
+    monkeypatch.setenv("R2_S3_ENDPOINT", "accid.r2.cloudflarestorage.com")
+    with pytest.raises(storage.StorageError) as exc:
+        storage.client()
+    assert exc.value.code == "r2-misconfigured"
+    assert "R2_S3_ENDPOINT" in exc.value.message
+    assert "accid" not in exc.value.message
+
+
+def test_http_endpoint_is_a_typed_misconfiguration(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setenv("R2_S3_ENDPOINT", "http://accid.r2.cloudflarestorage.com")
+    with pytest.raises(storage.StorageError) as exc:
+        storage.client()
+    assert exc.value.code == "r2-misconfigured"
+
+
 def test_download_bounds_size_before_body(monkeypatch, tmp_path):
     _configure(monkeypatch)
     fake = FakeS3(size=contract.MAX_INPUT_BYTES + 1)

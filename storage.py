@@ -52,17 +52,41 @@ def require_configured() -> None:
 
 
 def client():
-    """Construct the R2 S3 client. Fails closed when unconfigured."""
+    """Construct the R2 S3 client. Fails closed when unconfigured.
+
+    Misconfiguration names itself: the first live job (2026-08-25,
+    ea308ecd…-u1) died as an anonymous unexpected-exception/ValueError
+    because boto3 refuses a scheme-less endpoint URL at construction and
+    construction was unwrapped. The message names the VARIABLE, never
+    its value.
+    """
     require_configured()
+    from urllib.parse import urlparse
+
+    endpoint = os.environ["R2_S3_ENDPOINT"]
+    parsed = urlparse(endpoint)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise StorageError(
+            "r2-misconfigured",
+            "R2_S3_ENDPOINT is not a valid https:// URL — set it to the "
+            "full S3 API endpoint from the Cloudflare R2 dashboard, "
+            "including the https:// scheme",
+        )
     import boto3
 
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["R2_S3_ENDPOINT"],
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-        region_name="auto",
-    )
+    try:
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+            region_name="auto",
+        )
+    except Exception as exc:
+        raise StorageError(
+            "r2-misconfigured",
+            f"could not construct the R2 client: {type(exc).__name__}",
+        ) from exc
 
 
 def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES) -> int:
