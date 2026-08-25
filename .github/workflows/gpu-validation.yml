@@ -150,6 +150,12 @@ jobs:
       GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || vars.GPU_TEST_INPUT_REF }}
       GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
       THROUGH_PHASE: ${{ inputs.through_phase }}
+      # Owner directive 2026-08-25: required reviewers are not offered on
+      # this private repository's GitHub plan (the protection-rules
+      # section does not render), so the owner's authenticated SPEND
+      # dispatch is the approval for the authorized single job. Delete
+      # this line to restore the recorded-approval evidence requirement.
+      APPROVAL_MODE: owner-dispatch
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

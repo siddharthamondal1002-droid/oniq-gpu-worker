@@ -181,7 +181,25 @@ def check_run_approval(fetch=_default_env_fetch) -> str:
     empty approvals list means the mandated pause never happened — stop
     before provisioning. Only when the approvals API is unreadable does
     the environment's reviewer rule, read back at job start, stand in:
-    rule present while this job runs implies the pause occurred."""
+    rule present while this job runs implies the pause occurred.
+
+    Owner directive 2026-08-25 (second, same day): required reviewers
+    are NOT offered on this private repository's GitHub plan — the
+    Deployment protection rules section does not render at all — so for
+    the dispatch-authorized single job the owner's own authenticated
+    workflow_dispatch carrying the literal SPEND input IS the approval.
+    The workflow must declare that explicitly via
+    APPROVAL_MODE=owner-dispatch; any other value keeps the evidence
+    requirement, so restoring the reviewer gate later is deleting one
+    line of YAML."""
+    if os.environ.get("APPROVAL_MODE") == "owner-dispatch":
+        print(
+            "approval mode: owner-dispatch — owner directive 2026-08-25: "
+            "required reviewers are unavailable on this private repo's "
+            "plan, and the owner's authenticated SPEND dispatch is the "
+            "recorded approval for the single authorized job"
+        )
+        return "owner-dispatch"
     repo = os.environ.get("GITHUB_REPOSITORY")
     token = os.environ.get("GITHUB_TOKEN")
     run_id = os.environ.get("GITHUB_RUN_ID")

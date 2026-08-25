@@ -187,6 +187,31 @@ def test_run_approval_passes_on_a_recorded_approval():
     assert spend_run.check_run_approval(_approved) == "the-owner"
 
 
+def test_owner_dispatch_mode_is_the_recorded_approval(monkeypatch):
+    # Owner directive 2026-08-25: required reviewers do not render on
+    # this private repo's plan; the owner's authenticated SPEND dispatch
+    # is the approval — declared explicitly, never inferred, no API call.
+    monkeypatch.setenv("APPROVAL_MODE", "owner-dispatch")
+
+    def explode(url, token):
+        raise AssertionError("owner-dispatch mode must not call any API")
+
+    assert spend_run.check_run_approval(explode) == "owner-dispatch"
+
+
+def test_any_other_approval_mode_keeps_the_evidence_requirement(monkeypatch):
+    monkeypatch.setenv("APPROVAL_MODE", "reviewer")
+
+    def fetch(url, token):
+        if url.endswith("/approvals"):
+            return 200, []
+        return _env_ok(url, token)
+
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_run_approval(fetch)
+    assert exc.value.code == "approval-not-recorded"
+
+
 def test_run_approval_refuses_a_readable_empty_approvals_list():
     # GitHub waves a job straight through an unprotected environment, so
     # a readable-but-empty approvals list means the mandated pause never
