@@ -84,6 +84,58 @@ def test_graphql_errors_surface_as_api_error(monkeypatch):
     assert "Cannot query field X" in str(exc.value)
 
 
+class _RecordingTransport:
+    """Scripted responses keyed by call order; records every request."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, url, *, method="GET", body=None, timeout=30, bearer=True):
+        self.calls.append({"url": url, "method": method, "bearer": bearer})
+        return self.responses.pop(0)
+
+
+def test_catalogue_falls_back_to_param_auth_on_403(monkeypatch):
+    # Measured 2026-08-25: Bearer -> 403 while the key is valid.
+    monkeypatch.setenv("RUNPOD_API_KEY", "rpa_FAKE_KEY")
+    transport = _RecordingTransport(
+        [(403, "forbidden"), (200, json.dumps(GPU_TYPES_FIXTURE))]
+    )
+    monkeypatch.setattr(rp, "_request", transport)
+    _, parsed = rp.gpu_catalogue()
+    assert parsed[0]["id"] == "NVIDIA GeForce RTX 3090"
+    assert transport.calls[1]["bearer"] is False
+    assert transport.calls[1]["url"].startswith(rp.GRAPHQL_URL + "?api_key=")
+
+
+def test_catalogue_falls_back_to_rest_gputypes(monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", "rpa_FAKE_KEY")
+    rest_body = json.dumps(GPU_TYPES_FIXTURE["data"]["gpuTypes"])
+    transport = _RecordingTransport(
+        [(403, "forbidden"), (403, "forbidden"), (200, rest_body)]
+    )
+    monkeypatch.setattr(rp, "_request", transport)
+    raw, parsed = rp.gpu_catalogue()
+    assert raw == rest_body  # the answering source's bytes, verbatim
+    assert transport.calls[2]["url"] == f"{rp.REST_BASE}/gputypes"
+    assert parsed[0]["display_name"] == "RTX 3090"
+
+
+def test_catalogue_total_failure_names_the_permission_fix(monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", "rpa_FAKE_KEY")
+    transport = _RecordingTransport(
+        [(403, "gql-no"), (403, "gql-no"), (404, "no such route")]
+    )
+    monkeypatch.setattr(rp, "_request", transport)
+    with pytest.raises(rp.RunPodApiError) as exc:
+        rp.gpu_catalogue()
+    text = str(exc.value)
+    assert "403" in text and "404" in text
+    assert "GraphQL permission" in text
+    assert "rpa_FAKE_KEY" not in text  # the key never reaches an error
+
+
 def test_sweep_reports_none_when_api_unreachable(monkeypatch):
     def unreachable():
         raise rp.RunPodApiError("request failed: URLError")

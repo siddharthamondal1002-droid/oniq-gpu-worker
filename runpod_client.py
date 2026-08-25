@@ -60,12 +60,11 @@ def _api_key() -> str:
     return key
 
 
-def _request(url: str, *, method: str = "GET", body=None, timeout: int = 30):
+def _request(url: str, *, method: str = "GET", body=None, timeout: int = 30, bearer: bool = True):
     payload = None
-    headers = {
-        "Authorization": f"Bearer {_api_key()}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if bearer:
+        headers["Authorization"] = f"Bearer {_api_key()}"
     if body is not None:
         payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=payload, headers=headers, method=method)
@@ -91,19 +90,53 @@ def _get_json(url: str):
 
 
 def gpu_catalogue():
-    """The GPU catalogue via GraphQL. Returns (raw_text, parsed_list)."""
-    status, raw = _request(
-        GRAPHQL_URL, method="POST", body={"query": GPU_CATALOGUE_QUERY}
-    )
-    if status != 200:
-        raise RunPodApiError(f"graphql gpuTypes -> {status}")
-    doc = json.loads(raw)
-    if doc.get("errors"):
-        raise RunPodApiError(
-            "graphql gpuTypes returned errors: "
-            + "; ".join(e.get("message", "?") for e in doc["errors"])
+    """The GPU catalogue. Returns (raw_text, parsed_list).
+
+    Three auth/transport attempts, because RunPod keys differ in what
+    they may call (measured 2026-08-25: a key that lists pods over REST
+    got 403 from GraphQL — restricted keys can lack GraphQL permission):
+    GraphQL with Bearer auth, GraphQL with the api_key query parameter,
+    then REST /gputypes. Whichever source answers, its raw bytes come
+    back verbatim and the parser is judged against them. Error text
+    carries response-body snippets (bodies never contain the key); the
+    query-parameter URL is never printed anywhere.
+    """
+    body = {"query": GPU_CATALOGUE_QUERY}
+    status, raw = _request(GRAPHQL_URL, method="POST", body=body)
+    if status in (401, 403):
+        status, raw = _request(
+            f"{GRAPHQL_URL}?api_key={_api_key()}",
+            method="POST",
+            body=body,
+            bearer=False,
         )
-    return raw, [parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
+    if status == 200:
+        doc = json.loads(raw)
+        if doc.get("errors"):
+            raise RunPodApiError(
+                "graphql gpuTypes returned errors: "
+                + "; ".join(e.get("message", "?") for e in doc["errors"])
+            )
+        return raw, [parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
+
+    graphql_status, graphql_raw = status, raw
+    rest_status, rest_raw = _request(f"{REST_BASE}/gputypes")
+    if rest_status == 200:
+        doc = json.loads(rest_raw)
+        if isinstance(doc, list):
+            entries = doc
+        else:
+            entries = doc.get("gpuTypes") or doc.get("data") or []
+        return rest_raw, [parse_gpu_type(g) for g in entries]
+
+    raise RunPodApiError(
+        "gpu catalogue unavailable — "
+        f"graphql -> {graphql_status} (body: {graphql_raw[:200]!r}); "
+        f"rest /gputypes -> {rest_status} (body: {rest_raw[:200]!r}). "
+        "A key that works on REST but not GraphQL lacks GraphQL "
+        "permission — an owner toggle on the API key in the RunPod "
+        "console."
+    )
 
 
 def parse_gpu_type(g: dict) -> dict:
