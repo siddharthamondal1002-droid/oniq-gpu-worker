@@ -60,8 +60,16 @@ class SpendStop(Exception):
 
 
 def redact(obj):
-    """Deep-copy with every secret-shaped key's value blanked."""
+    """Deep-copy with every secret-shaped key's value blanked. Handles
+    both {NAME: value} maps and RunPod's [{key: NAME, value: ...}] pair
+    form — in pair form the secret hides under a field literally named
+    'value', which name-based blanking alone would leak."""
     if isinstance(obj, dict):
+        if "key" in obj and "value" in obj:
+            pair = dict(obj)
+            if any(m in str(pair.get("key")).upper() for m in _REDACT_MARKERS):
+                pair["value"] = "<redacted>"
+            return pair
         out = {}
         for key, value in obj.items():
             upper = str(key).upper()
@@ -208,14 +216,35 @@ def preflight(
     # never printed) — RunPod may store env on either object.
     env_names = _env_names(endpoint.get("env"))
     template_id = endpoint.get("templateId")
+    if not (env_names >= set(R2_ENV_REQUIRED)):
+        # The endpoints LIST is often a summary; the single GET may
+        # carry the env the list omits.
+        try:
+            _, full = client.get_endpoint(parsed["id"])
+            env_names |= _env_names((full or {}).get("env"))
+            _show("endpoint (single GET, redacted)", full)
+        except Exception as exc:
+            print("single-endpoint fetch failed:", exc)
     if not (env_names >= set(R2_ENV_REQUIRED)) and template_id:
         try:
-            raw_tpl, template = client.get_template(template_id)
-        except Exception as exc:
-            print("template fetch failed:", type(exc).__name__)
-        else:
+            _, template = client.get_template(template_id)
             _show("template (raw, redacted)", template)
             env_names |= _env_names(template.get("env"))
+        except Exception as exc:
+            print("template REST fetch failed:", exc)
+        if not (env_names >= set(R2_ENV_REQUIRED)):
+            graphql_fn = getattr(client, "template_env_names_graphql", None)
+            graphql_names = None
+            if callable(graphql_fn):
+                try:
+                    graphql_names = graphql_fn(template_id)
+                except Exception as exc:
+                    print("template GraphQL fetch failed:", type(exc).__name__)
+            if graphql_names is None:
+                print("template GraphQL env read: unknown")
+            else:
+                print("template GraphQL env names:", sorted(graphql_names))
+                env_names |= graphql_names
     missing = [name for name in R2_ENV_REQUIRED if name not in env_names]
     if missing:
         raise SpendStop(

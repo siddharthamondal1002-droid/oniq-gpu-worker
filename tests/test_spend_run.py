@@ -492,3 +492,34 @@ def test_preflight_still_stops_when_neither_carries_r2():
     with pytest.raises(spend_run.SpendStop) as exc:
         _preflight(client)
     assert exc.value.code == "r2-env-missing"
+
+
+def test_redact_blanks_pair_form_secret_values():
+    pair = {"key": "R2_SECRET_ACCESS_KEY", "value": "LEAKME"}
+    red = spend_run.redact({"env": [pair, {"key": "HOME", "value": "/x"}]})
+    assert red["env"][0]["value"] == "<redacted>"
+    assert red["env"][1]["value"] == "/x"
+
+
+def test_preflight_reads_env_from_single_endpoint_get():
+    ep = _endpoint(env={})
+    client = FakeClient(endpoints=[ep])
+    client.get_endpoint = lambda eid: ("{}", {"id": eid, "env": {
+        "R2_S3_ENDPOINT": "https://x", "R2_ACCESS_KEY_ID": "i",
+        "R2_SECRET_ACCESS_KEY": "s"}})
+    facts = _preflight(client)
+    assert facts["endpoint_id"] == "ep-123"
+
+
+def test_preflight_reads_env_names_from_graphql_template():
+    ep = _endpoint(env={})
+    ep["templateId"] = "tpl-1"
+    client = FakeClient(endpoints=[ep])
+    client.get_endpoint = lambda eid: ("{}", {"id": eid})
+    def _no_rest_template(tid):
+        raise RuntimeError("404")
+    client.get_template = _no_rest_template
+    client.template_env_names_graphql = lambda tid: {
+        "R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"}
+    facts = _preflight(client)
+    assert facts["endpoint_id"] == "ep-123"

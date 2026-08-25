@@ -195,6 +195,25 @@ def get_template(template_id: str):
     return _get_json(f"{REST_BASE}/templates/{template_id}")
 
 
+def template_env_names_graphql(template_id: str):
+    """Env var NAMES on a template, via GraphQL (values are fetched by
+    the API but only names ever leave this function). Returns a set, or
+    None when the answer is unknown — never an empty set for 'could not
+    look'."""
+    query = 'query { myself { podTemplates { id env { key value } } } }'
+    try:
+        status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+        if status != 200:
+            return None
+        doc = json.loads(raw)
+        for tpl in ((doc.get("data") or {}).get("myself") or {}).get("podTemplates") or []:
+            if tpl.get("id") == template_id:
+                return {e.get("key") for e in tpl.get("env") or [] if isinstance(e, dict)}
+        return None
+    except (RunPodApiError, json.JSONDecodeError):
+        return None
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),
