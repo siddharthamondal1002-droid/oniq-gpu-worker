@@ -51,13 +51,13 @@ on:
         type: string
         default: ""
       test_input_key:
-        description: "Overrides the GPU_TEST_INPUT_REF repository variable."
+        description: "R2 key of the test input image in the oniq-gpu bucket."
         type: string
-        default: ""
+        default: "validation/input.jpg"
       test_output_prefix:
-        description: "Overrides the GPU_TEST_OUTPUT_PREFIX repository variable."
+        description: "R2 key prefix for test outputs."
         type: string
-        default: ""
+        default: "validation/out"
 
 permissions:
   contents: read
