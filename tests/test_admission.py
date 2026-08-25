@@ -167,40 +167,49 @@ def test_target_is_the_3090_and_allow_list_is_closed():
 # ---------------------------------------------------------------- available
 
 
-def _gpu(name, mem, secure=True, price="0.31"):
+def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None):
     return {
-        "display_name": name,
+        "id": gpu_id,
+        "display_name": display or gpu_id,
         "memory_gb": mem,
         "secure_cloud": secure,
         "secure_price": price,
+        "on_demand_price": on_demand,
     }
 
 
 def test_available_target_is_returned():
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24)]
+    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, display="RTX 3090")]
     assert admission.require_available(cat)["memory_gb"] == 24
 
 
 def test_missing_target_raises_with_alternatives():
     cat = [
-        _gpu("NVIDIA RTX 4090", 24, price="0.40"),
+        _gpu("NVIDIA GeForce RTX 4090", 24, price="0.40"),
         _gpu("Small Card", 8, price="0.10"),
     ]
     with pytest.raises(admission.UnavailableGpu) as exc:
         admission.require_available(cat)
-    alts = [a["display_name"] for a in exc.value.alternatives]
-    assert alts == ["NVIDIA RTX 4090"]  # priced, >=24GB only
+    alts = [a["id"] for a in exc.value.alternatives]
+    assert alts == ["NVIDIA GeForce RTX 4090"]  # allocatable, >=24GB only
 
 
 def test_unpriced_target_is_unavailable_never_free():
-    # The A5000's exact state: listed, secureCloud true, price null.
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, price=None)]
+    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, price=None, on_demand=None)]
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(cat)
+
+
+def test_list_price_without_capacity_is_unavailable():
+    # The A5000's exact state: a securePrice in the catalogue while
+    # lowestPrice is null — a list price is not capacity.
+    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, price="0.27", on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
 
 def test_unavailable_never_substitutes():
-    cat = [_gpu("NVIDIA RTX 4090", 24, price="0.40")]
+    cat = [_gpu("NVIDIA GeForce RTX 4090", 24, price="0.40")]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)  # a 4090 in hand changes nothing
 
@@ -209,6 +218,59 @@ def test_community_only_target_is_not_secure_capacity():
     cat = [_gpu("NVIDIA GeForce RTX 3090", 24, secure=False)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
+
+
+def test_matching_is_on_id_never_display_name():
+    # displayName carries the short name in real payloads; a catalogue
+    # whose ids are short names must NOT satisfy the target.
+    cat = [_gpu("RTX 3090", 24, display="NVIDIA GeForce RTX 3090")]
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(cat)
+
+
+# ------------------------------------------------- real payload, 2026-08-25
+
+
+def _real_catalogue():
+    import json
+    import os
+
+    import runpod_client as rp
+
+    path = os.path.join(
+        os.path.dirname(__file__), "fixtures", "gpu_types_actual.json"
+    )
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    return [rp.parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
+
+
+def test_real_payload_3090_is_available_on_secure_cloud():
+    entry = admission.require_available(_real_catalogue())
+    assert entry["id"] == "NVIDIA GeForce RTX 3090"
+    assert entry["memory_gb"] == 24
+    assert entry["secure_price"] == 0.5
+
+
+def test_real_payload_admits_the_3090_at_thirteen_cents():
+    # Live secure price 0.5 $/h: CEIL(0.5 * 900 / 3600, $0.01) = $0.13,
+    # under the $0.50 job cap. The reservation math on real numbers.
+    entry = admission.require_available(_real_catalogue())
+    res = admission.admit(
+        gpu_name=entry["id"],
+        vram_gb=entry["memory_gb"],
+        runtime_seconds=900,
+        price_per_hour=entry["secure_price"],
+    )
+    assert res.reserved_usd == Decimal("0.13")
+    assert res.reserved_usd <= admission.JOB_CAP_USD
+
+
+def test_real_payload_a5000_is_still_not_provisionable():
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(
+            _real_catalogue(), target="NVIDIA RTX A5000"
+        )
 
 
 # ---------------------------------------------------------------- endpoint

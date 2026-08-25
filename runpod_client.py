@@ -123,9 +123,14 @@ def parse_gpu_type(g: dict) -> dict:
     }
 
 
-def find_gpu(parsed_catalogue, display_name: str):
+def find_gpu(parsed_catalogue, gpu_id: str):
+    """Match on the `id` field, which carries the canonical full name
+    ("NVIDIA GeForce RTX 3090") and is what endpoint gpuTypeIds use.
+    `displayName` is the short marketing name ("RTX 3090") — the parser
+    originally assumed the opposite, and the 2026-08-25 raw payload in
+    tests/fixtures is the regression evidence."""
     for gpu in parsed_catalogue:
-        if gpu["display_name"] == display_name:
+        if gpu["id"] == gpu_id:
             return gpu
     return None
 

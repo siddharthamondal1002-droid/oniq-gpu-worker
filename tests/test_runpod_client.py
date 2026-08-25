@@ -1,63 +1,56 @@
 import json
+import os
 
 import pytest
 
 import runpod_client as rp
 
+# RunPod's actual bytes, captured 2026-08-25 through the read-only
+# discovery channel. The parser is judged against these, per the rule
+# that it is not trusted until RAW and PARSED agree.
+with open(
+    os.path.join(os.path.dirname(__file__), "fixtures", "gpu_types_actual.json"),
+    encoding="utf-8",
+) as _fh:
+    GPU_TYPES_FIXTURE = json.load(_fh)
 
-GPU_TYPES_FIXTURE = {
-    "data": {
-        "gpuTypes": [
-            {
-                # The A5000's recorded state: listed, secure, price null
-                # for both on-demand and spot.
-                "id": "NVIDIA RTX A5000",
-                "displayName": "RTX A5000",
-                "memoryInGb": 24,
-                "secureCloud": True,
-                "communityCloud": True,
-                "securePrice": None,
-                "communityPrice": None,
-                "lowestPrice": {
-                    "uninterruptablePrice": None,
-                    "minimumBidPrice": None,
-                },
-            },
-            {
-                "id": "NVIDIA GeForce RTX 3090",
-                "displayName": "NVIDIA GeForce RTX 3090",
-                "memoryInGb": 24,
-                "secureCloud": True,
-                "communityCloud": True,
-                "securePrice": 0.31,
-                "communityPrice": 0.19,
-                "lowestPrice": {
-                    "uninterruptablePrice": 0.31,
-                    "minimumBidPrice": 0.15,
-                },
-            },
-        ]
-    }
-}
+_ENTRIES = {g["id"]: g for g in GPU_TYPES_FIXTURE["data"]["gpuTypes"]}
 
 
-def test_parse_null_price_stays_none():
-    parsed = rp.parse_gpu_type(GPU_TYPES_FIXTURE["data"]["gpuTypes"][0])
-    assert parsed["secure_price"] is None
+def test_parse_the_a5000_trap_list_price_is_not_capacity():
+    # The A5000's real state: a securePrice of 0.27 in the catalogue,
+    # while lowestPrice is null for both on-demand and spot. The list
+    # price must parse through AND the capacity price must stay None.
+    parsed = rp.parse_gpu_type(_ENTRIES["NVIDIA RTX A5000"])
+    assert parsed["secure_price"] == 0.27
     assert parsed["on_demand_price"] is None
     assert parsed["spot_price"] is None
     assert parsed["secure_cloud"] is True
 
 
-def test_parse_priced_entry_carries_values_through():
-    parsed = rp.parse_gpu_type(GPU_TYPES_FIXTURE["data"]["gpuTypes"][1])
-    assert parsed["display_name"] == "NVIDIA GeForce RTX 3090"
+def test_parse_the_3090_real_entry():
+    parsed = rp.parse_gpu_type(_ENTRIES["NVIDIA GeForce RTX 3090"])
+    assert parsed["id"] == "NVIDIA GeForce RTX 3090"
+    assert parsed["display_name"] == "RTX 3090"
     assert parsed["memory_gb"] == 24
-    assert parsed["secure_price"] == 0.31
+    assert parsed["secure_price"] == 0.5
+    assert parsed["community_price"] == 0.22
+    assert parsed["on_demand_price"] == 0.22
+
+
+def test_regression_id_carries_the_full_name_not_display_name():
+    # The original parser matched on displayName and would have read the
+    # 3090 as permanently unavailable — the exact predicted failure mode
+    # (a wrong field reads as "no capacity", which reads as "the 3090 is
+    # unavailable").
+    parsed = [rp.parse_gpu_type(g) for g in GPU_TYPES_FIXTURE["data"]["gpuTypes"]]
+    hit = rp.find_gpu(parsed, "NVIDIA GeForce RTX 3090")
+    assert hit is not None
+    assert hit["display_name"] == "RTX 3090"
 
 
 def test_parse_missing_lowest_price_object():
-    entry = dict(GPU_TYPES_FIXTURE["data"]["gpuTypes"][1], lowestPrice=None)
+    entry = dict(_ENTRIES["NVIDIA GeForce RTX 3090"], lowestPrice=None)
     parsed = rp.parse_gpu_type(entry)
     assert parsed["on_demand_price"] is None
 
@@ -79,7 +72,8 @@ def test_gpu_catalogue_returns_raw_and_parsed(monkeypatch):
     monkeypatch.setattr(rp, "_request", lambda *a, **k: (200, raw))
     got_raw, parsed = rp.gpu_catalogue()
     assert got_raw == raw  # provider bytes, verbatim
-    assert parsed[1]["display_name"] == "NVIDIA GeForce RTX 3090"
+    assert parsed[0]["id"] == "NVIDIA GeForce RTX 3090"
+    assert parsed[0]["display_name"] == "RTX 3090"
 
 
 def test_graphql_errors_surface_as_api_error(monkeypatch):

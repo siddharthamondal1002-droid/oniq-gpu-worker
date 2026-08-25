@@ -142,18 +142,29 @@ def admit(
 
 
 def require_available(catalogue, target: str = TARGET_GPU, min_vram_gb: int = WORKLOAD_MIN_VRAM_GB):
-    """Find the target GPU as secure-cloud, priced capacity — or raise
-    UnavailableGpu listing priced alternatives. Never substitutes."""
+    """Find the target GPU as secure-cloud, ALLOCATABLE capacity — or
+    raise UnavailableGpu listing allocatable alternatives. Never
+    substitutes.
+
+    Two lessons from real payloads are load-bearing here. Matching is on
+    the `id` field (the canonical full name), never `displayName` (the
+    short name). And a catalogue LIST price is not capacity: the A5000
+    carries a securePrice while its lowestPrice is null for both
+    on-demand and spot — RunPod saying it has none to allocate — so
+    availability additionally requires a non-null lowestPrice
+    (`on_demand_price` in the parsed view)."""
     entry = None
     alternatives = []
     for gpu in catalogue:
-        priced_secure = (
-            gpu.get("secure_cloud") and gpu.get("secure_price") is not None
+        allocatable_secure = (
+            gpu.get("secure_cloud")
+            and gpu.get("secure_price") is not None
+            and gpu.get("on_demand_price") is not None
         )
-        if gpu.get("display_name") == target:
-            if priced_secure:
+        if gpu.get("id") == target:
+            if allocatable_secure:
                 entry = gpu
-        elif priced_secure and (gpu.get("memory_gb") or 0) >= min_vram_gb:
+        elif allocatable_secure and (gpu.get("memory_gb") or 0) >= min_vram_gb:
             alternatives.append(gpu)
     if entry is None:
         raise UnavailableGpu(target, alternatives)

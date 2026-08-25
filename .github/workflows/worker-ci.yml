@@ -66,8 +66,12 @@ jobs:
       - name: Worker + harness tests as uid 10001
         run: |
           set -eu
+          # Launch from /opt/app: pytest chdirs back to its start
+          # directory on exit, and the runner-owned checkout is not
+          # enterable by uid 10001 — run #2 proved the tests pass and
+          # then crashed on exactly that final chdir.
           sudo -u oniq env HOME=/home/oniq PYTHONDONTWRITEBYTECODE=1 \
-            /opt/venv/bin/python -m pytest /opt/app/tests -q --rootdir=/opt/app -p no:cacheprovider
+            sh -c 'cd /opt/app && /opt/venv/bin/python -m pytest tests -q -p no:cacheprovider'
           if sudo -u oniq sh -c 'touch /opt/app/probe 2>/dev/null'; then
             echo "runtime user can WRITE to /app — rig invalid"; exit 1
           fi
