@@ -62,7 +62,15 @@ def _api_key() -> str:
 
 def _request(url: str, *, method: str = "GET", body=None, timeout: int = 30, bearer: bool = True):
     payload = None
-    headers = {"Content-Type": "application/json"}
+    # Cloudflare fronts api.runpod.io and bans urllib's default agent
+    # signature outright (error code 1010, measured 2026-08-25) — the
+    # same key succeeded from curl. Identify honestly, but as a real
+    # client.
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "oniq-gpu-validation/1.0 (github-actions)",
+    }
     if bearer:
         headers["Authorization"] = f"Bearer {_api_key()}"
     if body is not None:
@@ -133,9 +141,9 @@ def gpu_catalogue():
         "gpu catalogue unavailable — "
         f"graphql -> {graphql_status} (body: {graphql_raw[:200]!r}); "
         f"rest /gputypes -> {rest_status} (body: {rest_raw[:200]!r}). "
-        "A key that works on REST but not GraphQL lacks GraphQL "
-        "permission — an owner toggle on the API key in the RunPod "
-        "console."
+        "Read the body snippets: a Cloudflare 'error code: 1010' is a "
+        "client-signature block, while a RunPod auth error means the key "
+        "lacks GraphQL permission (an owner toggle in the RunPod console)."
     )
 
 
