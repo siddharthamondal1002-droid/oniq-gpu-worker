@@ -484,14 +484,33 @@ def test_preflight_finds_r2_env_on_the_template():
     assert facts["endpoint_id"] == "ep-123"
 
 
-def test_preflight_still_stops_when_neither_carries_r2():
-    ep = _endpoint(env={})
+def test_preflight_stops_on_a_positive_env_miss():
+    # An env set IS visible and lacks the names: hard stop.
+    ep = _endpoint(env={"OTHER_VAR": "x"})
     ep["templateId"] = "tpl-1"
     client = FakeClient(endpoints=[ep])
+    client.get_endpoint = lambda eid: ("{}", {"id": eid})
     client.get_template = lambda tid: ("{}", {"id": tid, "env": {}})
+    client.template_env_names_graphql = lambda tid: None
     with pytest.raises(spend_run.SpendStop) as exc:
         _preflight(client)
     assert exc.value.code == "r2-env-missing"
+
+
+def test_preflight_warns_and_passes_when_env_is_unreadable(capsys):
+    # No API view exposes env at all: proceed loudly; the worker's own
+    # storage-not-configured fail-closed is the runtime verifier.
+    ep = _endpoint(env={})
+    ep["templateId"] = "tpl-1"
+    client = FakeClient(endpoints=[ep])
+    client.get_endpoint = lambda eid: ("{}", {"id": eid})
+    def _no_rest(tid):
+        raise RuntimeError("404")
+    client.get_template = _no_rest
+    client.template_env_names_graphql = lambda tid: None
+    facts = _preflight(client)
+    assert facts["endpoint_id"] == "ep-123"
+    assert "r2-env-unverifiable" in capsys.readouterr().out
 
 
 def test_redact_blanks_pair_form_secret_values():

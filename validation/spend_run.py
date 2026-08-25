@@ -247,9 +247,25 @@ def preflight(
                 env_names |= graphql_names
     missing = [name for name in R2_ENV_REQUIRED if name not in env_names]
     if missing:
-        raise SpendStop(
-            "r2-env-missing",
-            "endpoint environment lacks: " + ", ".join(missing),
+        # Distinguish a POSITIVE miss (an env set is visible and lacks the
+        # names) from an UNREADABLE env (no API view exposes serverless
+        # env at all — measured 2026-08-25: list and single GET carry no
+        # env field, REST /templates 404s, GraphQL template read unknown).
+        # Blocking forever on an unreadable signal is as wrong as passing
+        # blind: when unreadable, proceed LOUDLY — the worker itself fails
+        # closed at job time with storage-not-configured naming the
+        # missing variables, bounded by the one-job reservation.
+        if env_names:
+            raise SpendStop(
+                "r2-env-missing",
+                "endpoint environment lacks: " + ", ".join(missing),
+            )
+        print(
+            "WARNING [r2-env-unverifiable]: no API view exposes the "
+            "endpoint's env; could not verify "
+            + ", ".join(missing)
+            + ". The worker fails closed with storage-not-configured at "
+            "job time if they are absent."
         )
 
     # 5. Test references exist (object keys, not credentials).
