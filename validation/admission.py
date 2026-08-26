@@ -160,36 +160,31 @@ def require_available(catalogue, target: str = TARGET_GPU, min_vram_gb: int = WO
 
     Two lessons from real payloads are load-bearing here. Matching is on
     the `id` field (the canonical full name), never `displayName` (the
-    short name). And a catalogue LIST price is not capacity: the A5000
-    carries a securePrice while its lowestPrice is null for both
-    on-demand and spot — RunPod saying it has none to allocate — so
-    availability additionally requires a non-null lowestPrice
-    (`on_demand_price` in the parsed view)."""
+    short name). And "null is never free": a null SECURE price refuses
+    (reserve_usd raises gpu-unpriced), never admits.
+
+    THE SERVERLESS RULE (owner directive 2026-08-26, evening record):
+    lowestPrice is a community/pod-market rental signal, and this harness
+    only ever admits SERVERLESS jobs, which bill the secure price against
+    an endpoint that manages its own worker pool. Across eight catalogue
+    pulls in one evening the lowestPrice field flapped null on the 3090,
+    then the L4, then the A5000 — each while the other cards' signals
+    were live and while every secure price stayed firm — costing five $0
+    admission refusals across three owner-pinned cards. Serverless
+    eligibility therefore reads the secure side only; the spend is
+    actually protected by the cap, the full-ceiling reservation, the
+    runtime ceiling, the single submit, the watchdog and the orphan
+    sweep. The 2026-08-25 A5000 lesson was calibrated against POD
+    provisioning and its bytes now pin the reinterpretation in tests."""
     entry = None
     alternatives = []
     for gpu in catalogue:
-        # Provider-semantics branch (owner directive 2026-08-26). The
-        # community-market lowestPrice is a capacity proxy ONLY for cards
-        # that HAVE a community market: the A5000 lesson (a secure list
-        # price with a null lowestPrice is not capacity) stands for
-        # communityCloud=true cards. A secure-ONLY card (the L4:
-        # communityCloud=false, verbatim raw bytes, run #14) has no such
-        # market, so its null lowestPrice carries no signal — its secure
-        # price is the whole quote. A missing or malformed communityCloud
-        # (parsed as None) rejects conservatively; it is never inferred.
-        community = gpu.get("community_cloud")
-        if community is True:
-            allocatable_secure = (
-                gpu.get("secure_cloud")
-                and gpu.get("secure_price") is not None
-                and gpu.get("on_demand_price") is not None
-            )
-        elif community is False:
-            allocatable_secure = (
-                gpu.get("secure_cloud") and gpu.get("secure_price") is not None
-            )
-        else:
-            allocatable_secure = False
+        # THE SERVERLESS RULE (see docstring): secure side only. The
+        # pod-market lowestPrice and the communityCloud flag are not
+        # consulted for serverless eligibility.
+        allocatable_secure = (
+            gpu.get("secure_cloud") and gpu.get("secure_price") is not None
+        )
         if gpu.get("id") == target:
             if allocatable_secure:
                 entry = gpu
