@@ -165,11 +165,28 @@ def require_available(catalogue, target: str = TARGET_GPU, min_vram_gb: int = WO
     entry = None
     alternatives = []
     for gpu in catalogue:
-        allocatable_secure = (
-            gpu.get("secure_cloud")
-            and gpu.get("secure_price") is not None
-            and gpu.get("on_demand_price") is not None
-        )
+        # Provider-semantics branch (owner directive 2026-08-26). The
+        # community-market lowestPrice is a capacity proxy ONLY for cards
+        # that HAVE a community market: the A5000 lesson (a secure list
+        # price with a null lowestPrice is not capacity) stands for
+        # communityCloud=true cards. A secure-ONLY card (the L4:
+        # communityCloud=false, verbatim raw bytes, run #14) has no such
+        # market, so its null lowestPrice carries no signal — its secure
+        # price is the whole quote. A missing or malformed communityCloud
+        # (parsed as None) rejects conservatively; it is never inferred.
+        community = gpu.get("community_cloud")
+        if community is True:
+            allocatable_secure = (
+                gpu.get("secure_cloud")
+                and gpu.get("secure_price") is not None
+                and gpu.get("on_demand_price") is not None
+            )
+        elif community is False:
+            allocatable_secure = (
+                gpu.get("secure_cloud") and gpu.get("secure_price") is not None
+            )
+        else:
+            allocatable_secure = False
         if gpu.get("id") == target:
             if allocatable_secure:
                 entry = gpu

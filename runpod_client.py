@@ -156,7 +156,16 @@ def parse_gpu_type(g: dict) -> dict:
         "display_name": g.get("displayName"),
         "memory_gb": g.get("memoryInGb"),
         "secure_cloud": bool(g.get("secureCloud")),
-        "community_cloud": bool(g.get("communityCloud")),
+        # Tri-state, deliberately: True/False only when the provider sent
+        # an explicit boolean; None when the field is missing or another
+        # type. Admission's community/secure-only branching keys on this
+        # (owner directive 2026-08-26), and a missing field must reject
+        # conservatively — never impersonate an explicit False.
+        "community_cloud": (
+            g.get("communityCloud")
+            if isinstance(g.get("communityCloud"), bool)
+            else None
+        ),
         "secure_price": g.get("securePrice"),
         "community_price": g.get("communityPrice"),
         "on_demand_price": lowest.get("uninterruptablePrice"),
