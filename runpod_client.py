@@ -259,6 +259,43 @@ def template_env_names_graphql(template_id: str):
         return None
 
 
+def standby_schema_probe():
+    """Read-only GraphQL introspection: which mutations exist, and which
+    fields EndpointInput really carries. Run #36 proved workersStandby is
+    not an EndpointInput field; this answers whether ANY mutation is
+    standby-shaped before concluding the console is the only path.
+    Names only — nothing here mutates. Returns None when unreadable."""
+    query = (
+        'query StandbyProbe { mutation: __type(name: "Mutation") '
+        "{ fields { name } } input: __type(name: \"EndpointInput\") "
+        "{ inputFields { name } } }"
+    )
+    status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+    if status != 200:
+        return None
+    try:
+        data = json.loads(raw).get("data") or {}
+    except json.JSONDecodeError:
+        return None
+    mutations = [
+        f.get("name") for f in ((data.get("mutation") or {}).get("fields") or [])
+    ]
+    return {
+        "endpoint_input_fields": sorted(
+            f.get("name") for f in ((data.get("input") or {}).get("inputFields") or [])
+        ),
+        "standby_shaped_mutations": sorted(
+            m for m in mutations if m and "standby" in m.lower()
+        ),
+        "endpoint_shaped_mutations": sorted(
+            m for m in mutations if m and "endpoint" in m.lower()
+        ),
+        "worker_shaped_mutations": sorted(
+            m for m in mutations if m and "worker" in m.lower()
+        ),
+    }
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),

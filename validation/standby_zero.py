@@ -59,6 +59,14 @@ def run(client) -> dict:
     # GraphQL half to a 200-char slice and cost this exact round trip.
     print("patch response:", body)
     if status not in (200, 201):
+        # Before declaring the console the only path, read the schema
+        # itself (read-only introspection): if any mutation is standby-
+        # shaped, its name prints here and the next iteration uses it.
+        probe = getattr(client, "standby_schema_probe", lambda: None)()
+        if probe is None:
+            print("schema probe: unreadable")
+        else:
+            _show("schema probe (names only)", probe)
         raise SpendStop(
             "standby-patch-refused",
             f"both transports refused (statuses/bodies printed above); "
