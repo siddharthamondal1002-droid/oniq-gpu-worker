@@ -75,6 +75,30 @@ gated, on CPU runners: FALSE there carries no information about the image.
   create one, and R2 credentials are not GitHub secrets — they live in
   the RunPod endpoint's environment.
 
+## Media inference — measured baseline (2026-08-26)
+
+The second workload, `video_generate`, ran once for real on the gated
+pipeline (gpu-validation run #33, job `242948dc…-u2`): one LTX-Video 2B
+image-to-video clip on a rented RTX 3090. Measured, not estimated:
+
+| Figure                    | Value                                     |
+| ------------------------- | ----------------------------------------- |
+| Model (from MODEL_ID)     | `Lightricks/LTX-Video` (2B, 30 steps)     |
+| Model load (baked, local) | 11.5 s                                    |
+| Inference (97f, 704x480)  | 29.0 s CUDA                               |
+| Encode (h264)             | 1.0 s                                     |
+| Clip                      | 4.04 s @ 24 fps, 330,061 bytes            |
+| Peak VRAM                 | 15,916 MB of 24,126                       |
+| Execution / cost          | 45.5 s → $0.01 (of a $0.13 reservation)   |
+| Per generated second      | $0.0025 ($0.15/min), ceiled               |
+| Cold pull of media image  | 399 s delayTime, once per release         |
+
+The full evidence chain, the TERMINATION_UNKNOWN honesty note
+(`workersStandby: 1`), and the stop-after-one-job record live in the
+financial ledger: `oniq-sparkle-pay/docs/video/ONIQ_AI_FINANCIAL_CONTROL.md`
+§16o. Visual quality is judged by the owner from
+`oniq-gpu/validation/video-test/ltx-001.mp4`, not by this repo.
+
 ## Owner actions this repo cannot perform
 
 1. Add the `RUNPOD_API_KEY` repository secret (Actions).
