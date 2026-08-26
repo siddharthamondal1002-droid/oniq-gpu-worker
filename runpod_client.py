@@ -195,6 +195,21 @@ def get_template(template_id: str):
     return _get_json(f"{REST_BASE}/templates/{template_id}")
 
 
+def set_workers_standby_zero(endpoint_id: str):
+    """The harness's ONLY endpoint mutation — owner directive 2026-08-26
+    (five-video battery, Phase 2: NO JOB = NO GPU WORKER). PATCHes
+    workersStandby to the literal 0, a strict spend REDUCTION. There is
+    deliberately no value parameter: this function cannot scale anything
+    up, and no other field can ride along in the body. Callers must
+    re-read the endpoint afterwards — the PATCH echo is never trusted."""
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"workersStandby": 0},
+    )
+    return status, raw
+
+
 def template_env_names_graphql(template_id: str):
     """Env var NAMES on a template, via GraphQL (values are fetched by
     the API but only names ever leave this function). Returns a set, or

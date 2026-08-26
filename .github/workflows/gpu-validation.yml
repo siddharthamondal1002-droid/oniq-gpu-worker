@@ -35,16 +35,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0)."
         type: choice
-        options: [discover, spend]
+        options: [discover, spend, standby-zero]
         default: discover
       spend:
         description: "Type SPEND (exactly) to allow the spend job."
         type: string
         default: ""
       through_phase:
-        description: "Last phase to run when spending: 16 = one job, 17 = +failure battery, 18 = +5-job, 19 = +20-job."
+        description: "Last phase when spending. Image: 16 = one job, 17 = +failure battery, 18 = +5-job, 19 = +20-job. Video: 16 = one job, 18 = the five-scene battery (exactly five)."
         type: choice
         options: ["16", "17", "18", "19"]
         default: "16"
@@ -170,9 +170,28 @@ jobs:
       - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
         run: python -m validation.spend_run run
 
+  standby:
+    # The harness's ONLY endpoint mutation, owner-directed 2026-08-26:
+    # workersStandby -> the literal 0 (NO JOB = NO GPU WORKER). The
+    # patched value is hard-coded in runpod_client.set_workers_standby_zero
+    # — no input carries a worker count, so this job can only scale DOWN.
+    # It submits nothing; verification is a fresh read, $0.
+    name: "workersStandby -> 0 (spend reduction, $0)"
+    if: inputs.mode == 'standby-zero'
+    runs-on: ubuntu-latest
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify -> patch literal zero -> fresh-read verify
+        run: python -m validation.standby_zero
+
   sweep:
     name: "orphan sweep — None is never 0"
-    needs: [discover, spend]
+    needs: [discover, spend, standby]
     if: always()
     runs-on: ubuntu-latest
     env:

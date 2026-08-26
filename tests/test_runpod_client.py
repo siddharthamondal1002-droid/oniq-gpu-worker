@@ -199,3 +199,37 @@ def test_parse_endpoint_reads_worker_bounds():
 def test_cli_refuses_unknown_commands(capsys):
     assert rp.main(["runpod_client.py"]) == 2
     assert rp.main(["runpod_client.py", "provision"]) == 2
+
+
+def test_standby_patch_sends_only_the_literal_zero(monkeypatch):
+    # The harness's one mutation: PATCH, one field, hard-coded 0. A
+    # value parameter here would be a scale-UP surface; refuse to grow one.
+    import inspect
+
+    import runpod_client as rp
+
+    assert list(inspect.signature(rp.set_workers_standby_zero).parameters) == [
+        "endpoint_id"
+    ]
+    seen = {}
+
+    def transport(url, *, method="GET", body=None, **kw):
+        seen["url"] = url
+        seen["method"] = method
+        seen["body"] = body
+        return 200, "{}"
+
+    monkeypatch.setattr(rp, "_request", transport)
+    status, raw = rp.set_workers_standby_zero("ep-123")
+    assert status == 200
+    assert seen["method"] == "PATCH"
+    assert seen["url"].endswith("/endpoints/ep-123")
+    assert seen["body"] == {"workersStandby": 0}
+
+
+def test_no_scale_up_surface_exists():
+    import runpod_client as rp
+
+    for forbidden in ("create_endpoint", "create_pod", "set_workers_min",
+                      "set_workers_max", "set_workers_standby"):
+        assert not hasattr(rp, forbidden)

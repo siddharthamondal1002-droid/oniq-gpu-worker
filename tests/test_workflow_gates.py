@@ -51,7 +51,7 @@ def test_gate4_orphan_sweep_always_runs():
     doc, _ = _load("gpu-validation.yml")
     sweep = doc["jobs"]["sweep"]
     assert sweep["if"].strip() == "always()"
-    assert set(sweep["needs"]) == {"discover", "spend"}
+    assert set(sweep["needs"]) == {"discover", "spend", "standby"}
 
 
 def test_gate5_no_endpoint_creation_anywhere():
@@ -210,6 +210,23 @@ def test_op_input_defaults_to_the_image_workload():
     assert op["default"] == "image_preprocess"
     assert op["options"] == ["image_preprocess", "video_generate"]
     assert "OP: ${{ inputs.op }}" in raw
+
+
+def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
+    # The one endpoint mutation: its own dispatch mode, its own job, and
+    # NO input anywhere that could carry a worker count — the zero lives
+    # as a literal in runpod_client.set_workers_standby_zero.
+    doc, raw = _load("gpu-validation.yml")
+    mode = _triggers(doc)["workflow_dispatch"]["inputs"]["mode"]
+    assert mode["options"] == ["discover", "spend", "standby-zero"]
+    assert mode["default"] == "discover"
+    standby = doc["jobs"]["standby"]
+    assert standby["if"].strip() == "inputs.mode == 'standby-zero'"
+    runs = [s.get("run", "") for s in standby["steps"]]
+    assert any("validation.standby_zero" in r for r in runs)
+    for name, spec in _triggers(doc)["workflow_dispatch"]["inputs"].items():
+        assert "standby" not in name
+        assert "worker" not in name
 
 
 def test_worker_ci_builds_only_the_weightless_base_stage():

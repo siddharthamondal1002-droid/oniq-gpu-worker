@@ -33,12 +33,13 @@ def _gpu_types_raw(price=0.5, lowest=0.22):
     )
 
 
-def _endpoint(env=None, gpus=None, mn=0, mx=1):
+def _endpoint(env=None, gpus=None, mn=0, mx=1, standby=0):
     return {
         "id": "ep-123",
         "name": "oniq-gpu",
         "workersMin": mn,
         "workersMax": mx,
+        "workersStandby": standby,
         "gpuTypeIds": gpus or ["NVIDIA GeForce RTX 3090"],
         "idleTimeout": 5,
         "env": env
@@ -620,6 +621,102 @@ def test_one_video_job_stops_when_the_worker_proves_no_model():
     with pytest.raises(spend_run.SpendStop) as exc:
         _run_one_video(client)
     assert exc.value.code == "model-unproven"
+
+
+# ----------------------------------------------------- five-scene battery
+
+
+def test_video_battery_runs_exactly_five_scenes_in_order():
+    client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
+    ft = FakeTime()
+    facts = _preflight(client)
+    rows = spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert len(rows) == 5
+    assert len(client.submitted) == 5
+    sent_prompts = [payload["params"]["prompt"] for _, payload in client.submitted]
+    assert sent_prompts == [p for _, p in spend_run.VIDEO_BATTERY]
+    keys = [payload["output_key"] for _, payload in client.submitted]
+    assert keys == [
+        "out/validation/battery-1-intro.mp4",
+        "out/validation/battery-2-walk.mp4",
+        "out/validation/battery-3-react.mp4",
+        "out/validation/battery-4-environment.mp4",
+        "out/validation/battery-5-hero.mp4",
+    ]
+    assert [r["scene"] for r in rows] == [
+        "intro", "walk", "react", "environment", "hero",
+    ]
+    assert all(r["termination"] == spend_run.TERMINATION_CONFIRMED for r in rows)
+    assert all(r["vram_total_mb"] == 24576 for r in rows)
+
+
+def test_video_battery_prompts_are_bounded_and_frozen():
+    import contract
+
+    assert len(spend_run.VIDEO_BATTERY) == 5
+    for slug, prompt in spend_run.VIDEO_BATTERY:
+        assert 0 < len(prompt) <= contract.MAX_PROMPT_CHARS
+        contract.validate_job(
+            {
+                "op": "video_generate",
+                "input_key": "in/a.jpg",
+                "output_key": f"out/{slug}.mp4",
+                "params": {"prompt": prompt},
+            }
+        )
+
+
+def test_video_battery_refuses_to_start_under_standby():
+    # Owner directive: a battery under workersStandby != 0 pays for five
+    # jobs whose termination can never confirm. Stop before job 1.
+    client = FakeClient(endpoints=[_endpoint(standby=1)],
+                        job_statuses=[_good_video_status()])
+    ft = FakeTime()
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert exc.value.code == "standby-not-zero"
+    assert client.submitted == []
+
+
+def test_video_battery_stops_midway_with_no_retry_and_no_next_job():
+    statuses = [
+        _good_video_status(),
+        _good_video_status(),
+        {"status": "FAILED", "output": {}},
+    ]
+    client = FakeClient(job_statuses=statuses)
+    ft = FakeTime()
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert exc.value.code == "job-failed"
+    # Scene 3 failed: it was submitted once (no retry) and scenes 4-5
+    # were never submitted.
+    assert len(client.submitted) == 3
+
+
+def test_video_battery_stops_on_unknown_termination_midway():
+    stuck = [{"workers": {"idle": 1, "running": 0}}] * 200
+    client = FakeClient(job_statuses=[_good_video_status()], health_seq=stuck)
+    ft = FakeTime()
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert exc.value.code == "termination-unknown"
+    assert len(client.submitted) == 1
+
+
+def test_one_job_uses_the_scene_prompt_when_given():
+    client = FakeClient(job_statuses=[_good_video_status()])
+    ft = FakeTime()
+    facts = _preflight(client)
+    spend_run.one_job(
+        client, facts, output_key="out/validation/battery-2-walk.mp4",
+        op="video_generate", prompt=spend_run.VIDEO_BATTERY[1][1],
+        sleep=ft.sleep, clock=ft.clock,
+    )
+    assert client.submitted[0][1]["params"]["prompt"] == spend_run.VIDEO_BATTERY[1][1]
 
 
 # ------------------------------------------------------------- termination

@@ -456,6 +456,47 @@ VIDEO_PROMPT = (
     "realistic motion, consistent lighting."
 )
 
+# The five-scene battery — owner directive 2026-08-26 (Phase 6 of the
+# five-video superloop), verbatim and server-side like VIDEO_PROMPT:
+# the dispatch chooses only through_phase=18, never the text. Order and
+# wording are frozen; prompts are NOT optimized after seeing results,
+# because the purpose is measurement.
+VIDEO_BATTERY = (
+    (
+        "intro",
+        "A cinematic medium shot. The character slowly turns toward the "
+        "camera, blinks naturally and gives a subtle confident smile. "
+        "Gentle camera push forward, realistic movement, stable identity, "
+        "natural lighting.",
+    ),
+    (
+        "walk",
+        "The character slowly walks forward through the scene while the "
+        "camera tracks backward smoothly. Natural body movement, realistic "
+        "footsteps, stable appearance, cinematic lighting.",
+    ),
+    (
+        "react",
+        "The character looks toward something off camera, pauses, and "
+        "gradually shows surprise and concern. Subtle facial movement, "
+        "natural blinking, stable identity, cinematic close-up.",
+    ),
+    (
+        "environment",
+        "The character stands still while the surrounding environment "
+        "moves naturally: subtle wind, moving background elements and "
+        "changing light. The camera slowly pans sideways. Cinematic "
+        "realism.",
+    ),
+    (
+        "hero",
+        "The character looks directly toward the camera and slowly moves "
+        "forward. The camera gently pushes in while the character "
+        "maintains consistent appearance and natural expression. Cinematic "
+        "final-shot composition.",
+    ),
+)
+
 
 def verify_gpu_success(output) -> None:
     """Phase 14: HTTP 200 alone is insufficient, and so is each of these
@@ -552,10 +593,15 @@ def one_job(
     *,
     output_key: str,
     op: str = "image_preprocess",
+    prompt: str | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
-    """Phases 12-16 for a single job. Fail-closed at every boundary."""
+    """Phases 12-16 for a single job. Fail-closed at every boundary.
+
+    `prompt` may only ever be one of this module's own constants
+    (VIDEO_PROMPT or a VIDEO_BATTERY scene) — no caller input reaches it,
+    because the workflow exposes no prompt field at all."""
     quote = requote(client)
     payload = {
         "op": op,
@@ -564,7 +610,7 @@ def one_job(
     }
     watch_s = None
     if op == "video_generate":
-        payload["params"] = {"prompt": VIDEO_PROMPT}
+        payload["params"] = {"prompt": prompt or VIDEO_PROMPT}
         # queue + first pull of the model-baked image can be many minutes
         # of delayTime before bounded execution even starts.
         watch_s = admission.RUNTIME_CEILING_SECONDS + 900
@@ -607,6 +653,7 @@ def one_job(
         video_seconds = Decimal(str(out.get("video_seconds")))
         row.update(
             {
+                "vram_total_mb": out.get("vram_total_mb"),
                 "model": out.get("model"),
                 "model_load_ms": out.get("model_load_ms"),
                 "inference_ms": out.get("inference_ms"),
@@ -631,6 +678,55 @@ def one_job(
             "worker termination could not be confirmed; not continuing",
         )
     return row
+
+
+# ----------------------------------------------------- five-scene battery
+
+
+def check_standby_zero(client) -> None:
+    """Owner directive 2026-08-26: the battery may not start while a
+    standby worker exists — it would both bill warmth and doom every
+    job's termination check to UNKNOWN after the money is spent. Read
+    fresh, stop unless the field is literally 0."""
+    _, endpoints = client.get_endpoints()
+    ep_list = endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
+    if len(ep_list) != 1:
+        raise SpendStop(
+            "endpoint-not-singular", f"{len(ep_list)} endpoint(s); need exactly one"
+        )
+    standby = ep_list[0].get("workersStandby")
+    if standby != 0:
+        raise SpendStop(
+            "standby-not-zero",
+            f"workersStandby reads {standby!r} — run the standby-zero "
+            "dispatch (or the console toggle) first; a battery under "
+            "standby ends TERMINATION_UNKNOWN after paying",
+        )
+
+
+def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic) -> list:
+    """The owner's five-scene battery: exactly five video jobs, strictly
+    sequential, each with its own requote/admission, verification,
+    billing reconciliation and termination confirmation — one_job raises
+    on ANY failure or UNKNOWN termination, which stops the battery cold
+    with no retry and no next submission (Phase 7)."""
+    check_standby_zero(client)
+    rows = []
+    for index, (slug, prompt) in enumerate(VIDEO_BATTERY, start=1):
+        print(f"--- scene {index}/5 [{slug}] ---")
+        row = one_job(
+            client,
+            facts,
+            output_key=f"{facts['output_prefix']}/battery-{index}-{slug}.mp4",
+            op="video_generate",
+            prompt=prompt,
+            sleep=sleep,
+            clock=clock,
+        )
+        row["scene"] = slug
+        rows.append(row)
+        print(f"scene {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
+    return rows
 
 
 # --------------------------------------------------------- failure battery
@@ -774,25 +870,51 @@ def main(argv) -> int:
         op = os.environ.get("OP", "image_preprocess")
         if op not in ("image_preprocess", "video_generate"):
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
-        suffix = "ltx-001.mp4" if op == "video_generate" else "job-1.jpeg"
-        rows = [
-            one_job(
-                rp,
-                facts,
-                output_key=f"{facts['output_prefix']}/{suffix}",
-                op=op,
-            )
-        ]
-        print("PHASE 13-16 PASS — one real job, verified and terminated")
-        if through >= 17:
-            failure_battery(rp, facts)
-            print("PHASE 17 PASS — forceable failure cases surfaced, 0 orphans")
-        if through >= 18:
-            rows += battery(rp, facts, 5)
-            print("PHASE 18 PASS — five-job battery")
-        if through >= 19:
-            rows += battery(rp, facts, 20)
-            print("PHASE 19 PASS — twenty-job battery")
+        if op == "video_generate":
+            # Video knows exactly two shapes (owner directives 2026-08-26):
+            # 16 = the single job; 18 = the five-scene battery — EXACTLY
+            # five, never 1+5, never twenty. Anything else refuses.
+            if through == 16:
+                rows = [
+                    one_job(
+                        rp,
+                        facts,
+                        output_key=f"{facts['output_prefix']}/ltx-001.mp4",
+                        op=op,
+                    )
+                ]
+                print("PHASE 13-16 PASS — one real job, verified and terminated")
+            elif through == 18:
+                rows = video_battery(rp, facts)
+                print(
+                    "PHASE 18 PASS — five-scene battery, each job verified "
+                    "and terminated"
+                )
+            else:
+                raise SpendStop(
+                    "video-through-phase",
+                    "video_generate supports through_phase 16 (one job) or "
+                    "18 (the five-scene battery) — nothing else",
+                )
+        else:
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    output_key=f"{facts['output_prefix']}/job-1.jpeg",
+                    op=op,
+                )
+            ]
+            print("PHASE 13-16 PASS — one real job, verified and terminated")
+            if through >= 17:
+                failure_battery(rp, facts)
+                print("PHASE 17 PASS — forceable failure cases surfaced, 0 orphans")
+            if through >= 18:
+                rows += battery(rp, facts, 5)
+                print("PHASE 18 PASS — five-job battery")
+            if through >= 19:
+                rows += battery(rp, facts, 20)
+                print("PHASE 19 PASS — twenty-job battery")
         _show("economics (real rows only)", economics(rows))
         sweep = rp.sweep_orphans()
         if sweep is None or sweep.get("pods") != 0 or sweep.get("endpoint_min_workers") != 0:
