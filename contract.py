@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 
 # The workloads this worker exists to run.
-ALLOWED_OPS = ("image_preprocess", "video_generate")
+ALLOWED_OPS = ("image_preprocess", "video_generate", "audio_mux")
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
 # against Content-Length BEFORE the download begins.
@@ -52,6 +52,11 @@ VIDEO_NUM_FRAMES = 97  # LTX wants 8k+1 frames; 97 @ 24fps ≈ 4.0s
 VIDEO_FPS = 24
 MAX_PROMPT_CHARS = 1000
 
+# audio_mux: the caller's only degree of freedom is the narration text.
+# This bound is an input-size fence; the REAL gate is measured seconds
+# against the video's own duration, in audio.py, refused never truncated.
+MAX_NARRATION_CHARS = 300
+
 # R2 keys are references, not paths: a bounded character set, no leading
 # slash, no parent-directory traversal.
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")
@@ -59,6 +64,7 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")
 _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
 _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 _VIDEO_PARAM_FIELDS = frozenset({"prompt"})
+_AUDIO_PARAM_FIELDS = frozenset({"narration"})
 
 # Every key the handler may return. Anything not named here is dropped by
 # filter_output before the response leaves the worker.
@@ -87,6 +93,15 @@ OUTPUT_WHITELIST = frozenset(
         "frames",
         "fps",
         "video_seconds",
+        # audio_mux evidence — measured on the worker, never inferred
+        "has_audio",
+        "narration_seconds",
+        "audio_seconds",
+        "audio_sample_rate",
+        "audio_peak_dbfs",
+        "audio_gain_db",
+        "tts_ms",
+        "mux_ms",
     }
 )
 
@@ -176,6 +191,30 @@ def validate_job(raw) -> dict:
             "input_key": input_key,
             "output_key": output_key,
             "params": {"prompt": prompt.strip()},
+        }
+
+    if op == "audio_mux":
+        unknown_params = set(params_raw) - _AUDIO_PARAM_FIELDS
+        if unknown_params:
+            raise ContractError(
+                "invalid-input",
+                "unknown params field(s): " + ", ".join(sorted(unknown_params)),
+            )
+        narration = params_raw.get("narration")
+        if not isinstance(narration, str) or not narration.strip():
+            raise ContractError(
+                "invalid-input", "params.narration must be a non-empty string"
+            )
+        if len(narration) > MAX_NARRATION_CHARS:
+            raise ContractError(
+                "invalid-input",
+                f"params.narration may not exceed {MAX_NARRATION_CHARS} characters",
+            )
+        return {
+            "op": op,
+            "input_key": input_key,
+            "output_key": output_key,
+            "params": {"narration": narration.strip()},
         }
 
     unknown_params = set(params_raw) - _PARAM_FIELDS

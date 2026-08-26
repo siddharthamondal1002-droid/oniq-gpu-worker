@@ -137,7 +137,7 @@ def test_dockerfile_user_sits_between_last_copy_and_cmd():
     assert last_copy < user < cmd
 
 
-def test_dockerfile_copies_exactly_the_six_files():
+def test_dockerfile_copies_exactly_the_seven_files():
     copies = [l for l in _dockerfile_instructions() if l.startswith("COPY")]
     copied = [l.split()[1] for l in copies]
     assert copied == [
@@ -146,6 +146,7 @@ def test_dockerfile_copies_exactly_the_six_files():
         "preprocess.py",
         "storage.py",
         "videogen.py",
+        "audio.py",
         "handler.py",
     ]
 
@@ -167,6 +168,7 @@ def test_dockerignore_denies_by_default():
         "!preprocess.py",
         "!storage.py",
         "!videogen.py",
+        "!audio.py",
         "!handler.py",
     }
 
@@ -189,6 +191,11 @@ def test_requirements_are_the_recorded_pins():
         "protobuf==5.29.3",
         "imageio==2.36.1",
         "imageio-ffmpeg==0.5.1",
+        # audio_mux (2026-08-26): in-process TTS + mux — no shell surface.
+        "piper-tts==1.2.0",
+        "piper-phonemize==1.1.0",
+        "onnxruntime==1.29.0",
+        "av==13.1.0",
     ]
 
 
@@ -203,12 +210,12 @@ def test_dockerfile_env_protects_the_nonroot_runtime():
 
 
 def test_op_input_defaults_to_the_image_workload():
-    # video_generate must be an explicit dispatch choice, never a default
-    # a habitual re-run could trip into.
+    # video_generate and audio_mux must be explicit dispatch choices,
+    # never a default a habitual re-run could trip into.
     doc, raw = _load("gpu-validation.yml")
     op = _triggers(doc)["workflow_dispatch"]["inputs"]["op"]
     assert op["default"] == "image_preprocess"
-    assert op["options"] == ["image_preprocess", "video_generate"]
+    assert op["options"] == ["image_preprocess", "video_generate", "audio_mux"]
     assert "OP: ${{ inputs.op }}" in raw
 
 
