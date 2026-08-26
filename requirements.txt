@@ -1,3 +1,7 @@
 runpod==1.7.7
 pillow==11.0.0
 boto3==1.35.76
+# torch 2.x does not depend on numpy; tensor.numpy() raises a bare
+# RuntimeError without it — measured live 2026-08-26, job 4f15c663 (the
+# first job to reach the GPU path, which no CPU test rig can execute).
+numpy==2.1.3

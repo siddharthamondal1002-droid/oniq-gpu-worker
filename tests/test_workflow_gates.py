@@ -175,10 +175,17 @@ def test_dockerignore_denies_by_default():
     }
 
 
-def test_requirements_are_the_three_recorded_pins():
+def test_requirements_are_the_recorded_pins():
+    # numpy joined 2026-08-26: torch 2.x does not depend on it, and the
+    # first job to reach the GPU path died on tensor.numpy() without it.
     with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as fh:
-        pins = [l.strip() for l in fh if l.strip()]
-    assert pins == ["runpod==1.7.7", "pillow==11.0.0", "boto3==1.35.76"]
+        pins = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
+    assert pins == [
+        "runpod==1.7.7",
+        "pillow==11.0.0",
+        "boto3==1.35.76",
+        "numpy==2.1.3",
+    ]
 
 
 def test_dockerfile_env_protects_the_nonroot_runtime():

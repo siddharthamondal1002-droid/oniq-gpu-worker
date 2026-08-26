@@ -103,7 +103,7 @@ jobs:
 
       - name: Imports and serverless entrypoint
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler; import runpod; assert hasattr(runpod.serverless, 'start'); print('imports ok')"
+          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); print('imports ok, tensor->bytes ok')"
 
       - name: Runtime user is uid 10001 and /app is not writable
         run: |
