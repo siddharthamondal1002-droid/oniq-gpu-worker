@@ -15,8 +15,8 @@ def _gpu_types_raw(price=0.5, lowest=0.22):
             "data": {
                 "gpuTypes": [
                     {
-                        "id": "NVIDIA L4",
-                        "displayName": "L4",
+                        "id": "NVIDIA RTX A5000",
+                        "displayName": "RTX A5000",
                         "memoryInGb": 24,
                         "secureCloud": True,
                         "communityCloud": True,
@@ -40,7 +40,7 @@ def _endpoint(env=None, gpus=None, mn=0, mx=1, standby=0):
         "workersMin": mn,
         "workersMax": mx,
         "workersStandby": standby,
-        "gpuTypeIds": gpus or ["NVIDIA L4"],
+        "gpuTypeIds": gpus or ["NVIDIA RTX A5000"],
         "idleTimeout": 5,
         "env": env
         if env is not None
@@ -349,7 +349,7 @@ def test_preflight_refuses_ambiguous_endpoints_without_id():
 
 def test_preflight_refuses_unparsed_endpoint_fields():
     weird = {"id": "ep-1", "minWorkers": 0, "maxWorkers": 1,
-             "gpuTypeIds": ["NVIDIA L4"], "env": _endpoint()["env"]}
+             "gpuTypeIds": ["NVIDIA RTX A5000"], "env": _endpoint()["env"]}
     with pytest.raises(spend_run.SpendStop) as exc:
         _preflight(FakeClient(endpoints=[weird]))
     assert exc.value.code == "endpoint-fields-unparsed"

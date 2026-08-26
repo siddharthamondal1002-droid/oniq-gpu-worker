@@ -32,16 +32,19 @@ JOB_CAP_USD = Decimal("0.50")
 
 RUNTIME_CEILING_SECONDS = 900
 
-# Owner directive 2026-08-26 (audio canary): the endpoint's card is now
-# the L4 24GB — the owner disabled the RTX 3090 on the endpoint after its
-# secure-cloud pool flapped through three consecutive $0 admission
-# refusals in one evening hour, and enabled the L4 (secure $0.49/h in
-# every catalogue pull that day, allocatable in all of them, same 24GB).
+# Owner directive 2026-08-26 (audio canary, third card of the day): the
+# endpoint now offers the RTX A5000 24GB. The 3090's pool flapped through
+# three $0 refusals in an hour; the L4 (secure-only) admitted under the
+# community/secure-only branch but the owner moved on before a dispatch
+# landed. The A5000 is the cheapest card tried today, its secure price is
+# well under the cap, and its community-market signal is LIVE again in
+# today's pulls — this is the very card whose 2026-08-25 null-lowestPrice
+# bytes taught the strict rule, and that strict rule still governs it.
 # The AUDIO workload is CPU-by-design and GPU-agnostic; VIDEO remains
 # measured on the 3090 only, which is why verify_gpu_success still pins
-# "3090" — a video job on this endpoint now refuses rather than running
-# on an unmeasured card.
-TARGET_GPU = "NVIDIA L4"
+# "3090" — a video job on this endpoint refuses rather than running on
+# an unmeasured card.
+TARGET_GPU = "NVIDIA RTX A5000"
 
 # Server-side allow-list: which card ONIQ rents is an owner decision, and
 # the allow-list is why "give me 8x H100" cannot be typed at all.
