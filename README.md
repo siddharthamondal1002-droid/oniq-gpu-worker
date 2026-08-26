@@ -14,10 +14,21 @@ The worker must never move into `oniq-sparkle-pay`.
 | ------------------------- | ----------------------------------------------------------- |
 | `contract.py`             | bounded job contract, error codes, explicit output whitelist |
 | `preprocess.py`           | the workload; CUDA-only by default via `run_gpu_op`         |
+| `videogen.py`             | `video_generate` — LTX-Video image-to-video on CUDA         |
+| `audio.py`                | `audio_mux` — in-house narration muxed under a video, CPU   |
 | `storage.py`              | R2 by reference (bucket `oniq-gpu`), fails closed           |
 | `handler.py`              | serverless handler, runtime ceiling, deterministic cleanup  |
 | `runpod_client.py`        | CI harness client — never shipped in the image              |
 | `validation/admission.py` | financial admission — pure functions, no network            |
+
+`audio_mux` (2026-08-26) speaks a narration with piper (the sha256-pinned
+`en-us-ryan-high` voice, baked into the media image like the LTX weights)
+via onnxruntime in-process, MEASURES it, refuses — never truncates — a
+line longer than the video, normalizes to RMS −20 dBFS under a −1.5 dBFS
+peak ceiling, and muxes an AAC track under the COPIED video stream with
+PyAV. The output is verified by decoding: both streams, ≤0.25 s drift,
+peak above −60 dBFS (mirroring the app's shared `videoAudio` verdict).
+No process is ever spawned; the scan covers `audio.py` too.
 
 Only the first four files (plus `requirements.txt`) go into the Docker
 image; `COPY` names them individually and `.dockerignore` denies
