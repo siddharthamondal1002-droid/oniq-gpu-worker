@@ -436,7 +436,7 @@ def discover(out_path=None) -> dict:
     raw_cat, catalogue = gpu_catalogue()
     report["gpu_catalogue_raw"] = json.loads(raw_cat)
     report["gpu_catalogue_parsed"] = catalogue
-    report["target_gpu_parsed"] = find_gpu(catalogue, "NVIDIA L4")
+    report["target_gpu_parsed"] = find_gpu(catalogue, "NVIDIA RTX A5000")
 
     raw_pods, pods = get_pods()
     report["pods_raw"] = json.loads(raw_pods)

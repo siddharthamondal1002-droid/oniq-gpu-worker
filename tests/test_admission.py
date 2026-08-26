@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 import contract
+import runpod_client as rp
 from validation import admission
 
 
@@ -159,9 +160,9 @@ def test_runtime_ceiling_agrees_with_the_contract():
     assert admission.RUNTIME_CEILING_SECONDS == contract.RUNTIME_CEILING_SECONDS
 
 
-def test_target_is_the_l4_and_allow_list_is_closed():
-    # Owner directive 2026-08-26: the endpoint's card is the L4 24GB.
-    assert admission.TARGET_GPU == "NVIDIA L4"
+def test_target_is_the_a5000_and_allow_list_is_closed():
+    # Owner directive 2026-08-26 (third card of the day, settled).
+    assert admission.TARGET_GPU == "NVIDIA RTX A5000"
     assert set(admission.ALLOWED_GPUS) == {admission.TARGET_GPU}
 
 
@@ -184,7 +185,7 @@ def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None,
 
 
 def test_available_target_is_returned():
-    cat = [_gpu("NVIDIA L4", 24, display="L4")]
+    cat = [_gpu("NVIDIA RTX A5000", 24, display="RTX A5000")]
     assert admission.require_available(cat)["memory_gb"] == 24
 
 
@@ -200,7 +201,7 @@ def test_missing_target_raises_with_alternatives():
 
 
 def test_unpriced_target_is_unavailable_never_free():
-    cat = [_gpu("NVIDIA L4", 24, price=None, on_demand=None)]
+    cat = [_gpu("NVIDIA RTX A5000", 24, price=None, on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -208,7 +209,7 @@ def test_unpriced_target_is_unavailable_never_free():
 def test_list_price_without_capacity_is_unavailable():
     # The A5000's exact state: a securePrice in the catalogue while
     # lowestPrice is null — a list price is not capacity.
-    cat = [_gpu("NVIDIA L4", 24, price="0.27", on_demand=None)]
+    cat = [_gpu("NVIDIA RTX A5000", 24, price="0.27", on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -220,7 +221,7 @@ def test_unavailable_never_substitutes():
 
 
 def test_community_only_target_is_not_secure_capacity():
-    cat = [_gpu("NVIDIA L4", 24, secure=False)]
+    cat = [_gpu("NVIDIA RTX A5000", 24, secure=False)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -229,28 +230,29 @@ def test_secure_only_card_admits_on_its_secure_price_alone():
     # The L4 shape, verbatim semantics from run #14's raw bytes: no
     # community market exists, so a null lowestPrice carries no signal.
     cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=False)]
-    entry = admission.require_available(cat)
+    entry = admission.require_available(cat, target="NVIDIA L4")
     assert entry["secure_price"] == 0.49
-    res = admission.admit(
-        gpu_name=entry["id"], vram_gb=entry["memory_gb"],
-        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
-        price_per_hour=entry["secure_price"],
-    )
-    assert str(res.reserved_usd) == "0.13"
+    # Reservation math on the eligible price; admit()'s closed allow-list
+    # is the TARGET card's own gate and is tested with the target.
+    assert str(admission.reserve_usd(entry["secure_price"],
+                                     admission.RUNTIME_CEILING_SECONDS)) == "0.13"
 
 
 def test_secure_only_card_without_a_secure_price_is_unavailable():
     cat = [_gpu("NVIDIA L4", 24, price=None, on_demand=None, community=False)]
     with pytest.raises(admission.UnavailableGpu):
-        admission.require_available(cat)
+        admission.require_available(cat, target="NVIDIA L4")
 
 
 def test_secure_only_card_over_cap_is_refused_at_admit():
+    # Eligibility is not admission: a secure-only card can be ELIGIBLE at
+    # a price the cap then refuses. The cap fires on the TARGET name (the
+    # closed allow-list would refuse any other name even earlier).
     cat = [_gpu("NVIDIA L4", 24, price=2.04, on_demand=None, community=False)]
-    entry = admission.require_available(cat)  # eligible, but the cap rules
+    entry = admission.require_available(cat, target="NVIDIA L4")  # eligible
     with pytest.raises(admission.AdmissionRefused) as exc:
         admission.admit(
-            gpu_name=entry["id"], vram_gb=entry["memory_gb"],
+            gpu_name=admission.TARGET_GPU, vram_gb=entry["memory_gb"],
             runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
             price_per_hour=entry["secure_price"],
         )
@@ -264,7 +266,7 @@ def test_missing_or_malformed_community_flag_rejects_conservatively():
     for bad in (None, "false"):
         cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=bad)]
         with pytest.raises(admission.UnavailableGpu):
-            admission.require_available(cat)
+            admission.require_available(cat, target="NVIDIA L4")
 
 
 def test_community_card_still_requires_the_market_signal():
@@ -272,13 +274,13 @@ def test_community_card_still_requires_the_market_signal():
     # list price but a null lowestPrice is NOT capacity.
     cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=True)]
     with pytest.raises(admission.UnavailableGpu):
-        admission.require_available(cat)
+        admission.require_available(cat, target="NVIDIA L4")
 
 
 def test_matching_is_on_id_never_display_name():
     # displayName carries the short name in real payloads; a catalogue
     # whose ids are short names must NOT satisfy the target.
-    cat = [_gpu("L4", 24, display="NVIDIA L4")]
+    cat = [_gpu("RTX A5000", 24, display="NVIDIA RTX A5000")]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -300,26 +302,42 @@ def _real_catalogue():
     return [rp.parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
 
 
-def test_real_payload_l4_is_available_on_secure_cloud():
-    # The L4 entry is verbatim provider bytes recorded from gpu-validation
-    # run #10 (2026-08-26) by the same discover mechanism as the rest.
-    entry = admission.require_available(_real_catalogue())
-    assert entry["id"] == "NVIDIA L4"
+A5000_FRESH_RAW = {
+    # Verbatim provider bytes, gpu-validation run #15 (2026-08-26T17:36Z):
+    # the A5000's community-market signal is live again.
+    "id": "NVIDIA RTX A5000", "displayName": "RTX A5000", "memoryInGb": 24,
+    "secureCloud": True, "communityCloud": True,
+    "securePrice": 0.27, "communityPrice": 0.16,
+    "lowestPrice": {"uninterruptablePrice": 0.16, "minimumBidPrice": 0.16},
+}
+
+
+def test_real_payload_2026_08_25_a5000_still_refuses():
+    # The recorded 2026-08-25 bytes are the LESSON bytes: securePrice with
+    # a null lowestPrice on a community-market card is not capacity.
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(_real_catalogue())
+
+
+def test_real_payload_fresh_a5000_is_available_on_secure_cloud():
+    entry = admission.require_available([rp.parse_gpu_type(A5000_FRESH_RAW)])
+    assert entry["id"] == "NVIDIA RTX A5000"
     assert entry["memory_gb"] == 24
-    assert entry["secure_price"] == 0.49
+    assert entry["secure_price"] == 0.27
 
 
-def test_real_payload_admits_the_3090_at_thirteen_cents():
-    # Live secure price 0.5 $/h: CEIL(0.5 * 900 / 3600, $0.01) = $0.13,
-    # under the $0.50 job cap. The reservation math on real numbers.
-    entry = admission.require_available(_real_catalogue())
+def test_real_payload_admits_the_a5000_at_seven_cents():
+    # Fresh secure price on run #15 bytes: CEIL(0.27 * 900 / 3600, $0.01)
+    # = $0.07, under the $0.50 job cap. The reservation math on real
+    # numbers, the cheapest card of the day.
+    entry = admission.require_available([rp.parse_gpu_type(A5000_FRESH_RAW)])
     res = admission.admit(
         gpu_name=entry["id"],
         vram_gb=entry["memory_gb"],
         runtime_seconds=900,
         price_per_hour=entry["secure_price"],
     )
-    assert res.reserved_usd == Decimal("0.13")
+    assert res.reserved_usd == Decimal("0.07")
     assert res.reserved_usd <= admission.JOB_CAP_USD
 
 
