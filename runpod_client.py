@@ -296,6 +296,47 @@ def standby_schema_probe():
     }
 
 
+def rest_schema_probe():
+    """Read-only: the REST API's own OpenAPI document, reduced to what
+    the endpoint PATCH actually accepts — the exact schema run #34's
+    'not in input schema' refusal was validated against — plus every
+    standby-shaped key name anywhere in the spec. Sent without auth
+    (the spec is public); nothing mutates. Returns None when
+    unreadable."""
+    import re as _re
+
+    for url in (f"{REST_BASE}/openapi.json", "https://rest.runpod.io/openapi.json"):
+        try:
+            status, raw = _request(url, bearer=False)
+        except RunPodApiError:
+            continue
+        if status != 200 or not raw.lstrip().startswith("{"):
+            continue
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        patch_props = None
+        try:
+            schema = doc["paths"]["/endpoints/{endpointId}"]["patch"][
+                "requestBody"]["content"]["application/json"]["schema"]
+            ref = schema.get("$ref")
+            if ref and ref.startswith("#/components/schemas/"):
+                schema = doc["components"]["schemas"][ref.rsplit("/", 1)[1]]
+            props = schema.get("properties")
+            patch_props = sorted(props) if isinstance(props, dict) else None
+        except (KeyError, TypeError):
+            patch_props = None
+        return {
+            "spec_url": url,
+            "patch_endpoint_properties": patch_props,
+            "standby_shaped_keys": sorted(
+                set(_re.findall(r'"(\w*[Ss]tandby\w*)"', raw))
+            ),
+        }
+    return None
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),

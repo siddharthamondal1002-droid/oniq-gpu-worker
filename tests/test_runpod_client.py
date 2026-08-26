@@ -275,3 +275,40 @@ def test_standby_failure_carries_both_transport_bodies(monkeypatch):
     status, raw = rp.set_workers_standby_zero("ep-123")
     assert "rest patch -> 400" in raw
     assert "field not allowed" in raw
+
+
+def test_rest_schema_probe_reduces_the_openapi_spec(monkeypatch):
+    import runpod_client as rp
+
+    spec = {
+        "paths": {
+            "/endpoints/{endpointId}": {
+                "patch": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/EndpointUpdate"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "EndpointUpdate": {
+                    "properties": {"workersMin": {}, "workersMax": {}, "idleTimeout": {}}
+                },
+                "Endpoint": {"properties": {"workersStandby": {"readOnly": True}}},
+            }
+        },
+    }
+
+    def transport(url, *, method="GET", body=None, bearer=True, **kw):
+        assert bearer is False  # the public spec gets no credential
+        return 200, json.dumps(spec)
+
+    monkeypatch.setattr(rp, "_request", transport)
+    probe = rp.rest_schema_probe()
+    assert probe["patch_endpoint_properties"] == ["idleTimeout", "workersMax", "workersMin"]
+    assert probe["standby_shaped_keys"] == ["workersStandby"]

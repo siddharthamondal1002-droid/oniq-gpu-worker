@@ -64,9 +64,14 @@ def run(client) -> dict:
         # shaped, its name prints here and the next iteration uses it.
         probe = getattr(client, "standby_schema_probe", lambda: None)()
         if probe is None:
-            print("schema probe: unreadable")
+            print("graphql schema probe: unreadable (introspection blocked)")
         else:
-            _show("schema probe (names only)", probe)
+            _show("graphql schema probe (names only)", probe)
+        rest_probe = getattr(client, "rest_schema_probe", lambda: None)()
+        if rest_probe is None:
+            print("rest schema probe: unreadable")
+        else:
+            _show("rest openapi probe (names only)", rest_probe)
         raise SpendStop(
             "standby-patch-refused",
             f"both transports refused (statuses/bodies printed above); "
