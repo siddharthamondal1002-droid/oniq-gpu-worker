@@ -15,8 +15,8 @@ def _gpu_types_raw(price=0.5, lowest=0.22):
             "data": {
                 "gpuTypes": [
                     {
-                        "id": "NVIDIA GeForce RTX 3090",
-                        "displayName": "RTX 3090",
+                        "id": "NVIDIA L4",
+                        "displayName": "L4",
                         "memoryInGb": 24,
                         "secureCloud": True,
                         "communityCloud": True,
@@ -40,7 +40,7 @@ def _endpoint(env=None, gpus=None, mn=0, mx=1, standby=0):
         "workersMin": mn,
         "workersMax": mx,
         "workersStandby": standby,
-        "gpuTypeIds": gpus or ["NVIDIA GeForce RTX 3090"],
+        "gpuTypeIds": gpus or ["NVIDIA L4"],
         "idleTimeout": 5,
         "env": env
         if env is not None
@@ -349,16 +349,16 @@ def test_preflight_refuses_ambiguous_endpoints_without_id():
 
 def test_preflight_refuses_unparsed_endpoint_fields():
     weird = {"id": "ep-1", "minWorkers": 0, "maxWorkers": 1,
-             "gpuTypeIds": ["NVIDIA GeForce RTX 3090"], "env": _endpoint()["env"]}
+             "gpuTypeIds": ["NVIDIA L4"], "env": _endpoint()["env"]}
     with pytest.raises(spend_run.SpendStop) as exc:
         _preflight(FakeClient(endpoints=[weird]))
     assert exc.value.code == "endpoint-fields-unparsed"
 
 
-def test_preflight_refuses_non_3090_endpoint():
+def test_preflight_refuses_non_target_endpoint():
     with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=[_endpoint(gpus=["NVIDIA RTX A5000"])]))
-    assert exc.value.code == "endpoint-not-3090"
+        _preflight(FakeClient(endpoints=[_endpoint(gpus=["NVIDIA GeForce RTX 3090"])]))
+    assert exc.value.code == "endpoint-not-target"
 
 
 def test_preflight_refuses_bad_worker_bounds():
