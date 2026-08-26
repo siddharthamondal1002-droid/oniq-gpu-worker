@@ -5,3 +5,12 @@ boto3==1.35.76
 # RuntimeError without it — measured live 2026-08-26, job 4f15c663 (the
 # first job to reach the GPU path, which no CPU test rig can execute).
 numpy==2.1.3
+# media-inference pins (2026-08-26): diffusers LTX pipelines + the T5
+# tokenizer stack + mp4 encoding. Versions chosen against torch 2.5.1.
+diffusers==0.33.1
+transformers==4.48.3
+accelerate==1.2.1
+sentencepiece==0.2.0
+protobuf==5.29.3
+imageio==2.36.1
+imageio-ffmpeg==0.5.1

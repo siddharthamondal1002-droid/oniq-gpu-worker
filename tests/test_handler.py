@@ -7,6 +7,7 @@ import contract
 import handler
 import preprocess
 import storage
+import videogen
 
 
 GOOD_EVENT = {
@@ -14,6 +15,15 @@ GOOD_EVENT = {
         "op": "image_preprocess",
         "input_key": "in/a.png",
         "output_key": "out/a.jpeg",
+    }
+}
+
+VIDEO_EVENT = {
+    "input": {
+        "op": "video_generate",
+        "input_key": "in/a.jpg",
+        "output_key": "out/clip.mp4",
+        "params": {"prompt": "the subject blinks"},
     }
 }
 
@@ -64,6 +74,56 @@ def test_happy_path_cleans_up_workdir(wired):
     handler.handle(GOOD_EVENT)
     assert wired["workdir"].startswith("/")
     assert not os.path.exists(wired["workdir"])
+
+
+def test_video_event_routes_to_videogen_with_an_mp4_path(wired, monkeypatch):
+    seen = {}
+
+    def fake_videogen_run(job, input_path, output_path):
+        seen["output_path"] = output_path
+        seen["prompt"] = job["params"]["prompt"]
+        with open(output_path, "wb") as fh:
+            fh.write(b"mp4-bytes")
+        return {
+            "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",
+            "model_load_ms": 41000,
+            "inference_ms": 95000,
+            "encode_ms": 3500,
+            "frames": 97,
+            "fps": 24,
+            "video_seconds": 4.04,
+            "width": 704,
+            "height": 480,
+            "format": "mp4",
+            "output_bytes": 9,
+            "duration_ms": 140000,
+            "device": "cuda",
+            "gpu_name": "NVIDIA GeForce RTX 3090",
+            "vram_total_mb": 24576,
+            "vram_peak_mb": 9000,
+        }
+
+    monkeypatch.setattr(videogen, "run", fake_videogen_run)
+    result = handler.handle(VIDEO_EVENT)
+    assert result["ok"] is True
+    assert result["op"] == "video_generate"
+    assert seen["output_path"].endswith("/output.mp4")
+    assert seen["prompt"] == "the subject blinks"
+    assert result["model"].endswith("#distilled")
+    assert result["frames"] == 97
+    assert set(result) <= contract.OUTPUT_WHITELIST
+
+
+def test_video_cuda_refusal_surfaces_as_its_code(wired, monkeypatch):
+    def refusing_run(job, input_path, output_path):
+        raise preprocess.GpuUnavailable(
+            "video_generate requires CUDA; there is no CPU fallback"
+        )
+
+    monkeypatch.setattr(videogen, "run", refusing_run)
+    result = handler.handle(VIDEO_EVENT)
+    assert result["ok"] is False
+    assert result["code"] == "cuda-unavailable"
 
 
 def test_invalid_input_refused_before_any_io():
@@ -179,6 +239,7 @@ WORKER_FILES = (
     "contract.py",
     "preprocess.py",
     "storage.py",
+    "videogen.py",
     "handler.py",
 )
 

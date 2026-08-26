@@ -137,20 +137,15 @@ def test_dockerfile_user_sits_between_last_copy_and_cmd():
     assert last_copy < user < cmd
 
 
-def test_dockerfile_copies_exactly_the_five_files():
+def test_dockerfile_copies_exactly_the_six_files():
     copies = [l for l in _dockerfile_instructions() if l.startswith("COPY")]
     copied = [l.split()[1] for l in copies]
     assert copied == [
         "requirements.txt",
-        "/app/contract.py",
-        "/app/preprocess.py",
-        "/app/storage.py",
-        "/app/handler.py",
-    ] or copied == [
-        "requirements.txt",
         "contract.py",
         "preprocess.py",
         "storage.py",
+        "videogen.py",
         "handler.py",
     ]
 
@@ -171,6 +166,7 @@ def test_dockerignore_denies_by_default():
         "!contract.py",
         "!preprocess.py",
         "!storage.py",
+        "!videogen.py",
         "!handler.py",
     }
 
@@ -178,6 +174,7 @@ def test_dockerignore_denies_by_default():
 def test_requirements_are_the_recorded_pins():
     # numpy joined 2026-08-26: torch 2.x does not depend on it, and the
     # first job to reach the GPU path died on tensor.numpy() without it.
+    # The media pins joined the same day for LTX-Video image-to-video.
     with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as fh:
         pins = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
     assert pins == [
@@ -185,6 +182,13 @@ def test_requirements_are_the_recorded_pins():
         "pillow==11.0.0",
         "boto3==1.35.76",
         "numpy==2.1.3",
+        "diffusers==0.33.1",
+        "transformers==4.48.3",
+        "accelerate==1.2.1",
+        "sentencepiece==0.2.0",
+        "protobuf==5.29.3",
+        "imageio==2.36.1",
+        "imageio-ffmpeg==0.5.1",
     ]
 
 
@@ -193,3 +197,32 @@ def test_dockerfile_env_protects_the_nonroot_runtime():
     joined = " ".join(lines)
     assert "PYTHONDONTWRITEBYTECODE=1" in joined
     assert "HOME=/home/oniq" in joined
+
+
+# --------------------------------------------------------- media workload
+
+
+def test_op_input_defaults_to_the_image_workload():
+    # video_generate must be an explicit dispatch choice, never a default
+    # a habitual re-run could trip into.
+    doc, raw = _load("gpu-validation.yml")
+    op = _triggers(doc)["workflow_dispatch"]["inputs"]["op"]
+    assert op["default"] == "image_preprocess"
+    assert op["options"] == ["image_preprocess", "video_generate"]
+    assert "OP: ${{ inputs.op }}" in raw
+
+
+def test_worker_ci_builds_only_the_weightless_base_stage():
+    # GitHub runners must never download the model: CI builds --target
+    # base; the media stage bakes weights only on RunPod's builder.
+    _, raw = _load("worker-ci.yml")
+    assert "--target base" in raw
+
+
+def test_dockerfile_media_stage_loads_locally_only():
+    with open(os.path.join(ROOT, "Dockerfile"), encoding="utf-8") as fh:
+        raw = fh.read()
+    assert "FROM base AS media" in raw
+    assert "snapshot_download" in raw  # bake at BUILD time...
+    with open(os.path.join(ROOT, "videogen.py"), encoding="utf-8") as fh:
+        assert "local_files_only=True" in fh.read()  # ...never at job time

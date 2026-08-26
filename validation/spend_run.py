@@ -420,6 +420,7 @@ def submit_and_wait(
     job_input: dict,
     *,
     poll_s: int = 5,
+    watch_s: int | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
@@ -427,7 +428,14 @@ def submit_and_wait(
     job_id = submitted.get("id")
     if not job_id:
         raise SpendStop("submit-unparsed", "job id missing from submit response")
-    deadline = clock() + admission.RUNTIME_CEILING_SECONDS
+    # watch_s is the driver's WALL-CLOCK watch on the job, queue and cold
+    # boot included; execution itself stays bounded by the contract's
+    # runtime ceiling and the endpoint's executionTimeout. The default
+    # watch equals the ceiling; a media job passes a wider watch because
+    # a first pull of the model-baked image is minutes of delayTime.
+    if watch_s is None:
+        watch_s = admission.RUNTIME_CEILING_SECONDS
+    deadline = clock() + watch_s
     while clock() < deadline:
         _, status = client.job_status(endpoint_id, job_id)
         if status.get("status") in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
@@ -436,6 +444,17 @@ def submit_and_wait(
         sleep(poll_s)
     client.cancel_job(endpoint_id, job_id)
     raise SpendStop("job-deadline", f"job {job_id} exceeded the ceiling; cancelled")
+
+
+# The one motion prompt of the first media experiment — a server
+# constant, per the owner's Phase 5 spec; the workflow exposes no prompt
+# input, so a dispatch cannot vary it.
+VIDEO_PROMPT = (
+    "A cinematic close-up. The subject slowly turns toward the camera, "
+    "blinks naturally, and makes a subtle facial expression while the "
+    "camera gently pushes forward. Natural movement, stable identity, "
+    "realistic motion, consistent lighting."
+)
 
 
 def verify_gpu_success(output) -> None:
@@ -454,6 +473,26 @@ def verify_gpu_success(output) -> None:
     unexpected = set(output) - set(_allowed_output_keys())
     if unexpected:
         raise SpendStop("schema-violation", f"unwhitelisted keys: {sorted(unexpected)}")
+
+
+def verify_video_success(output: dict) -> None:
+    """Phase 9 of the media loop, ON TOP of verify_gpu_success: a video
+    job succeeds only when the model demonstrably loaded, CUDA inference
+    demonstrably ran, real frames exist and a non-zero artifact was
+    encoded. A completed status proves none of that by itself."""
+    model = str(output.get("model") or "")
+    if not model or model == "missing":
+        raise SpendStop("model-unproven", "worker did not report the loaded model")
+    if not output.get("model_load_ms"):
+        raise SpendStop("model-unproven", "model load time was not measured")
+    if not output.get("inference_ms"):
+        raise SpendStop("no-inference", "CUDA inference time was not measured")
+    if not output.get("frames"):
+        raise SpendStop("no-frames", "no video frames were generated")
+    if not output.get("video_seconds"):
+        raise SpendStop("no-frames", "generated video has zero duration")
+    if output.get("encode_ms") is None:
+        raise SpendStop("no-encode", "video encode time was not measured")
 
 
 def _allowed_output_keys():
@@ -507,17 +546,33 @@ def actual_cost_usd(execution_ms, price_per_hour: Decimal) -> Decimal:
     return exact.quantize(Decimal("0.01"), rounding=ROUND_UP)
 
 
-def one_job(client, facts: dict, *, output_key: str, sleep=time.sleep, clock=time.monotonic) -> dict:
+def one_job(
+    client,
+    facts: dict,
+    *,
+    output_key: str,
+    op: str = "image_preprocess",
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> dict:
     """Phases 12-16 for a single job. Fail-closed at every boundary."""
     quote = requote(client)
+    payload = {
+        "op": op,
+        "input_key": facts["input_ref"],
+        "output_key": output_key,
+    }
+    watch_s = None
+    if op == "video_generate":
+        payload["params"] = {"prompt": VIDEO_PROMPT}
+        # queue + first pull of the model-baked image can be many minutes
+        # of delayTime before bounded execution even starts.
+        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
     status = submit_and_wait(
         client,
         facts["endpoint_id"],
-        {
-            "op": "image_preprocess",
-            "input_key": facts["input_ref"],
-            "output_key": output_key,
-        },
+        payload,
+        watch_s=watch_s,
         sleep=sleep,
         clock=clock,
     )
@@ -525,6 +580,8 @@ def one_job(client, facts: dict, *, output_key: str, sleep=time.sleep, clock=tim
     if status.get("status") != "COMPLETED":
         raise SpendStop("job-failed", f"terminal status {status.get('status')}")
     verify_gpu_success(status.get("output"))
+    if op == "video_generate":
+        verify_video_success(status["output"])
     cost = actual_cost_usd(status.get("executionTime"), quote["price"])
     if cost > quote["reservation"]:
         raise SpendStop(
@@ -535,6 +592,7 @@ def one_job(client, facts: dict, *, output_key: str, sleep=time.sleep, clock=tim
     termination = confirm_termination(client, facts["endpoint_id"], sleep=sleep, clock=clock)
     row = {
         "job_id": status.get("_job_id"),
+        "op": op,
         "gpu_name": status["output"].get("gpu_name"),
         "vram_peak_mb": status["output"].get("vram_peak_mb"),
         "delay_ms": status.get("delayTime"),
@@ -544,6 +602,28 @@ def one_job(client, facts: dict, *, output_key: str, sleep=time.sleep, clock=tim
         "output_key": output_key,
         "termination": termination,
     }
+    if op == "video_generate":
+        out = status["output"]
+        video_seconds = Decimal(str(out.get("video_seconds")))
+        row.update(
+            {
+                "model": out.get("model"),
+                "model_load_ms": out.get("model_load_ms"),
+                "inference_ms": out.get("inference_ms"),
+                "encode_ms": out.get("encode_ms"),
+                "frames": out.get("frames"),
+                "fps": out.get("fps"),
+                "resolution": f"{out.get('width')}x{out.get('height')}",
+                "video_seconds": str(video_seconds),
+                "output_bytes": out.get("output_bytes"),
+                "cost_per_generated_second_usd": str(
+                    (cost / video_seconds).quantize(Decimal("0.0001"), rounding=ROUND_UP)
+                ),
+                "cost_per_generated_minute_usd": str(
+                    (cost * 60 / video_seconds).quantize(Decimal("0.01"), rounding=ROUND_UP)
+                ),
+            }
+        )
     _show("job row", row)
     if termination != TERMINATION_CONFIRMED:
         raise SpendStop(
@@ -691,7 +771,18 @@ def main(argv) -> int:
             return 0
 
         through = int(os.environ.get("THROUGH_PHASE", "16"))
-        rows = [one_job(rp, facts, output_key=f"{facts['output_prefix']}/job-1.jpeg")]
+        op = os.environ.get("OP", "image_preprocess")
+        if op not in ("image_preprocess", "video_generate"):
+            raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
+        suffix = "ltx-001.mp4" if op == "video_generate" else "job-1.jpeg"
+        rows = [
+            one_job(
+                rp,
+                facts,
+                output_key=f"{facts['output_prefix']}/{suffix}",
+                op=op,
+            )
+        ]
         print("PHASE 13-16 PASS — one real job, verified and terminated")
         if through >= 17:
             failure_battery(rp, facts)

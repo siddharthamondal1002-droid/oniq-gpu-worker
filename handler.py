@@ -20,6 +20,7 @@ import time
 import contract
 import preprocess
 import storage
+import videogen
 
 
 class Cleanup:
@@ -64,12 +65,18 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
-        output_path = f"{workdir}/output.{job['params']['format']}"
+        if job["op"] == "video_generate":
+            output_path = f"{workdir}/output.mp4"
+        else:
+            output_path = f"{workdir}/output.{job['params']['format']}"
 
         storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
         _check_deadline(started)
 
-        metrics = preprocess.run(job, input_path, output_path)
+        if job["op"] == "video_generate":
+            metrics = videogen.run(job, input_path, output_path)
+        else:
+            metrics = preprocess.run(job, input_path, output_path)
         _check_deadline(started)
 
         storage.upload(output_path, job["output_key"])

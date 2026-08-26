@@ -508,6 +508,120 @@ def test_submit_deadline_cancels_and_stops():
     assert client.cancelled == ["job-1"]
 
 
+# On $0.50/h, 180s of execution computes to $0.025 -> ceiled to $0.03.
+def _good_video_status(execution_ms=180_000):
+    return {
+        "status": "COMPLETED",
+        "delayTime": 300_000,  # first pull of a model-baked image
+        "executionTime": execution_ms,
+        "output": {
+            "ok": True,
+            "op": "video_generate",
+            "output_key": "out/validation/ltx-001.mp4",
+            "device": "cuda",
+            "gpu_name": "NVIDIA GeForce RTX 3090",
+            "vram_total_mb": 24576,
+            "vram_peak_mb": 9000,
+            "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",
+            "model_load_ms": 41_000,
+            "inference_ms": 95_000,
+            "encode_ms": 3_500,
+            "frames": 97,
+            "fps": 24,
+            "video_seconds": 4.04,
+            "width": 704,
+            "height": 480,
+            "format": "mp4",
+            "output_bytes": 2_400_000,
+            "duration_ms": 160_000,
+            "cleanup_ok": True,
+        },
+    }
+
+
+def _run_one_video(client):
+    ft = FakeTime()
+    facts = _preflight(client)
+    return spend_run.one_job(
+        client, facts, output_key="out/validation/ltx-001.mp4",
+        op="video_generate", sleep=ft.sleep, clock=ft.clock,
+    )
+
+
+def test_one_video_job_submits_the_server_prompt_only():
+    client = FakeClient(job_statuses=[_good_video_status()])
+    _run_one_video(client)
+    payload = client.submitted[0][1]
+    assert payload["op"] == "video_generate"
+    assert payload["params"] == {"prompt": spend_run.VIDEO_PROMPT}
+
+
+def test_one_video_job_row_carries_measured_economics():
+    client = FakeClient(job_statuses=[_good_video_status()])
+    row = _run_one_video(client)
+    assert row["op"] == "video_generate"
+    assert row["model"].endswith("#distilled")
+    assert row["resolution"] == "704x480"
+    assert row["frames"] == 97
+    assert row["video_seconds"] == "4.04"
+    assert row["cost_usd"] == "0.03"
+    # $0.03 / 4.04s and *60, both ceiled — never rounded down.
+    assert row["cost_per_generated_second_usd"] == "0.0075"
+    assert row["cost_per_generated_minute_usd"] == "0.45"
+    assert row["termination"] == spend_run.TERMINATION_CONFIRMED
+
+
+def test_video_watch_survives_a_long_cold_pull():
+    # 200 polls x 5s = 1000s of queue: past the 900s default watch, well
+    # inside the video watch (ceiling + 900). The 900s runtime ceiling
+    # still binds EXECUTION; the watch is wall-clock around it.
+    long_queue = [{"status": "IN_QUEUE"}] * 200 + [_good_video_status()]
+    client = FakeClient(job_statuses=long_queue)
+    row = _run_one_video(client)
+    assert row["cost_usd"] == "0.03"
+    assert client.cancelled == []
+
+
+def test_verify_video_success_passes_on_full_evidence():
+    spend_run.verify_video_success(_good_video_status()["output"])
+
+
+@pytest.mark.parametrize(
+    "patch,code",
+    [
+        ({"model": "missing"}, "model-unproven"),
+        ({"model": ""}, "model-unproven"),
+        ({"model_load_ms": 0}, "model-unproven"),
+        ({"inference_ms": None}, "no-inference"),
+        ({"frames": 0}, "no-frames"),
+        ({"video_seconds": 0}, "no-frames"),
+        ({"encode_ms": None}, "no-encode"),
+    ],
+)
+def test_verify_video_success_stops_on_each_missing_proof(patch, code):
+    output = _good_video_status()["output"]
+    output.update(patch)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.verify_video_success(output)
+    assert exc.value.code == code
+
+
+def test_verify_video_success_accepts_a_zero_ms_encode():
+    # 0 is a measured value; only an ABSENT encode time is a stop.
+    output = _good_video_status()["output"]
+    output["encode_ms"] = 0
+    spend_run.verify_video_success(output)
+
+
+def test_one_video_job_stops_when_the_worker_proves_no_model():
+    status = _good_video_status()
+    status["output"]["model"] = "missing"
+    client = FakeClient(job_statuses=[status])
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one_video(client)
+    assert exc.value.code == "model-unproven"
+
+
 # ------------------------------------------------------------- termination
 
 

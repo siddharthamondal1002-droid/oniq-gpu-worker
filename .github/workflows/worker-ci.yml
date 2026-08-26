@@ -27,7 +27,7 @@ jobs:
       - name: Secret and shell-surface scan
         run: |
           set -eu
-          FILES="contract.py preprocess.py storage.py handler.py runpod_client.py validation/admission.py validation/spend_run.py"
+          FILES="contract.py preprocess.py storage.py handler.py videogen.py runpod_client.py validation/admission.py validation/spend_run.py"
           for pattern in 'eval(' 'exec(' 'subprocess' 'os.system' 'pickle' 'shell=True'; do
             if grep -Fn "$pattern" $FILES; then
               echo "FORBIDDEN CALL FOUND: $pattern"; exit 1
@@ -87,7 +87,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image
-        run: docker build -t oniq-gpu-worker:ci .
+        run: docker build --target base -t oniq-gpu-worker:ci .
 
       - name: torch is the cu121 build
         run: |
@@ -103,7 +103,7 @@ jobs:
 
       - name: Imports and serverless entrypoint
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); print('imports ok, tensor->bytes ok')"
+          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler, videogen; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); import diffusers, transformers, imageio, imageio_ffmpeg; from diffusers import LTXImageToVideoPipeline; print('imports ok, tensor->bytes ok, LTX pipeline importable')"
 
       - name: Runtime user is uid 10001 and /app is not writable
         run: |
@@ -114,12 +114,12 @@ jobs:
           print('uid 10001, /app read-only')
           "
 
-      - name: Image carries only the five shipped files
+      - name: Image carries only the six shipped files
         run: |
           docker run --rm oniq-gpu-worker:ci python3 -c "
           import os
           found = sorted(os.listdir('/app'))
-          expect = ['contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py']
+          expect = ['contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py', 'videogen.py']
           assert found == expect, found
           print('payload exact:', found)
           "

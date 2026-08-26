@@ -107,6 +107,75 @@ def test_input_byte_bound_is_positive_and_finite():
     assert 0 < contract.MAX_INPUT_BYTES <= 64 * 1024 * 1024
 
 
+def _video_job(**overrides):
+    base = {
+        "op": "video_generate",
+        "input_key": "in/face.jpg",
+        "output_key": "out/clip.mp4",
+        "params": {"prompt": "  the subject turns toward the camera  "},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_video_job_normalizes_to_prompt_only():
+    job = contract.validate_job(_video_job())
+    assert job["op"] == "video_generate"
+    assert job["params"] == {"prompt": "the subject turns toward the camera"}
+
+
+def test_video_job_requires_a_prompt():
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(_video_job(params={}))
+    assert exc.value.code == "invalid-input"
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(_video_job(params={"prompt": "   "}))
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(_video_job(params={"prompt": 42}))
+
+
+def test_video_prompt_is_bounded():
+    long = "x" * (contract.MAX_PROMPT_CHARS + 1)
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(_video_job(params={"prompt": long}))
+    assert exc.value.code == "invalid-input"
+    ok = contract.validate_job(
+        _video_job(params={"prompt": "y" * contract.MAX_PROMPT_CHARS})
+    )
+    assert len(ok["params"]["prompt"]) == contract.MAX_PROMPT_CHARS
+
+
+def test_video_job_refuses_every_knob_but_the_prompt():
+    # Resolution, length, steps, model — all server decisions. A caller
+    # naming any of them is refused, not silently ignored.
+    for knob in ("width", "num_frames", "steps", "model", "target_max_dim"):
+        with pytest.raises(contract.ContractError) as exc:
+            contract.validate_job(
+                _video_job(params={"prompt": "ok", knob: 1})
+            )
+        assert exc.value.code == "invalid-input"
+        assert knob in exc.value.message
+
+
+def test_video_constants_are_the_recorded_server_decisions():
+    assert (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT) == (704, 480)
+    assert contract.VIDEO_WIDTH % 32 == 0 and contract.VIDEO_HEIGHT % 32 == 0
+    assert contract.VIDEO_NUM_FRAMES % 8 == 1  # LTX's 8k+1 rule
+    assert contract.VIDEO_FPS == 24
+
+
+def test_video_evidence_fields_are_whitelisted():
+    assert {
+        "model",
+        "model_load_ms",
+        "inference_ms",
+        "encode_ms",
+        "frames",
+        "fps",
+        "video_seconds",
+    } <= contract.OUTPUT_WHITELIST
+
+
 def test_filter_output_drops_everything_not_whitelisted():
     filtered = contract.filter_output(
         {"ok": True, "device": "cuda", "aws_secret": "LEAK", "env": {"x": 1}}
