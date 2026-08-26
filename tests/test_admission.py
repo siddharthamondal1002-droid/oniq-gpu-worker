@@ -168,7 +168,8 @@ def test_target_is_the_l4_and_allow_list_is_closed():
 # ---------------------------------------------------------------- available
 
 
-def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None):
+def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None,
+         community=True):
     return {
         "id": gpu_id,
         "display_name": display or gpu_id,
@@ -176,6 +177,9 @@ def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None)
         "secure_cloud": secure,
         "secure_price": price,
         "on_demand_price": on_demand,
+        # Tri-state, like the parser emits: True/False are explicit
+        # provider booleans; None models a missing/malformed field.
+        "community_cloud": community,
     }
 
 
@@ -217,6 +221,56 @@ def test_unavailable_never_substitutes():
 
 def test_community_only_target_is_not_secure_capacity():
     cat = [_gpu("NVIDIA L4", 24, secure=False)]
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(cat)
+
+
+def test_secure_only_card_admits_on_its_secure_price_alone():
+    # The L4 shape, verbatim semantics from run #14's raw bytes: no
+    # community market exists, so a null lowestPrice carries no signal.
+    cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=False)]
+    entry = admission.require_available(cat)
+    assert entry["secure_price"] == 0.49
+    res = admission.admit(
+        gpu_name=entry["id"], vram_gb=entry["memory_gb"],
+        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+        price_per_hour=entry["secure_price"],
+    )
+    assert str(res.reserved_usd) == "0.13"
+
+
+def test_secure_only_card_without_a_secure_price_is_unavailable():
+    cat = [_gpu("NVIDIA L4", 24, price=None, on_demand=None, community=False)]
+    with pytest.raises(admission.UnavailableGpu):
+        admission.require_available(cat)
+
+
+def test_secure_only_card_over_cap_is_refused_at_admit():
+    cat = [_gpu("NVIDIA L4", 24, price=2.04, on_demand=None, community=False)]
+    entry = admission.require_available(cat)  # eligible, but the cap rules
+    with pytest.raises(admission.AdmissionRefused) as exc:
+        admission.admit(
+            gpu_name=entry["id"], vram_gb=entry["memory_gb"],
+            runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+            price_per_hour=entry["secure_price"],
+        )
+    assert exc.value.code == "over-job-cap"
+
+
+def test_missing_or_malformed_community_flag_rejects_conservatively():
+    # None models a missing field; a string models a malformed one. The
+    # parser only ever emits True/False/None, and None must never slip
+    # into the lenient secure-only branch.
+    for bad in (None, "false"):
+        cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=bad)]
+        with pytest.raises(admission.UnavailableGpu):
+            admission.require_available(cat)
+
+
+def test_community_card_still_requires_the_market_signal():
+    # The A5000 lesson, unweakened: a community-market card with a secure
+    # list price but a null lowestPrice is NOT capacity.
+    cat = [_gpu("NVIDIA L4", 24, price=0.49, on_demand=None, community=True)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
