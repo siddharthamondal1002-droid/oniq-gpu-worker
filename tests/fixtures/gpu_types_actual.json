@@ -1,97 +1,137 @@
 {
-  "_provenance": "RunPod GraphQL gpuTypes, captured 2026-08-25 via the read-only discovery channel. Entries verbatim for every GPU whose displayName contains 3090/4090/A5000/A4500/4000; the full response held 48 entries. The id field carries the canonical full name; displayName is the short name — the parser originally assumed the opposite, and this payload is the regression evidence.",
-  "data": {
-    "gpuTypes": [
-      {
-        "id": "NVIDIA GeForce RTX 3090",
-        "displayName": "RTX 3090",
-        "memoryInGb": 24,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.5,
-        "communityPrice": 0.22,
-        "lowestPrice": { "uninterruptablePrice": 0.22, "minimumBidPrice": 0.22 }
-      },
-      {
-        "id": "NVIDIA GeForce RTX 3090 Ti",
-        "displayName": "RTX 3090 Ti",
-        "memoryInGb": 24,
-        "secureCloud": false,
-        "communityCloud": true,
-        "securePrice": 0.46,
-        "communityPrice": 0.27,
-        "lowestPrice": { "uninterruptablePrice": null, "minimumBidPrice": null }
-      },
-      {
-        "id": "NVIDIA GeForce RTX 4090",
-        "displayName": "RTX 4090",
-        "memoryInGb": 24,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.74,
-        "communityPrice": 0.34,
-        "lowestPrice": { "uninterruptablePrice": 0.34, "minimumBidPrice": 0.34 }
-      },
-      {
-        "id": "NVIDIA RTX 4000 Ada Generation",
-        "displayName": "RTX 4000 Ada",
-        "memoryInGb": 20,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.28,
-        "communityPrice": 0.2,
-        "lowestPrice": { "uninterruptablePrice": null, "minimumBidPrice": null }
-      },
-      {
-        "id": "NVIDIA RTX 4000 SFF Ada Generation",
-        "displayName": "RTX 4000 Ada SFF",
-        "memoryInGb": 20,
-        "secureCloud": false,
-        "communityCloud": true,
-        "securePrice": 0.44,
-        "communityPrice": 0.18,
-        "lowestPrice": { "uninterruptablePrice": null, "minimumBidPrice": null }
-      },
-      {
-        "id": "NVIDIA RTX A4000",
-        "displayName": "RTX A4000",
-        "memoryInGb": 16,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.25,
-        "communityPrice": 0.17,
-        "lowestPrice": { "uninterruptablePrice": 0.17, "minimumBidPrice": 0.17 }
-      },
-      {
-        "id": "NVIDIA RTX A4500",
-        "displayName": "RTX A4500",
-        "memoryInGb": 20,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.25,
-        "communityPrice": 0.19,
-        "lowestPrice": { "uninterruptablePrice": 0.19, "minimumBidPrice": 0.19 }
-      },
-      {
-        "id": "NVIDIA RTX A5000",
-        "displayName": "RTX A5000",
-        "memoryInGb": 24,
-        "secureCloud": true,
-        "communityCloud": true,
-        "securePrice": 0.27,
-        "communityPrice": 0.16,
-        "lowestPrice": { "uninterruptablePrice": null, "minimumBidPrice": null }
-      },
-      {
-        "id": "NVIDIA RTX PRO 4000 Blackwell",
-        "displayName": "RTX PRO 4000",
-        "memoryInGb": 24,
-        "secureCloud": true,
-        "communityCloud": false,
-        "securePrice": 0.57,
-        "communityPrice": 0.5,
-        "lowestPrice": { "uninterruptablePrice": 0.5, "minimumBidPrice": 0.5 }
-      }
-    ]
-  }
+ "_provenance": "RunPod GraphQL gpuTypes, captured 2026-08-25 via the read-only discovery channel. Entries verbatim for every GPU whose displayName contains 3090/4090/A5000/A4500/4000; the full response held 48 entries. The id field carries the canonical full name; displayName is the short name \u2014 the parser originally assumed the opposite, and this payload is the regression evidence.",
+ "data": {
+  "gpuTypes": [
+   {
+    "id": "NVIDIA GeForce RTX 3090",
+    "displayName": "RTX 3090",
+    "memoryInGb": 24,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.5,
+    "communityPrice": 0.22,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.22,
+     "minimumBidPrice": 0.22
+    }
+   },
+   {
+    "id": "NVIDIA GeForce RTX 3090 Ti",
+    "displayName": "RTX 3090 Ti",
+    "memoryInGb": 24,
+    "secureCloud": false,
+    "communityCloud": true,
+    "securePrice": 0.46,
+    "communityPrice": 0.27,
+    "lowestPrice": {
+     "uninterruptablePrice": null,
+     "minimumBidPrice": null
+    }
+   },
+   {
+    "id": "NVIDIA GeForce RTX 4090",
+    "displayName": "RTX 4090",
+    "memoryInGb": 24,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.74,
+    "communityPrice": 0.34,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.34,
+     "minimumBidPrice": 0.34
+    }
+   },
+   {
+    "id": "NVIDIA RTX 4000 Ada Generation",
+    "displayName": "RTX 4000 Ada",
+    "memoryInGb": 20,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.28,
+    "communityPrice": 0.2,
+    "lowestPrice": {
+     "uninterruptablePrice": null,
+     "minimumBidPrice": null
+    }
+   },
+   {
+    "id": "NVIDIA RTX 4000 SFF Ada Generation",
+    "displayName": "RTX 4000 Ada SFF",
+    "memoryInGb": 20,
+    "secureCloud": false,
+    "communityCloud": true,
+    "securePrice": 0.44,
+    "communityPrice": 0.18,
+    "lowestPrice": {
+     "uninterruptablePrice": null,
+     "minimumBidPrice": null
+    }
+   },
+   {
+    "id": "NVIDIA RTX A4000",
+    "displayName": "RTX A4000",
+    "memoryInGb": 16,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.25,
+    "communityPrice": 0.17,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.17,
+     "minimumBidPrice": 0.17
+    }
+   },
+   {
+    "id": "NVIDIA RTX A4500",
+    "displayName": "RTX A4500",
+    "memoryInGb": 20,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.25,
+    "communityPrice": 0.19,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.19,
+     "minimumBidPrice": 0.19
+    }
+   },
+   {
+    "id": "NVIDIA RTX A5000",
+    "displayName": "RTX A5000",
+    "memoryInGb": 24,
+    "secureCloud": true,
+    "communityCloud": true,
+    "securePrice": 0.27,
+    "communityPrice": 0.16,
+    "lowestPrice": {
+     "uninterruptablePrice": null,
+     "minimumBidPrice": null
+    }
+   },
+   {
+    "id": "NVIDIA RTX PRO 4000 Blackwell",
+    "displayName": "RTX PRO 4000",
+    "memoryInGb": 24,
+    "secureCloud": true,
+    "communityCloud": false,
+    "securePrice": 0.57,
+    "communityPrice": 0.5,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.5,
+     "minimumBidPrice": 0.5
+    }
+   },
+   {
+    "id": "NVIDIA L4",
+    "displayName": "L4",
+    "memoryInGb": 24,
+    "secureCloud": true,
+    "communityCloud": false,
+    "securePrice": 0.49,
+    "communityPrice": 0.44,
+    "lowestPrice": {
+     "uninterruptablePrice": 0.44,
+     "minimumBidPrice": 0.44
+    }
+   }
+  ]
+ }
 }

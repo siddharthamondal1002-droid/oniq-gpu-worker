@@ -284,20 +284,22 @@ def preflight(
         )
     admission.check_endpoint_config(parsed["min_workers"], parsed["max_workers"])
 
-    # 3. The endpoint is the 3090, by id.
+    # 3. The endpoint is the target card, by id.
     gpu_ids = parsed.get("gpu_type_ids") or []
     if admission.TARGET_GPU not in gpu_ids:
         raise SpendStop(
-            "endpoint-not-3090",
-            f"endpoint gpuTypeIds {gpu_ids} does not include the target",
+            "endpoint-not-target",
+            f"endpoint gpuTypeIds {gpu_ids} does not include the target "
+            f"{admission.TARGET_GPU}",
         )
     extras = [g for g in gpu_ids if g != admission.TARGET_GPU]
     if extras:
         raise SpendStop(
             "endpoint-gpu-list-not-exclusive",
             f"endpoint can also allocate {extras} — the scheduler may hand "
-            "the job a non-3090, which fails the success gate AFTER paying "
-            "for the boot; restrict the endpoint to the 3090 only",
+            f"the job a non-target card, which fails the success gate AFTER "
+            f"paying for the boot; restrict the endpoint to "
+            f"{admission.TARGET_GPU} only",
         )
 
     # 4. R2 env NAMES present on the endpoint OR its template (values

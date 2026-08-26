@@ -159,8 +159,9 @@ def test_runtime_ceiling_agrees_with_the_contract():
     assert admission.RUNTIME_CEILING_SECONDS == contract.RUNTIME_CEILING_SECONDS
 
 
-def test_target_is_the_3090_and_allow_list_is_closed():
-    assert admission.TARGET_GPU == "NVIDIA GeForce RTX 3090"
+def test_target_is_the_l4_and_allow_list_is_closed():
+    # Owner directive 2026-08-26: the endpoint's card is the L4 24GB.
+    assert admission.TARGET_GPU == "NVIDIA L4"
     assert set(admission.ALLOWED_GPUS) == {admission.TARGET_GPU}
 
 
@@ -179,7 +180,7 @@ def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None)
 
 
 def test_available_target_is_returned():
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, display="RTX 3090")]
+    cat = [_gpu("NVIDIA L4", 24, display="L4")]
     assert admission.require_available(cat)["memory_gb"] == 24
 
 
@@ -195,7 +196,7 @@ def test_missing_target_raises_with_alternatives():
 
 
 def test_unpriced_target_is_unavailable_never_free():
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, price=None, on_demand=None)]
+    cat = [_gpu("NVIDIA L4", 24, price=None, on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -203,7 +204,7 @@ def test_unpriced_target_is_unavailable_never_free():
 def test_list_price_without_capacity_is_unavailable():
     # The A5000's exact state: a securePrice in the catalogue while
     # lowestPrice is null — a list price is not capacity.
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, price="0.27", on_demand=None)]
+    cat = [_gpu("NVIDIA L4", 24, price="0.27", on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -215,7 +216,7 @@ def test_unavailable_never_substitutes():
 
 
 def test_community_only_target_is_not_secure_capacity():
-    cat = [_gpu("NVIDIA GeForce RTX 3090", 24, secure=False)]
+    cat = [_gpu("NVIDIA L4", 24, secure=False)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -223,7 +224,7 @@ def test_community_only_target_is_not_secure_capacity():
 def test_matching_is_on_id_never_display_name():
     # displayName carries the short name in real payloads; a catalogue
     # whose ids are short names must NOT satisfy the target.
-    cat = [_gpu("RTX 3090", 24, display="NVIDIA GeForce RTX 3090")]
+    cat = [_gpu("L4", 24, display="NVIDIA L4")]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -245,11 +246,13 @@ def _real_catalogue():
     return [rp.parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
 
 
-def test_real_payload_3090_is_available_on_secure_cloud():
+def test_real_payload_l4_is_available_on_secure_cloud():
+    # The L4 entry is verbatim provider bytes recorded from gpu-validation
+    # run #10 (2026-08-26) by the same discover mechanism as the rest.
     entry = admission.require_available(_real_catalogue())
-    assert entry["id"] == "NVIDIA GeForce RTX 3090"
+    assert entry["id"] == "NVIDIA L4"
     assert entry["memory_gb"] == 24
-    assert entry["secure_price"] == 0.5
+    assert entry["secure_price"] == 0.49
 
 
 def test_real_payload_admits_the_3090_at_thirteen_cents():
