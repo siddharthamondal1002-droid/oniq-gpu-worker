@@ -57,16 +57,20 @@ def test_standby_one_patches_and_verifies_by_fresh_read():
     assert client.reads == []  # the fresh read actually happened
 
 
-def test_patch_refusal_is_a_stop_carrying_the_body():
+def test_patch_refusal_is_a_stop_and_the_full_body_is_printed(capsys):
+    # Run #35 lost the informative half of the diagnosis to a truncating
+    # slice in the STOP message — the body now prints in FULL first.
     client = FakeClient(
         reads=[[_ep(standby=1)]],
         patch_status=405,
-        patch_body='{"error": "method not allowed"}',
+        patch_body='{"error": "method not allowed"}' + "x" * 400,
     )
     with pytest.raises(spend_run.SpendStop) as exc:
         standby_zero.run(client)
     assert exc.value.code == "standby-patch-refused"
-    assert "method not allowed" in exc.value.message
+    out = capsys.readouterr().out
+    assert "method not allowed" in out
+    assert "x" * 400 in out  # nothing truncated
 
 
 def test_fresh_read_still_nonzero_is_a_stop():

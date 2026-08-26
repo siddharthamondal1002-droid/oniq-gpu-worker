@@ -53,16 +53,17 @@ def run(client) -> dict:
         "patching to the literal 0 (spend reduction)"
     )
     status, body = client.set_workers_standby_zero(endpoint_id)
-    print("PATCH status:", status)
+    print("patch status:", status)
+    # The body is the diagnosis (both transports' answers, verbatim) —
+    # print it in full BEFORE any stop can truncate it: run #35 lost the
+    # GraphQL half to a 200-char slice and cost this exact round trip.
+    print("patch response:", body)
     if status not in (200, 201):
-        # The body is the diagnosis: a 404/405 means REST cannot mutate
-        # endpoints and the console toggle is the only path — after
-        # which re-dispatching this mode verifies for free.
         raise SpendStop(
             "standby-patch-refused",
-            f"PATCH answered {status} (body: {body[:200]!r}); set "
-            "workersStandby to 0 in the RunPod console, then re-dispatch "
-            "standby-zero to verify",
+            f"both transports refused (statuses/bodies printed above); "
+            "set workersStandby to 0 in the RunPod console, then "
+            "re-dispatch standby-zero to verify",
         )
 
     # Never trust the PATCH echo — only a fresh read counts.
