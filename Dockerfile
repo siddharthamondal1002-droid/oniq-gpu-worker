@@ -5,10 +5,10 @@
 #   so the image cannot receive a stray .env even if .dockerignore were
 #   wrong (.dockerignore is a second lock, not the only one);
 # - no ARG anywhere, so no build argument can bake a secret into a layer;
-# - everything above USER builds as root, everything below executes as
-#   oniq (uid/gid 10001): /app, site-packages and the baked model weights
-#   end up root-owned and merely readable, so a compromised job cannot
-#   rewrite the code — or the model — it runs;
+# - each stage builds as root and executes as oniq (uid/gid 10001):
+#   /app, site-packages and the baked model weights end up root-owned
+#   and merely readable, so a compromised job cannot rewrite the code —
+#   or the model — it runs;
 # - exec-form CMD only — no shell surface.
 #
 # Two stages, one security boundary:
@@ -47,7 +47,16 @@ COPY storage.py /app/storage.py
 COPY videogen.py /app/videogen.py
 COPY handler.py /app/handler.py
 
+# base is itself a complete, secure worker image: uid-10001 runtime,
+# read-only /app. CI proves THIS stage. media re-escalates to root
+# below only for the bake, and drops back before its own CMD.
+USER oniq:oniq
+
+CMD ["python3", "-u", "handler.py"]
+
 FROM base AS media
+
+USER root
 
 # Bake the model. Candidates are tried in order — distilled 2B first per
 # the owner's model decision — and each is REJECTED FROM METADATA before
@@ -149,3 +158,4 @@ EOF
 USER oniq:oniq
 
 CMD ["python3", "-u", "handler.py"]
+# (restated so the shipped media image never depends on inheritance)
