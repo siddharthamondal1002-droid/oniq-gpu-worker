@@ -197,17 +197,47 @@ def get_template(template_id: str):
 
 def set_workers_standby_zero(endpoint_id: str):
     """The harness's ONLY endpoint mutation — owner directive 2026-08-26
-    (five-video battery, Phase 2: NO JOB = NO GPU WORKER). PATCHes
+    (five-video battery, Phase 2: NO JOB = NO GPU WORKER). Sets
     workersStandby to the literal 0, a strict spend REDUCTION. There is
     deliberately no value parameter: this function cannot scale anything
-    up, and no other field can ride along in the body. Callers must
-    re-read the endpoint afterwards — the PATCH echo is never trusted."""
-    status, raw = _request(
+    up, and no other field is ever named in either transport's body, so
+    nothing else about the endpoint can change. Callers must re-read the
+    endpoint afterwards — no write echo is trusted.
+
+    Two transports, both measured 2026-08-26: REST PATCH first (run #34
+    answered 400 'workersStandby not in input schema' — the route exists
+    but does not carry this field), then a GraphQL saveEndpoint with the
+    minimal partial input {id, workersStandby: 0} — the same partial-
+    input shape RunPod's own SDK uses for update_endpoint_template. A
+    failure returns both transports' statuses and bodies verbatim, so
+    the next refusal diagnoses itself."""
+    rest_status, rest_raw = _request(
         f"{REST_BASE}/endpoints/{endpoint_id}",
         method="PATCH",
         body={"workersStandby": 0},
     )
-    return status, raw
+    if rest_status in (200, 201):
+        return rest_status, rest_raw
+    body = {
+        "query": (
+            "mutation SetStandbyZero($id: String!) { "
+            "saveEndpoint(input: {id: $id, workersStandby: 0}) "
+            "{ id workersStandby } }"
+        ),
+        "variables": {"id": endpoint_id},
+    }
+    g_status, g_raw = _request(GRAPHQL_URL, method="POST", body=body)
+    if g_status == 200:
+        try:
+            doc = json.loads(g_raw)
+        except json.JSONDecodeError:
+            doc = {}
+        if not doc.get("errors") and (doc.get("data") or {}).get("saveEndpoint"):
+            return 200, g_raw
+    return g_status, (
+        f"rest patch -> {rest_status} (body: {rest_raw[:200]!r}); "
+        f"graphql saveEndpoint -> {g_status} (body: {g_raw[:300]!r})"
+    )
 
 
 def template_env_names_graphql(template_id: str):

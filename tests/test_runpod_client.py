@@ -233,3 +233,45 @@ def test_no_scale_up_surface_exists():
     for forbidden in ("create_endpoint", "create_pod", "set_workers_min",
                       "set_workers_max", "set_workers_standby"):
         assert not hasattr(rp, forbidden)
+
+
+def test_standby_falls_back_to_graphql_partial_save(monkeypatch):
+    # Measured (run #34): REST PATCH exists but refuses the field. The
+    # fallback is the minimal {id, workersStandby: 0} saveEndpoint —
+    # naming NO other field, so nothing else about the endpoint can move.
+    import runpod_client as rp
+
+    calls = []
+
+    def transport(url, *, method="GET", body=None, **kw):
+        calls.append((url, method, body))
+        if method == "PATCH":
+            return 400, '{"error":"Extra input keys provided in request body"}'
+        return 200, json.dumps(
+            {"data": {"saveEndpoint": {"id": "ep-123", "workersStandby": 0}}}
+        )
+
+    monkeypatch.setattr(rp, "_request", transport)
+    status, raw = rp.set_workers_standby_zero("ep-123")
+    assert status == 200
+    graphql_call = calls[1]
+    assert graphql_call[1] == "POST"
+    assert "workersStandby: 0" in graphql_call[2]["query"]
+    assert graphql_call[2]["variables"] == {"id": "ep-123"}
+    # The mutation names id and workersStandby and nothing else.
+    assert "gpuIds" not in graphql_call[2]["query"]
+    assert "templateId" not in graphql_call[2]["query"]
+
+
+def test_standby_failure_carries_both_transport_bodies(monkeypatch):
+    import runpod_client as rp
+
+    def transport(url, *, method="GET", body=None, **kw):
+        if method == "PATCH":
+            return 400, '{"error":"no such key"}'
+        return 200, json.dumps({"errors": [{"message": "field not allowed"}]})
+
+    monkeypatch.setattr(rp, "_request", transport)
+    status, raw = rp.set_workers_standby_zero("ep-123")
+    assert "rest patch -> 400" in raw
+    assert "field not allowed" in raw
