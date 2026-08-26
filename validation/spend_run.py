@@ -550,10 +550,22 @@ def confirm_termination(
     poll_s: int = 5,
     sleep=time.sleep,
     clock=time.monotonic,
-) -> str:
-    """Phase 16. Only an API answer showing zero workers confirms; an
-    unreachable API or unparseable shape is UNKNOWN, and UNKNOWN is never
-    converted to success by anyone downstream."""
+) -> dict:
+    """Phase 16/17. Owner directive 2026-08-26 (production launch,
+    Phase 6): the production financial rule concerns ACTIVE COMPUTE —
+    running, initializing, throttled and unhealthy workers must all read
+    zero from the API. workersStandby is not settable by any reachable
+    API (three-surface proof, ledger §16p) and is provider-managed pool
+    warmth: when idle/ready workers remain, termination is still
+    CONFIRMED but the standby count is RECORDED as
+    STANDBY_PROVIDER_MANAGED — the total worker count is never claimed
+    to be zero. An unreachable API or unparseable shape stays UNKNOWN,
+    and UNKNOWN is never converted to success by anyone downstream.
+
+    Returns {"status", "standby", "active"}; standby/active are None
+    when UNKNOWN."""
+    active_keys = ("running", "initializing", "throttled", "unhealthy")
+    standby_keys = ("idle", "ready")
     deadline = clock() + wait_s
     last = None
     while clock() < deadline:
@@ -565,14 +577,43 @@ def confirm_termination(
         last = health
         workers = health.get("workers")
         if isinstance(workers, dict) and workers:
-            counts = [v for v in workers.values() if isinstance(v, int)]
-            if counts and sum(counts) == 0:
-                _show("termination health", health)
-                return TERMINATION_CONFIRMED
+            active = {
+                k: workers.get(k)
+                for k in active_keys
+                if isinstance(workers.get(k), int)
+            }
+            # running and initializing are the owner-named pair and must
+            # be MEASURED zeros; throttled/unhealthy count when reported.
+            if (
+                "running" in active
+                and "initializing" in active
+                and sum(active.values()) == 0
+            ):
+                # idle and ready overlap in RunPod's health (a ready
+                # worker is counted in both), so the pool size is the
+                # max of the reported figures, not their sum.
+                standby_counts = [
+                    workers.get(k) for k in standby_keys
+                    if isinstance(workers.get(k), int)
+                ]
+                standby = max(standby_counts, default=0)
+                _show("termination health (active compute zero)", health)
+                if standby:
+                    print(
+                        f"STANDBY_PROVIDER_MANAGED: {standby} worker(s) — "
+                        "recorded, never claimed as zero (owner directive "
+                        "2026-08-26, production Phase 6; §16p: no API can "
+                        "set workersStandby)"
+                    )
+                return {
+                    "status": TERMINATION_CONFIRMED,
+                    "standby": standby,
+                    "active": 0,
+                }
         sleep(poll_s)
     if last is not None:
         _show("last health before UNKNOWN", last)
-    return TERMINATION_UNKNOWN
+    return {"status": TERMINATION_UNKNOWN, "standby": None, "active": None}
 
 
 def actual_cost_usd(execution_ms, price_per_hour: Decimal) -> Decimal:
@@ -646,7 +687,9 @@ def one_job(
         "cost_usd": str(cost),
         "reservation_usd": str(quote["reservation"]),
         "output_key": output_key,
-        "termination": termination,
+        "termination": termination["status"],
+        "active_workers": termination["active"],
+        "standby_provider_managed": termination["standby"],
     }
     if op == "video_generate":
         out = status["output"]
@@ -672,10 +715,10 @@ def one_job(
             }
         )
     _show("job row", row)
-    if termination != TERMINATION_CONFIRMED:
+    if termination["status"] != TERMINATION_CONFIRMED:
         raise SpendStop(
             "termination-unknown",
-            "worker termination could not be confirmed; not continuing",
+            "active compute could not be confirmed zero; not continuing",
         )
     return row
 
@@ -684,10 +727,13 @@ def one_job(
 
 
 def check_standby_zero(client) -> None:
-    """Owner directive 2026-08-26: the battery may not start while a
-    standby worker exists — it would both bill warmth and doom every
-    job's termination check to UNKNOWN after the money is spent. Read
-    fresh, stop unless the field is literally 0."""
+    """Owner directive 2026-08-26 (production launch, Phase 6),
+    superseding the same-day battery gate: workersStandby is not
+    settable by any reachable API (three-surface proof, ledger §16p)
+    and the production financial rule concerns ACTIVE COMPUTE, so a
+    non-zero standby is RECORDED as STANDBY_PROVIDER_MANAGED and never
+    blocks the run — and never lets anyone claim the total worker count
+    is zero. Only endpoint ambiguity still stops here."""
     _, endpoints = client.get_endpoints()
     ep_list = endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     if len(ep_list) != 1:
@@ -696,11 +742,11 @@ def check_standby_zero(client) -> None:
         )
     standby = ep_list[0].get("workersStandby")
     if standby != 0:
-        raise SpendStop(
-            "standby-not-zero",
-            f"workersStandby reads {standby!r} — run the standby-zero "
-            "dispatch (or the console toggle) first; a battery under "
-            "standby ends TERMINATION_UNKNOWN after paying",
+        print(
+            f"STANDBY_PROVIDER_MANAGED: workersStandby reads {standby!r} — "
+            "recorded per owner directive 2026-08-26 (production Phase 6); "
+            "termination is judged on active compute, and the total worker "
+            "count is never claimed to be zero"
         )
 
 
@@ -780,12 +826,13 @@ def failure_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monoton
             "case": name,
             "surfaced": surfaced,
             "code": output.get("code"),
-            "termination": termination,
+            "termination": termination["status"],
+            "standby_provider_managed": termination["standby"],
         }
         _show("failure case", row)
         if not surfaced:
             raise SpendStop("failure-not-surfaced", f"case {name} did not fail loudly")
-        if termination != TERMINATION_CONFIRMED:
+        if termination["status"] != TERMINATION_CONFIRMED:
             raise SpendStop("termination-unknown", f"case {name}: termination unconfirmed")
         rows.append(row)
     print(

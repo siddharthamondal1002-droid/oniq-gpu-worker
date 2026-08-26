@@ -92,7 +92,10 @@ class FakeClient:
         return 200, "{}"
 
     def endpoint_health(self, endpoint_id):
-        health = self._health_seq.pop(0) if self._health_seq else {"workers": {"idle": 0, "running": 0}}
+        health = self._health_seq.pop(0) if self._health_seq else {
+            "workers": {"idle": 0, "initializing": 0, "ready": 0,
+                        "running": 0, "throttled": 0, "unhealthy": 0}
+        }
         return json.dumps(health), dict(health)
 
     def sweep_orphans(self):
@@ -491,7 +494,7 @@ def test_one_job_failed_status_is_a_stop():
 
 
 def test_one_job_unknown_termination_is_a_stop():
-    stuck = [{"workers": {"idle": 0, "running": 1}}] * 200
+    stuck = [{"workers": {"idle": 0, "running": 1, "initializing": 0}}] * 200
     client = FakeClient(job_statuses=[_good_status()], health_seq=stuck)
     with pytest.raises(spend_run.SpendStop) as exc:
         _run_one(client)
@@ -666,17 +669,18 @@ def test_video_battery_prompts_are_bounded_and_frozen():
         )
 
 
-def test_video_battery_refuses_to_start_under_standby():
-    # Owner directive: a battery under workersStandby != 0 pays for five
-    # jobs whose termination can never confirm. Stop before job 1.
+def test_video_battery_records_provider_managed_standby_and_proceeds(capsys):
+    # Owner directive 2026-08-26 (production Phase 6), superseding the
+    # same-day blocking gate: standby is provider-managed and not
+    # settable by any reachable API — RECORD it and run on active
+    # compute; never claim the total worker count is zero.
     client = FakeClient(endpoints=[_endpoint(standby=1)],
-                        job_statuses=[_good_video_status()])
+                        job_statuses=[_good_video_status() for _ in range(5)])
     ft = FakeTime()
     facts = _preflight(client)
-    with pytest.raises(spend_run.SpendStop) as exc:
-        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
-    assert exc.value.code == "standby-not-zero"
-    assert client.submitted == []
+    rows = spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert len(rows) == 5
+    assert "STANDBY_PROVIDER_MANAGED" in capsys.readouterr().out
 
 
 def test_video_battery_stops_midway_with_no_retry_and_no_next_job():
@@ -697,7 +701,7 @@ def test_video_battery_stops_midway_with_no_retry_and_no_next_job():
 
 
 def test_video_battery_stops_on_unknown_termination_midway():
-    stuck = [{"workers": {"idle": 1, "running": 0}}] * 200
+    stuck = [{"workers": {"idle": 0, "running": 1, "initializing": 0}}] * 200
     client = FakeClient(job_statuses=[_good_video_status()], health_seq=stuck)
     ft = FakeTime()
     facts = _preflight(client)
@@ -726,17 +730,44 @@ def test_confirm_termination_requires_a_parsed_zero():
     ft = FakeTime()
     client = FakeClient(health_seq=[{"unexpected": "shape"}] * 200)
     out = spend_run.confirm_termination(client, "ep-123", sleep=ft.sleep, clock=ft.clock)
-    assert out == spend_run.TERMINATION_UNKNOWN
+    assert out["status"] == spend_run.TERMINATION_UNKNOWN
+    assert out["standby"] is None
 
 
-def test_confirm_termination_confirms_on_zero_workers():
+def test_confirm_termination_confirms_on_zero_active_compute():
     ft = FakeTime()
     client = FakeClient(
-        health_seq=[{"workers": {"idle": 0, "running": 1}},
+        health_seq=[{"workers": {"idle": 0, "running": 1, "initializing": 0}},
                     {"workers": {"idle": 0, "running": 0, "initializing": 0}}]
     )
     out = spend_run.confirm_termination(client, "ep-123", sleep=ft.sleep, clock=ft.clock)
-    assert out == spend_run.TERMINATION_CONFIRMED
+    assert out["status"] == spend_run.TERMINATION_CONFIRMED
+    assert out["standby"] == 0
+
+
+def test_confirm_termination_records_provider_managed_standby(capsys):
+    # Owner directive 2026-08-26 (production Phase 6): active compute
+    # zero CONFIRMS; the provider-managed standby pool is RECORDED —
+    # idle and ready overlap, so the pool is their max, never a sum.
+    ft = FakeTime()
+    client = FakeClient(
+        health_seq=[{"workers": {"idle": 1, "ready": 1, "running": 0,
+                                 "initializing": 0, "throttled": 0,
+                                 "unhealthy": 0}}]
+    )
+    out = spend_run.confirm_termination(client, "ep-123", sleep=ft.sleep, clock=ft.clock)
+    assert out["status"] == spend_run.TERMINATION_CONFIRMED
+    assert out["standby"] == 1
+    assert "STANDBY_PROVIDER_MANAGED" in capsys.readouterr().out
+
+
+def test_confirm_termination_needs_the_owner_named_pair_measured():
+    # running alone is not enough — initializing must also be a MEASURED
+    # zero; a payload that omits it never confirms.
+    ft = FakeTime()
+    client = FakeClient(health_seq=[{"workers": {"running": 0}}] * 200)
+    out = spend_run.confirm_termination(client, "ep-123", sleep=ft.sleep, clock=ft.clock)
+    assert out["status"] == spend_run.TERMINATION_UNKNOWN
 
 
 # --------------------------------------------------------- failure battery
