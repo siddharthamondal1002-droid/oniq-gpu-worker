@@ -210,12 +210,12 @@ def test_dockerfile_env_protects_the_nonroot_runtime():
 
 
 def test_op_input_defaults_to_the_image_workload():
-    # video_generate must be an explicit dispatch choice, never a default
-    # a habitual re-run could trip into.
+    # video_generate and audio_mux must be explicit dispatch choices,
+    # never a default a habitual re-run could trip into.
     doc, raw = _load("gpu-validation.yml")
     op = _triggers(doc)["workflow_dispatch"]["inputs"]["op"]
     assert op["default"] == "image_preprocess"
-    assert op["options"] == ["image_preprocess", "video_generate"]
+    assert op["options"] == ["image_preprocess", "video_generate", "audio_mux"]
     assert "OP: ${{ inputs.op }}" in raw
 
 

@@ -456,6 +456,11 @@ VIDEO_PROMPT = (
     "realistic motion, consistent lighting."
 )
 
+# The audio canary narration — a module constant like VIDEO_PROMPT: the
+# dispatch chooses op=audio_mux, never the text. Sized well inside the
+# 4.04s video so the canary measures the happy path, not the gate.
+AUDIO_NARRATION = "The character turns to face the light."
+
 # The five-scene battery — owner directive 2026-08-26 (Phase 6 of the
 # five-video superloop), verbatim and server-side like VIDEO_PROMPT:
 # the dispatch chooses only through_phase=18, never the text. Order and
@@ -509,6 +514,43 @@ def verify_gpu_success(output) -> None:
         raise SpendStop("wrong-gpu", "gpu_name does not identify an RTX 3090")
     if output.get("vram_peak_mb") is None:
         raise SpendStop("no-vram-peak", "peak VRAM was not measured")
+    if not output.get("output_bytes"):
+        raise SpendStop("no-artifact", "no output artifact was written")
+    unexpected = set(output) - set(_allowed_output_keys())
+    if unexpected:
+        raise SpendStop("schema-violation", f"unwhitelisted keys: {sorted(unexpected)}")
+
+
+def verify_audio_success(output) -> None:
+    """The audio_mux success proof. This workload is CPU by design — it
+    speaks and muxes on the already-rented worker — so the CUDA/VRAM
+    checks do not apply; what must hold instead is the measured audio
+    evidence: a real voice track of the right length in a real artifact,
+    with nothing off the whitelist."""
+    if not isinstance(output, dict) or output.get("ok") is not True:
+        raise SpendStop(
+            "job-not-ok",
+            f"worker did not report ok; code={None if not isinstance(output, dict) else output.get('code')}",
+        )
+    if output.get("has_audio") is not True:
+        raise SpendStop("no-audio-stream", "output carries no audio stream")
+    if not output.get("narration_seconds"):
+        raise SpendStop("no-narration", "narration duration was not measured")
+    if not output.get("audio_sample_rate"):
+        raise SpendStop("no-sample-rate", "audio sample rate was not measured")
+    peak = output.get("audio_peak_dbfs")
+    if peak is None or peak <= -60:
+        raise SpendStop(
+            "audio-silent", f"audio peaks at {peak} dBFS — silence with extra steps"
+        )
+    audio_s = output.get("audio_seconds") or 0
+    video_s = output.get("video_seconds") or 0
+    if not video_s or abs(audio_s - video_s) > 0.25:
+        raise SpendStop(
+            "audio-drift", f"audio {audio_s}s vs video {video_s}s exceeds 0.25s"
+        )
+    if output.get("tts_ms") is None or output.get("mux_ms") is None:
+        raise SpendStop("no-timings", "tts/mux timings were not measured")
     if not output.get("output_bytes"):
         raise SpendStop("no-artifact", "no output artifact was written")
     unexpected = set(output) - set(_allowed_output_keys())
@@ -655,6 +697,12 @@ def one_job(
         # queue + first pull of the model-baked image can be many minutes
         # of delayTime before bounded execution even starts.
         watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+    if op == "audio_mux":
+        # The canary narration is a module constant, same discipline as
+        # VIDEO_PROMPT: the dispatch never chooses the text. The input is
+        # an EXISTING video artifact — nothing is generated to test audio.
+        payload["params"] = {"narration": AUDIO_NARRATION}
+        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
     status = submit_and_wait(
         client,
         facts["endpoint_id"],
@@ -666,7 +714,10 @@ def one_job(
     _show("job status (raw, redacted)", status)
     if status.get("status") != "COMPLETED":
         raise SpendStop("job-failed", f"terminal status {status.get('status')}")
-    verify_gpu_success(status.get("output"))
+    if op == "audio_mux":
+        verify_audio_success(status.get("output"))
+    else:
+        verify_gpu_success(status.get("output"))
     if op == "video_generate":
         verify_video_success(status["output"])
     cost = actual_cost_usd(status.get("executionTime"), quote["price"])
@@ -712,6 +763,21 @@ def one_job(
                 "cost_per_generated_minute_usd": str(
                     (cost * 60 / video_seconds).quantize(Decimal("0.01"), rounding=ROUND_UP)
                 ),
+            }
+        )
+    if op == "audio_mux":
+        out = status["output"]
+        row.update(
+            {
+                "narration_seconds": out.get("narration_seconds"),
+                "audio_seconds": out.get("audio_seconds"),
+                "video_seconds": out.get("video_seconds"),
+                "audio_sample_rate": out.get("audio_sample_rate"),
+                "audio_peak_dbfs": out.get("audio_peak_dbfs"),
+                "audio_gain_db": out.get("audio_gain_db"),
+                "tts_ms": out.get("tts_ms"),
+                "mux_ms": out.get("mux_ms"),
+                "output_bytes": out.get("output_bytes"),
             }
         )
     _show("job row", row)
@@ -915,9 +981,27 @@ def main(argv) -> int:
 
         through = int(os.environ.get("THROUGH_PHASE", "16"))
         op = os.environ.get("OP", "image_preprocess")
-        if op not in ("image_preprocess", "video_generate"):
+        if op not in ("image_preprocess", "video_generate", "audio_mux"):
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
-        if op == "video_generate":
+        if op == "audio_mux":
+            # The audio canary is ONE job by definition: narration muxed
+            # onto an EXISTING video named by test_input_key. No battery
+            # shape exists for it, deliberately.
+            if through != 16:
+                raise SpendStop(
+                    "audio-through-phase",
+                    "audio_mux supports through_phase 16 (one canary) only",
+                )
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    output_key=f"{facts['output_prefix']}/final-001.mp4",
+                    op=op,
+                )
+            ]
+            print("PHASE 13-16 PASS — one real audio job, verified and terminated")
+        elif op == "video_generate":
             # Video knows exactly two shapes (owner directives 2026-08-26):
             # 16 = the single job; 18 = the five-scene battery — EXACTLY
             # five, never 1+5, never twenty. Anything else refuses.

@@ -920,3 +920,98 @@ def test_preflight_reads_env_names_from_graphql_template():
         "R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"}
     facts = _preflight(client)
     assert facts["endpoint_id"] == "ep-123"
+
+
+# ---------------------------------------------------------- audio canary
+
+
+def _good_audio_status(execution_ms=9000):
+    return {
+        "status": "COMPLETED",
+        "delayTime": 3000,
+        "executionTime": execution_ms,
+        "output": {
+            "ok": True,
+            "op": "audio_mux",
+            "output_key": "out/validation/final-001.mp4",
+            "has_audio": True,
+            "narration_seconds": 1.71,
+            "audio_seconds": 4.042,
+            "video_seconds": 4.042,
+            "audio_sample_rate": 22050,
+            "audio_peak_dbfs": -3.8,
+            "audio_gain_db": -3.7,
+            "tts_ms": 1731,
+            "mux_ms": 45,
+            "output_bytes": 991_234,
+            "format": "mp4",
+            "duration_ms": 8200,
+            "cleanup_ok": True,
+        },
+    }
+
+
+def _run_one_audio(client):
+    ft = FakeTime()
+    facts = _preflight(client)
+    return spend_run.one_job(
+        client, facts, output_key="out/validation/final-001.mp4",
+        op="audio_mux", sleep=ft.sleep, clock=ft.clock,
+    )
+
+
+def test_one_audio_job_submits_the_module_narration_only():
+    client = FakeClient(job_statuses=[_good_audio_status()])
+    _run_one_audio(client)
+    payload = client.submitted[0][1]
+    assert payload["op"] == "audio_mux"
+    assert payload["params"] == {"narration": spend_run.AUDIO_NARRATION}
+
+
+def test_one_audio_job_row_carries_measured_audio_evidence():
+    client = FakeClient(job_statuses=[_good_audio_status()])
+    row = _run_one_audio(client)
+    assert row["op"] == "audio_mux"
+    assert row["narration_seconds"] == 1.71
+    assert row["audio_sample_rate"] == 22050
+    assert row["tts_ms"] == 1731 and row["mux_ms"] == 45
+    assert row["termination"] == spend_run.TERMINATION_CONFIRMED
+
+
+def test_audio_job_needs_no_cuda_evidence_but_all_audio_evidence():
+    # CPU by design: the cuda/vram checks must NOT gate this op...
+    status = _good_audio_status()
+    assert "device" not in status["output"]
+    client = FakeClient(job_statuses=[status])
+    row = _run_one_audio(client)
+    assert row["gpu_name"] is None
+    # ...and the audio evidence must. Silence with extra steps refuses.
+    silent = _good_audio_status()
+    silent["output"]["audio_peak_dbfs"] = -71.0
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one_audio(FakeClient(job_statuses=[silent]))
+    assert exc.value.code == "audio-silent"
+
+
+def test_audio_job_refuses_a_drifted_mux():
+    status = _good_audio_status()
+    status["output"]["audio_seconds"] = 3.0
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one_audio(FakeClient(job_statuses=[status]))
+    assert exc.value.code == "audio-drift"
+
+
+def test_audio_job_refuses_a_missing_voice_track():
+    status = _good_audio_status()
+    status["output"]["has_audio"] = False
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one_audio(FakeClient(job_statuses=[status]))
+    assert exc.value.code == "no-audio-stream"
+
+
+def test_audio_job_rejects_unwhitelisted_schema():
+    status = _good_audio_status()
+    status["output"]["voice_model_path"] = "/app/models/piper"
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one_audio(FakeClient(job_statuses=[status]))
+    assert exc.value.code == "schema-violation"

@@ -49,9 +49,9 @@ on:
         options: ["16", "17", "18", "19"]
         default: "16"
       op:
-        description: "Workload for the spend job. video_generate = one LTX image-to-video."
+        description: "Workload for the spend job. video_generate = one LTX image-to-video. audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only)."
         type: choice
-        options: [image_preprocess, video_generate]
+        options: [image_preprocess, video_generate, audio_mux]
         default: image_preprocess
       endpoint_id:
         description: "Endpoint id (optional; must match the single live endpoint)."
