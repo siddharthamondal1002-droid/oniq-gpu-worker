@@ -45,6 +45,7 @@ COPY contract.py /app/contract.py
 COPY preprocess.py /app/preprocess.py
 COPY storage.py /app/storage.py
 COPY videogen.py /app/videogen.py
+COPY audio.py /app/audio.py
 COPY handler.py /app/handler.py
 
 # base is itself a complete, secure worker image: uid-10001 runtime,
@@ -153,6 +154,33 @@ with open("/app/models/MODEL_ID", "w") as fh:
     fh.write(resolved + "\n")
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+EOF
+
+# Bake the piper voice for audio_mux — the SAME sha256-pinned release
+# asset the ONIQ story worker's in-house engine runs (rhasspy v0.0.2,
+# en-us-ryan-high). stdlib download + digest check, tarfile with the
+# data filter; a job never fetches a voice over the network.
+RUN python3 - <<'EOF'
+import hashlib, os, tarfile, urllib.request
+
+URL = ("https://github.com/rhasspy/piper/releases/download/v0.0.2/"
+       "voice-en-us-ryan-high.tar.gz")
+SHA256 = "de346b054703a190782f49acb9b93c50678a884fede49cfd85429d204802d678"
+DEST = "/app/models/piper"
+
+os.makedirs(DEST, exist_ok=True)
+tarball = "/tmp/voice.tar.gz"
+urllib.request.urlretrieve(URL, tarball)
+digest = hashlib.sha256(open(tarball, "rb").read()).hexdigest()
+if digest != SHA256:
+    raise SystemExit(f"voice sha256 mismatch: {digest}")
+with tarfile.open(tarball) as tar:
+    tar.extractall(DEST, filter="data")
+os.remove(tarball)
+for name in ("en-us-ryan-high.onnx", "en-us-ryan-high.onnx.json"):
+    if not os.path.exists(os.path.join(DEST, name)):
+        raise SystemExit(f"voice tarball lacked {name}")
+print("BAKED piper voice en-us-ryan-high")
 EOF
 
 USER oniq:oniq

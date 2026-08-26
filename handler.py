@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import time
 
+import audio
 import contract
 import preprocess
 import storage
@@ -65,7 +66,7 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
-        if job["op"] == "video_generate":
+        if job["op"] in ("video_generate", "audio_mux"):
             output_path = f"{workdir}/output.mp4"
         else:
             output_path = f"{workdir}/output.{job['params']['format']}"
@@ -75,6 +76,8 @@ def handle(event) -> dict:
 
         if job["op"] == "video_generate":
             metrics = videogen.run(job, input_path, output_path)
+        elif job["op"] == "audio_mux":
+            metrics = audio.run(job, input_path, output_path)
         else:
             metrics = preprocess.run(job, input_path, output_path)
         _check_deadline(started)

@@ -240,6 +240,7 @@ WORKER_FILES = (
     "preprocess.py",
     "storage.py",
     "videogen.py",
+    "audio.py",
     "handler.py",
 )
 

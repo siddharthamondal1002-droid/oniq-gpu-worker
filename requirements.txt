@@ -14,3 +14,11 @@ sentencepiece==0.2.0
 protobuf==5.29.3
 imageio==2.36.1
 imageio-ffmpeg==0.5.1
+# audio_mux pins (2026-08-26): in-process TTS + mux, no subprocess.
+# piper-phonemize ships manylinux_2_28 cp311 wheels (bookworm glibc 2.36
+# accepts them); av bundles its own ffmpeg libs. All four proven to
+# import and run a real synth+mux on python 3.11.15 before pinning.
+piper-tts==1.2.0
+piper-phonemize==1.1.0
+onnxruntime==1.29.0
+av==13.1.0

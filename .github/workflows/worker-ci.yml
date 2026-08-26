@@ -27,7 +27,7 @@ jobs:
       - name: Secret and shell-surface scan
         run: |
           set -eu
-          FILES="contract.py preprocess.py storage.py handler.py videogen.py runpod_client.py validation/admission.py validation/spend_run.py validation/standby_zero.py"
+          FILES="contract.py preprocess.py storage.py handler.py videogen.py audio.py runpod_client.py validation/admission.py validation/spend_run.py validation/standby_zero.py"
           for pattern in 'eval(' 'exec(' 'subprocess' 'os.system' 'pickle' 'shell=True'; do
             if grep -Fn "$pattern" $FILES; then
               echo "FORBIDDEN CALL FOUND: $pattern"; exit 1
@@ -63,6 +63,16 @@ jobs:
           /opt/venv/bin/pip install --quiet -r requirements.txt -r requirements-dev.txt
           sudo chown -R root:root /opt/venv
 
+      - name: Fetch the sha256-pinned piper voice (real-synth tests)
+        run: |
+          set -eu
+          curl -sSL --fail --retry 3 -o /tmp/voice.tar.gz \
+            https://github.com/rhasspy/piper/releases/download/v0.0.2/voice-en-us-ryan-high.tar.gz
+          echo "de346b054703a190782f49acb9b93c50678a884fede49cfd85429d204802d678  /tmp/voice.tar.gz" | sha256sum -c -
+          sudo mkdir -p /opt/voice
+          sudo tar xzf /tmp/voice.tar.gz -C /opt/voice
+          sudo chown -R root:root /opt/voice && sudo chmod -R a+rX /opt/voice
+
       - name: Worker + harness tests as uid 10001
         run: |
           set -eu
@@ -71,6 +81,7 @@ jobs:
           # enterable by uid 10001 — run #2 proved the tests pass and
           # then crashed on exactly that final chdir.
           sudo -u oniq env HOME=/home/oniq PYTHONDONTWRITEBYTECODE=1 \
+            ONIQ_TEST_VOICE_DIR=/opt/voice \
             sh -c 'cd /opt/app && /opt/venv/bin/python -m pytest tests -q -p no:cacheprovider'
           if sudo -u oniq sh -c 'touch /opt/app/probe 2>/dev/null'; then
             echo "runtime user can WRITE to /app — rig invalid"; exit 1
@@ -103,7 +114,7 @@ jobs:
 
       - name: Imports and serverless entrypoint
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler, videogen; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); import diffusers, transformers, imageio, imageio_ffmpeg; from diffusers import LTXImageToVideoPipeline; print('imports ok, tensor->bytes ok, LTX pipeline importable')"
+          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler, videogen, audio; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); import diffusers, transformers, imageio, imageio_ffmpeg; from diffusers import LTXImageToVideoPipeline; import av; from piper import PiperVoice; print('imports ok, tensor->bytes ok, LTX pipeline importable, piper+av importable')"
 
       - name: Runtime user is uid 10001 and /app is not writable
         run: |
@@ -114,12 +125,12 @@ jobs:
           print('uid 10001, /app read-only')
           "
 
-      - name: Image carries only the six shipped files
+      - name: Image carries only the seven shipped files
         run: |
           docker run --rm oniq-gpu-worker:ci python3 -c "
           import os
           found = sorted(os.listdir('/app'))
-          expect = ['contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py', 'videogen.py']
+          expect = ['audio.py', 'contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py', 'videogen.py']
           assert found == expect, found
           print('payload exact:', found)
           "
