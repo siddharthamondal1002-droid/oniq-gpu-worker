@@ -50,60 +50,99 @@ COPY handler.py /app/handler.py
 FROM base AS media
 
 # Bake the model. Candidates are tried in order — distilled 2B first per
-# the owner's model decision — and each is validated the same way the
-# worker will load it (from_pretrained on the local snapshot) plus a
-# size guard: a transformer over 16GB on disk is a 13B-class checkpoint
-# wearing the wrong name, and is refused. The resolved id lands in
+# the owner's model decision — and each is REJECTED FROM METADATA before
+# a byte is downloaded: the HF API lists every file with its size, so a
+# transformer over 16GiB (a 13B-class checkpoint wearing a 2B name), a
+# missing model_index.json, or a missing component skips the candidate
+# at $0 network cost. Only a surveyed candidate is downloaded, and only
+# its pipeline components (the repos also carry multi-GB single-file
+# checkpoints this image must not haul in). After download: the class
+# is an LTX pipeline, every declared component is one the worker's
+# LTXImageToVideoPipeline can actually accept (a mismatch here would
+# otherwise become a PAID TypeError at job time), and the size guard is
+# re-checked against what landed on disk. The resolved id lands in
 # /app/models/MODEL_ID (suffixed #distilled when applicable) so the
 # worker reports exactly what it ran.
 RUN python3 - <<'EOF'
-import os, shutil
+import inspect, json, os, shutil
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import HfApi, snapshot_download
 
 CANDIDATES = [
+    ("Lightricks/LTX-Video-0.9.8-2B-distilled", "#distilled"),
     ("Lightricks/LTX-Video-0.9.7-distilled", "#distilled"),
     ("Lightricks/LTX-Video", ""),
 ]
 DEST = "/app/models/ltx"
 SIZE_GUARD_BYTES = 16 * 1024**3
+COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 
+
+def survey(api, repo):
+    info = api.model_info(repo, files_metadata=True)
+    paths = {s.rfilename: (s.size or 0) for s in info.siblings}
+    if "model_index.json" not in paths:
+        raise RuntimeError("no model_index.json (not a diffusers snapshot)")
+    for component in COMPONENTS:
+        if not any(p.startswith(component + "/") for p in paths):
+            raise RuntimeError(f"lacks component {component}")
+    transformer_bytes = sum(
+        size for p, size in paths.items()
+        if p.startswith("transformer/") and p.endswith(".safetensors")
+    )
+    if transformer_bytes > SIZE_GUARD_BYTES:
+        raise RuntimeError(
+            f"transformer {transformer_bytes} metadata bytes exceed the 2B-class guard"
+        )
+    return transformer_bytes
+
+
+api = HfApi()
 os.makedirs("/app/models", exist_ok=True)
 resolved = None
 for repo, tag in CANDIDATES:
     try:
-        path = snapshot_download(repo)
-        transformer = os.path.join(path, "transformer")
-        total = 0
-        for root, _, files in os.walk(
-            transformer if os.path.isdir(transformer) else path
-        ):
+        print(f"SURVEY {repo}: {survey(api, repo)} transformer bytes by metadata")
+        snapshot_download(
+            repo,
+            local_dir=DEST,
+            allow_patterns=["model_index.json"] + [c + "/*" for c in COMPONENTS],
+        )
+        with open(os.path.join(DEST, "model_index.json")) as fh:
+            index = json.load(fh)
+        if "LTX" not in str(index.get("_class_name") or ""):
+            raise RuntimeError("model_index.json is not an LTX pipeline")
+        from diffusers import LTXImageToVideoPipeline
+
+        accepted = set(
+            inspect.signature(LTXImageToVideoPipeline.__init__).parameters
+        ) - {"self"}
+        declared = {k for k, v in index.items() if isinstance(v, list)}
+        if not declared <= accepted:
+            raise RuntimeError(
+                f"components {sorted(declared - accepted)} are not loadable "
+                "by LTXImageToVideoPipeline"
+            )
+        on_disk = 0
+        for root, _, files in os.walk(os.path.join(DEST, "transformer")):
             for name in files:
                 if name.endswith(".safetensors"):
-                    total += os.path.getsize(os.path.join(root, name))
-        if total > SIZE_GUARD_BYTES:
-            print(f"REJECT {repo}: transformer weights {total} bytes exceed the 2B-class guard")
-            continue
-        index = os.path.join(path, "model_index.json")
-        with open(index) as fh:
-            head = fh.read()
-        if "LTX" not in head:
-            print(f"REJECT {repo}: model_index.json is not an LTX pipeline")
-            continue
-        for component in ("transformer", "vae", "text_encoder", "tokenizer", "scheduler"):
-            if not os.path.isdir(os.path.join(path, component)):
-                raise RuntimeError(f"{repo} lacks component {component}")
-        shutil.copytree(path, DEST, dirs_exist_ok=True)
+                    on_disk += os.path.getsize(os.path.join(root, name))
+        if not 0 < on_disk <= SIZE_GUARD_BYTES:
+            raise RuntimeError(f"downloaded transformer is {on_disk} bytes")
         resolved = repo + tag
-        print(f"BAKED {resolved} ({total} transformer bytes)")
+        print(f"BAKED {resolved} ({on_disk} transformer bytes on disk)")
         break
     except Exception as exc:
         print(f"SKIP {repo}: {type(exc).__name__}: {exc}")
+        shutil.rmtree(DEST, ignore_errors=True)
+        shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
 
 if resolved is None:
     raise SystemExit("no candidate model could be baked")
 with open("/app/models/MODEL_ID", "w") as fh:
     fh.write(resolved + "\n")
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
 EOF
 
