@@ -77,6 +77,12 @@ jobs:
   discover:
     name: "Phase 4-7: read-only discovery, $0"
     runs-on: ubuntu-latest
+    # The key lives as a gpu-spend ENVIRONMENT secret (2026-08-25 era);
+    # a job without the environment reads an empty string — measured on
+    # run #7, 2026-08-26. The environment has no required reviewers on
+    # this plan (see APPROVAL_MODE below), so attaching it here gates
+    # nothing and restores this $0 job's designed read access.
+    environment: gpu-spend
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
     steps:
@@ -179,6 +185,7 @@ jobs:
     name: "workersStandby -> 0 (spend reduction, $0)"
     if: inputs.mode == 'standby-zero'
     runs-on: ubuntu-latest
+    environment: gpu-spend # the key is an environment secret; see discover
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
     steps:
@@ -194,6 +201,7 @@ jobs:
     needs: [discover, spend, standby]
     if: always()
     runs-on: ubuntu-latest
+    environment: gpu-spend # the key is an environment secret; see discover
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
     steps:
