@@ -105,6 +105,28 @@ def _error_name(exc) -> str:
     return f"{name}({code})" if code else name
 
 
+def _probe_prefix(s3, key: str) -> str:
+    """On a stat 404, list what actually exists near the requested key.
+
+    Keys are owner-chosen object names, not secret material; twenty of
+    them turn "not found" into "here is what IS there" — the difference
+    between a fix and another blind retry (runs #24-#28, 2026-08-25/26).
+    A failing list is itself the answer: the bucket is unreachable from
+    this endpoint URL or unlisted by this token.
+    """
+    prefix = key.rsplit("/", 1)[0] + "/" if "/" in key else ""
+    try:
+        page = s3.list_objects_v2(Bucket=BUCKET, Prefix=prefix, MaxKeys=20)
+        keys = [obj.get("Key", "?") for obj in page.get("Contents", [])]
+        if not keys and prefix:
+            page = s3.list_objects_v2(Bucket=BUCKET, MaxKeys=20)
+            keys = [obj.get("Key", "?") for obj in page.get("Contents", [])]
+            return f"; nothing under '{prefix}', bucket root holds: {keys!r}"
+        return f"; the bucket holds under '{prefix}': {keys!r}"
+    except Exception as probe_exc:
+        return f"; and listing the bucket failed too: {_error_name(probe_exc)}"
+
+
 def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES) -> int:
     """Fetch one object by reference, bounding its size BEFORE the body.
 
@@ -116,8 +138,11 @@ def download(key: str, dest_path: str, max_bytes: int = contract.MAX_INPUT_BYTES
         head = s3.head_object(Bucket=BUCKET, Key=key)
         size = int(head["ContentLength"])
     except Exception as exc:
+        detail = _error_name(exc)
+        if "404" in detail or "NoSuchKey" in detail:
+            detail += _probe_prefix(s3, key)
         raise StorageError(
-            "r2-read-failed", f"could not stat input object: {_error_name(exc)}"
+            "r2-read-failed", f"could not stat input object: {detail}"
         ) from exc
     if size > max_bytes:
         raise contract.ContractError(

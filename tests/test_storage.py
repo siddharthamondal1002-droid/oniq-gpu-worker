@@ -11,12 +11,22 @@ def _configure(monkeypatch):
 
 
 class FakeS3:
-    def __init__(self, size=100, head_error=None, get_error=None, put_error=None):
+    def __init__(self, size=100, head_error=None, get_error=None, put_error=None,
+                 listing=None, list_error=None):
         self.size = size
         self.head_error = head_error
         self.get_error = get_error
         self.put_error = put_error
+        self.listing = listing if listing is not None else {}
+        self.list_error = list_error
         self.calls = []
+
+    def list_objects_v2(self, Bucket, Prefix="", MaxKeys=20):
+        self.calls.append(("list", Bucket, Prefix))
+        if self.list_error:
+            raise self.list_error
+        keys = [k for k in self.listing if k.startswith(Prefix)]
+        return {"Contents": [{"Key": k} for k in keys[:MaxKeys]]}
 
     def head_object(self, Bucket, Key):
         self.calls.append(("head", Bucket, Key))
@@ -93,6 +103,60 @@ def test_http_endpoint_is_a_typed_misconfiguration(monkeypatch):
     with pytest.raises(storage.StorageError) as exc:
         storage.client()
     assert exc.value.code == "r2-misconfigured"
+
+
+class _Coded404(Exception):
+    def __init__(self):
+        super().__init__("not found")
+        self.response = {"Error": {"Code": "404", "Message": "Not Found"}}
+
+
+def test_stat_404_lists_what_the_bucket_actually_holds(monkeypatch, tmp_path):
+    # Runs #24-#28: five blind 404 retries because "not found" never said
+    # what WAS there. The probe prints the real keys near the requested
+    # one, so a case/extension/folder mismatch reads itself off the log.
+    _configure(monkeypatch)
+    fake = FakeS3(
+        head_error=_Coded404(),
+        listing={"validation/IMG-20260825-wa0002.JPG": 1},
+    )
+    monkeypatch.setattr(storage, "client", lambda: fake)
+    with pytest.raises(storage.StorageError) as exc:
+        storage.download("validation/IMG-20260825-WA0002.jpg", str(tmp_path / "x"))
+    assert "validation/IMG-20260825-wa0002.JPG" in exc.value.message
+
+
+def test_stat_404_falls_back_to_the_bucket_root_listing(monkeypatch, tmp_path):
+    _configure(monkeypatch)
+    fake = FakeS3(head_error=_Coded404(), listing={"IMG-at-root.jpg": 1})
+    monkeypatch.setattr(storage, "client", lambda: fake)
+    with pytest.raises(storage.StorageError) as exc:
+        storage.download("validation/input.jpg", str(tmp_path / "x"))
+    assert "nothing under 'validation/'" in exc.value.message
+    assert "IMG-at-root.jpg" in exc.value.message
+
+
+def test_stat_404_with_an_unlistable_bucket_says_so(monkeypatch, tmp_path):
+    class DeniedList(Exception):
+        def __init__(self):
+            super().__init__("denied")
+            self.response = {"Error": {"Code": "AccessDenied"}}
+
+    _configure(monkeypatch)
+    fake = FakeS3(head_error=_Coded404(), list_error=DeniedList())
+    monkeypatch.setattr(storage, "client", lambda: fake)
+    with pytest.raises(storage.StorageError) as exc:
+        storage.download("validation/input.jpg", str(tmp_path / "x"))
+    assert "listing the bucket failed too: DeniedList(AccessDenied)" in exc.value.message
+
+
+def test_non_404_stat_errors_do_not_probe(monkeypatch, tmp_path):
+    _configure(monkeypatch)
+    fake = FakeS3(head_error=RuntimeError("boom"))
+    monkeypatch.setattr(storage, "client", lambda: fake)
+    with pytest.raises(storage.StorageError):
+        storage.download("validation/input.jpg", str(tmp_path / "x"))
+    assert not any(c[0] == "list" for c in fake.calls)
 
 
 def test_read_failure_carries_the_servers_error_code(monkeypatch, tmp_path):
