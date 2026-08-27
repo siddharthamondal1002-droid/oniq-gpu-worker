@@ -19,7 +19,13 @@ from __future__ import annotations
 import re
 
 # The workloads this worker exists to run.
-ALLOWED_OPS = ("image_preprocess", "video_generate", "audio_mux", "video_concat")
+ALLOWED_OPS = (
+    "image_preprocess",
+    "image_generate",
+    "video_generate",
+    "audio_mux",
+    "video_concat",
+)
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
 # against Content-Length BEFORE the download begins.
@@ -52,6 +58,22 @@ VIDEO_NUM_FRAMES = 97  # LTX wants 8k+1 frames; 97 @ 24fps ≈ 4.0s
 VIDEO_FPS = 24
 MAX_PROMPT_CHARS = 1000
 
+# image_generate: ONIQ's OWN image engine (fully in-house directive,
+# 2026-08-27). It is the SAME baked LTX snapshot as video_generate — the
+# text-to-video pipeline over the transformer/vae/text_encoder/tokenizer
+# already in this image — sampled for the shortest legal clip, of which
+# frame 0 is kept as a still. No second model, no new weights, no
+# download: the component that used to be an outsourced image API is a
+# different pipeline class over bytes this worker already carries.
+#
+# The canvas is deliberately VIDEO_WIDTH x VIDEO_HEIGHT: this still's
+# whole purpose is to be the conditioning frame a video_generate job
+# animates, and a frame that does not match the video canvas would be
+# rescaled at the seam.
+IMAGE_GEN_NUM_FRAMES = 9  # LTX wants 8k+1; 9 is the cheapest legal pass
+IMAGE_GEN_FORMAT = "png"  # lossless — it is a conditioning frame, not a
+# delivery artifact, and jpeg ringing would be fed to the video model
+
 # audio_mux: the caller's only degree of freedom is the narration text.
 # This bound is an input-size fence; the REAL gate is measured seconds
 # against the video's own duration, in audio.py, refused never truncated.
@@ -75,6 +97,7 @@ _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # absent means TRUE (marked), the fail-safe: an old or malformed caller
 # can only ever produce the watermarked product, never a free clean one.
 _VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark"})
+_IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
 _CONCAT_PARAM_FIELDS = frozenset({"segment_keys"})
 
@@ -178,7 +201,18 @@ def validate_job(raw) -> dict:
             "op must be one of: " + ", ".join(ALLOWED_OPS),
         )
 
-    input_key = _require_key(raw.get("input_key"), "input_key")
+    # image_generate is the one TEXT-ONLY op: it draws from a prompt, so
+    # it has no source object. An input_key sent with it is refused rather
+    # than ignored — a caller that thinks it is conditioning on an image
+    # must not be told silently that it was.
+    if op == "image_generate":
+        if raw.get("input_key") is not None:
+            raise ContractError(
+                "invalid-input", "image_generate takes no input_key"
+            )
+        input_key = None
+    else:
+        input_key = _require_key(raw.get("input_key"), "input_key")
     output_key = _require_key(raw.get("output_key"), "output_key")
 
     params_raw = raw.get("params", {})
@@ -186,6 +220,34 @@ def validate_job(raw) -> dict:
         params_raw = {}
     if not isinstance(params_raw, dict):
         raise ContractError("invalid-input", "params must be an object")
+
+    if op == "image_generate":
+        unknown_params = set(params_raw) - _IMAGE_GEN_PARAM_FIELDS
+        if unknown_params:
+            raise ContractError(
+                "invalid-input",
+                "unknown params field(s): " + ", ".join(sorted(unknown_params)),
+            )
+        prompt = params_raw.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ContractError(
+                "invalid-input", "params.prompt must be a non-empty string"
+            )
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise ContractError(
+                "invalid-input",
+                f"params.prompt exceeds {MAX_PROMPT_CHARS} characters",
+            )
+        # No watermark field, deliberately: a conditioning frame is an
+        # INTERMEDIATE, never delivered. The mark is burned by the video
+        # stage that consumes it, from the entitlement of record, so a
+        # still cannot carry a second mark into the film.
+        return {
+            "op": op,
+            "input_key": None,
+            "output_key": output_key,
+            "params": {"prompt": prompt.strip()},
+        }
 
     if op == "video_generate":
         unknown_params = set(params_raw) - _VIDEO_PARAM_FIELDS

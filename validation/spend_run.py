@@ -505,6 +505,56 @@ VIDEO_BATTERY = (
 )
 
 
+# ONIQ's own image engine (fully in-house directive, 2026-08-27). Same
+# rule as VIDEO_PROMPT: the dispatch never chooses the text.
+IMAGE_PROMPT = (
+    "A quiet street at night after rain, a single lamp overhead, wet "
+    "asphalt reflecting the light. Cinematic, photographic, no text."
+)
+
+
+def verify_image_success(output: dict) -> None:
+    """The in-house image engine's proof, ON TOP of verify_gpu_success.
+
+    A still is not a video, so the video evidence does not apply — what
+    must hold is that ONIQ's OWN model demonstrably loaded, CUDA
+    inference demonstrably ran, and a real sized artifact at the video
+    canvas came out. An op that quietly returned a placeholder would fail
+    every one of these.
+    """
+    model = str(output.get("model") or "")
+    if not model or model == "missing":
+        raise SpendStop("model-unproven", "worker did not report the loaded model")
+    if not output.get("model_load_ms"):
+        raise SpendStop("model-unproven", "model load time was not measured")
+    if not output.get("inference_ms"):
+        raise SpendStop("no-inference", "CUDA inference time was not measured")
+    if not output.get("output_bytes"):
+        raise SpendStop("no-artifact", "no still was written")
+    if output.get("format") != contract_image_format():
+        raise SpendStop(
+            "wrong-format",
+            f"still is {output.get('format')!r}, not the contract format",
+        )
+    if (output.get("width"), output.get("height")) != contract_video_canvas():
+        raise SpendStop(
+            "wrong-canvas",
+            "the still does not match the video canvas it must condition",
+        )
+
+
+def contract_image_format() -> str:
+    import contract
+
+    return contract.IMAGE_GEN_FORMAT
+
+
+def contract_video_canvas() -> tuple:
+    import contract
+
+    return (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
+
+
 def verify_gpu_success(output) -> None:
     """Phase 14: HTTP 200 alone is insufficient, and so is each of these
     alone — all must hold."""
@@ -704,6 +754,12 @@ def one_job(
         "output_key": output_key,
     }
     watch_s = None
+    if op == "image_generate":
+        # Text-only by contract: sending an input_key is refused by the
+        # worker, so the harness must not send one either.
+        payload.pop("input_key")
+        payload["params"] = {"prompt": prompt or IMAGE_PROMPT}
+        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
     if op == "video_generate":
         payload["params"] = {"prompt": prompt or VIDEO_PROMPT}
         # queue + first pull of the model-baked image can be many minutes
@@ -732,6 +788,8 @@ def one_job(
         verify_gpu_success(status.get("output"))
     if op == "video_generate":
         verify_video_success(status["output"])
+    if op == "image_generate":
+        verify_image_success(status["output"])
     cost = actual_cost_usd(status.get("executionTime"), quote["price"])
     if cost > quote["reservation"]:
         raise SpendStop(
@@ -993,7 +1051,12 @@ def main(argv) -> int:
 
         through = int(os.environ.get("THROUGH_PHASE", "16"))
         op = os.environ.get("OP", "image_preprocess")
-        if op not in ("image_preprocess", "video_generate", "audio_mux"):
+        if op not in (
+            "image_preprocess",
+            "image_generate",
+            "video_generate",
+            "audio_mux",
+        ):
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
         if op == "audio_mux":
             # The audio canary is ONE job by definition: narration muxed
@@ -1013,6 +1076,24 @@ def main(argv) -> int:
                 )
             ]
             print("PHASE 13-16 PASS — one real audio job, verified and terminated")
+        elif op == "image_generate":
+            # ONE still from ONIQ's own image engine. Like the audio
+            # canary this has exactly one shape: no battery exists for it.
+            if through != 16:
+                raise SpendStop(
+                    "image-through-phase",
+                    "image_generate supports through_phase 16 (one still) only",
+                )
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    output_key=f"{facts['output_prefix']}/still-001."
+                    + contract_image_format(),
+                    op=op,
+                )
+            ]
+            print("PHASE 13-16 PASS — one real in-house still, verified and terminated")
         elif op == "video_generate":
             # Video knows exactly two shapes (owner directives 2026-08-26):
             # 16 = the single job; 18 = the five-scene battery — EXACTLY

@@ -277,3 +277,96 @@ def test_frame_count_constant_satisfies_the_8k_plus_1_rule():
     # LTX generates 8k+1 frames; any other count gets silently adjusted
     # by the pipeline, which would falsify the measured video_seconds.
     assert contract.VIDEO_NUM_FRAMES % 8 == 1
+
+
+# ------------------------------------------- the in-house image engine
+# Same baked snapshot, text-to-video pipeline, frame 0 kept as the still.
+# The CPU rig injects a fake pipeline, exactly as the video tests do, so
+# everything except the CUDA pass itself is exercised here.
+
+
+class _FakeTextPipe:
+    """Records what the engine asked for and returns real PIL frames."""
+
+    def __init__(self, n_frames=contract.IMAGE_GEN_NUM_FRAMES):
+        self.calls = []
+        self._n = n_frames
+        self.vae = SimpleNamespace(enable_tiling=lambda: None)
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        frames = [
+            Image.new("RGB", (kwargs["width"], kwargs["height"]),
+                      (10 * i, 20, 30))
+            for i in range(self._n)
+        ]
+        return SimpleNamespace(frames=[frames])
+
+
+def _image_job():
+    return contract.validate_job(
+        {"op": "image_generate", "output_key": "out/still.png",
+         "params": {"prompt": "a lantern in the rain"}}
+    )
+
+
+def test_image_engine_draws_from_the_prompt_at_the_video_canvas(tmp_path):
+    pipe = _FakeTextPipe()
+    out = str(tmp_path / "still.png")
+    metrics = videogen.run_image(_image_job(), out, load_pipeline=lambda: pipe)
+
+    call = pipe.calls[0]
+    assert call["prompt"] == "a lantern in the rain"
+    assert "image" not in call  # text-to-video: there is no source frame
+    assert call["width"] == contract.VIDEO_WIDTH
+    assert call["height"] == contract.VIDEO_HEIGHT
+    assert call["num_frames"] == contract.IMAGE_GEN_NUM_FRAMES
+    assert metrics["width"] == contract.VIDEO_WIDTH
+    assert metrics["height"] == contract.VIDEO_HEIGHT
+    assert metrics["format"] == contract.IMAGE_GEN_FORMAT
+
+
+def test_image_engine_keeps_frame_zero(tmp_path):
+    pipe = _FakeTextPipe()
+    out = str(tmp_path / "still.png")
+    videogen.run_image(_image_job(), out, load_pipeline=lambda: pipe)
+    # Frame 0 of the fake is (0, 20, 30); frame 1 would be (10, 20, 30).
+    assert Image.open(out).convert("RGB").getpixel((0, 0)) == (0, 20, 30)
+
+
+def test_image_engine_writes_a_real_measured_artifact(tmp_path):
+    out = str(tmp_path / "still.png")
+    metrics = videogen.run_image(
+        _image_job(), out, load_pipeline=_FakeTextPipe
+    )
+    assert os.path.getsize(out) == metrics["output_bytes"] > 0
+    assert metrics["ok"] is True and metrics["op"] == "image_generate"
+    for measured in ("model_load_ms", "inference_ms", "encode_ms",
+                     "duration_ms"):
+        assert isinstance(metrics[measured], int)
+    assert set(metrics) <= set(contract.OUTPUT_WHITELIST)
+
+
+def test_image_engine_never_marks_the_conditioning_frame(tmp_path):
+    # A watermark here would be burned twice: once on the still and again
+    # on the film that animates it.
+    flat = _FakeTextPipe()
+    out = str(tmp_path / "still.png")
+    videogen.run_image(_image_job(), out, load_pipeline=lambda: flat)
+    img = Image.open(out).convert("RGB")
+    corner = img.crop((img.width - 90, img.height - 40, img.width, img.height))
+    assert corner.getextrema() == ((0, 0), (20, 20), (30, 30))
+
+
+def test_image_engine_refuses_cpu_fallback(tmp_path):
+    with pytest.raises(GpuUnavailable):
+        videogen.run_image(_image_job(), str(tmp_path / "x.png"))
+
+
+def test_image_engine_refuses_an_empty_generation(tmp_path):
+    with pytest.raises(contract.ContractError) as exc:
+        videogen.run_image(
+            _image_job(), str(tmp_path / "x.png"),
+            load_pipeline=lambda: _FakeTextPipe(n_frames=0),
+        )
+    assert exc.value.code == "no-frames"

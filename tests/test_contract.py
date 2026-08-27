@@ -284,3 +284,61 @@ def test_concat_refuses_every_extra_knob():
 
 def test_concat_evidence_fields_are_whitelisted():
     assert {"segments", "concat_ms", "watermarked"} <= contract.OUTPUT_WHITELIST
+
+
+# ------------------------------------------------- image_generate (in-house)
+# ONIQ's own image engine (fully in-house directive, 2026-08-27). The op that
+# replaced an outsourced image API, so its contract is pinned as tightly as
+# the video one: text-only, prompt-bounded, and no watermark field at all.
+
+
+def _image_job(**overrides):
+    job = {"op": "image_generate", "output_key": "out/still.png",
+           "params": {"prompt": "a lantern in the rain"}}
+    job.update(overrides)
+    return job
+
+
+def test_image_generate_is_allowed_and_normalizes():
+    out = contract.validate_job(_image_job())
+    assert out["op"] == "image_generate"
+    assert out["input_key"] is None
+    assert out["params"] == {"prompt": "a lantern in the rain"}
+
+
+def test_image_generate_refuses_an_input_key():
+    # Refused, never ignored: a caller that believes it is conditioning on
+    # an image must never be told silently that it was.
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(_image_job(input_key="in/frame.png"))
+    assert exc.value.code == "invalid-input"
+
+
+def test_image_generate_requires_a_prompt():
+    for bad in (None, "", "   ", 7):
+        with pytest.raises(contract.ContractError):
+            contract.validate_job(_image_job(params={"prompt": bad}))
+
+
+def test_image_generate_bounds_the_prompt():
+    long_prompt = "x" * (contract.MAX_PROMPT_CHARS + 1)
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(_image_job(params={"prompt": long_prompt}))
+    assert exc.value.code == "invalid-input"
+
+
+def test_image_generate_takes_no_watermark_field():
+    # A conditioning frame is an intermediate. The mark belongs to the
+    # delivered film, burned by the stage that knows the entitlement.
+    assert contract._IMAGE_GEN_PARAM_FIELDS == frozenset({"prompt"})
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            _image_job(params={"prompt": "ok", "watermark": False})
+        )
+
+
+def test_image_generate_canvas_matches_the_video_canvas():
+    # The still exists to be animated; a mismatched canvas would be
+    # rescaled at the seam between the two stages.
+    assert contract.IMAGE_GEN_NUM_FRAMES % 8 == 1
+    assert contract.IMAGE_GEN_FORMAT in contract.ALLOWED_FORMATS
