@@ -150,12 +150,24 @@ jobs:
           print('uid 10001, /app read-only')
           "
 
-      - name: Image carries only the seven shipped files
+      - name: Image carries exactly the shipped files and nothing else
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 -c "
+          set -eu
+          # DERIVED, not enumerated. This list used to be typed out here,
+          # which made it the THIRD hand-maintained copy of the shipped
+          # set — and on 2026-08-27 storygen.py was missing from the other
+          # two, so a stale third copy would only have hidden the fix.
+          # The Dockerfile's own COPY destinations are the source of
+          # truth; tests/test_workflow_gates.py ties THAT set to the
+          # modules handler.py actually imports. This step keeps the other
+          # half of the property the enumeration was really for: nothing
+          # EXTRA is in the image either.
+          expect=$(grep -E '^COPY ' Dockerfile | awk '{print $NF}' | xargs -n1 basename | sort | paste -sd, -)
+          echo "expecting: $expect"
+          docker run --rm -e EXPECT="$expect" oniq-gpu-worker:ci python3 -c "
           import os
           found = sorted(os.listdir('/app'))
-          expect = ['audio.py', 'contract.py', 'handler.py', 'preprocess.py', 'requirements.txt', 'storage.py', 'videogen.py']
-          assert found == expect, found
+          expect = sorted(os.environ['EXPECT'].split(','))
+          assert found == expect, ('in image: %r, dockerfile COPYs: %r' % (found, expect))
           print('payload exact:', found)
           "
