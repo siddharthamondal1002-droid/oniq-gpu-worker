@@ -578,6 +578,14 @@ def verify_video_success(output: dict) -> None:
         raise SpendStop("no-frames", "generated video has zero duration")
     if output.get("encode_ms") is None:
         raise SpendStop("no-encode", "video encode time was not measured")
+    # Watermark evidence (monetization resolution loop, 2026-08-27): a
+    # worker built from the watermark-capable contract reports whether the
+    # mark was burned. Absent means the OLD image is still serving — the
+    # canary report reads that as "image not yet rebuilt", never as clean.
+    if "watermarked" in output and not isinstance(output["watermarked"], bool):
+        raise SpendStop(
+            "watermark-evidence-invalid", "watermarked must be a boolean when reported"
+        )
 
 
 def _allowed_output_keys():
