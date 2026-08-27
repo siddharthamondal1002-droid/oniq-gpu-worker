@@ -141,6 +141,10 @@ OUTPUT_WHITELIST = frozenset(
         # story_generate evidence — the text itself plus its measurements
         "story_text",
         "story_chars",
+        # WHICH precision actually loaded. 4-bit and bf16 differ by ~12GB
+        # of the card, and the load can silently fall back, so the mode is
+        # reported by the job rather than assumed from the config.
+        "precision",
         # audio_mux evidence — measured on the worker, never inferred
         "has_audio",
         "narration_seconds",
