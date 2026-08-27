@@ -66,20 +66,32 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
-        if job["op"] in ("video_generate", "audio_mux"):
+        if job["op"] in ("video_generate", "audio_mux", "video_concat"):
             output_path = f"{workdir}/output.mp4"
         else:
             output_path = f"{workdir}/output.{job['params']['format']}"
 
-        storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
-        _check_deadline(started)
-
-        if job["op"] == "video_generate":
-            metrics = videogen.run(job, input_path, output_path)
-        elif job["op"] == "audio_mux":
-            metrics = audio.run(job, input_path, output_path)
+        if job["op"] == "video_concat":
+            # Every segment is a bounded download in declared order; the
+            # deadline is re-checked between fetches so a slow bucket can
+            # never carry the job past the ceiling.
+            segment_paths = []
+            for index, key in enumerate(job["params"]["segment_keys"]):
+                seg_path = f"{workdir}/seg{index:03d}.mp4"
+                storage.download(key, seg_path, contract.MAX_INPUT_BYTES)
+                segment_paths.append(seg_path)
+                _check_deadline(started)
+            metrics = videogen.run_concat(job, segment_paths, output_path)
         else:
-            metrics = preprocess.run(job, input_path, output_path)
+            storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
+            _check_deadline(started)
+
+            if job["op"] == "video_generate":
+                metrics = videogen.run(job, input_path, output_path)
+            elif job["op"] == "audio_mux":
+                metrics = audio.run(job, input_path, output_path)
+            else:
+                metrics = preprocess.run(job, input_path, output_path)
         _check_deadline(started)
 
         storage.upload(output_path, job["output_key"])
@@ -101,6 +113,8 @@ def handle(event) -> dict:
     except storage.StorageError as exc:
         return _error(exc.code, exc.message)
     except preprocess.GpuUnavailable as exc:
+        return _error(exc.code, exc.message)
+    except videogen.ConcatRefused as exc:
         return _error(exc.code, exc.message)
     except Exception as exc:
         # Never echo arbitrary exception text to the caller: the class

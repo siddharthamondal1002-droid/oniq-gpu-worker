@@ -1015,3 +1015,17 @@ def test_audio_job_rejects_unwhitelisted_schema():
     with pytest.raises(spend_run.SpendStop) as exc:
         _run_one_audio(FakeClient(job_statuses=[status]))
     assert exc.value.code == "schema-violation"
+
+
+def test_video_watermark_evidence_must_be_boolean_when_reported():
+    # Old images report nothing (fine — the canary reads that as "image
+    # not rebuilt"); a new image must report a real boolean, never a
+    # truthy string that could fake either state.
+    good = dict(_good_video_status()["output"])
+    good["watermarked"] = True
+    spend_run.verify_video_success(good)
+    bad = dict(_good_video_status()["output"])
+    bad["watermarked"] = "true"
+    with pytest.raises(spend_run.SpendStop) as err:
+        spend_run.verify_video_success(bad)
+    assert err.value.code == "watermark-evidence-invalid"

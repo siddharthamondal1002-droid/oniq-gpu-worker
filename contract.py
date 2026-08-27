@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 
 # The workloads this worker exists to run.
-ALLOWED_OPS = ("image_preprocess", "video_generate", "audio_mux")
+ALLOWED_OPS = ("image_preprocess", "video_generate", "audio_mux", "video_concat")
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
 # against Content-Length BEFORE the download begins.
@@ -57,14 +57,26 @@ MAX_PROMPT_CHARS = 1000
 # against the video's own duration, in audio.py, refused never truncated.
 MAX_NARRATION_CHARS = 300
 
+# video_concat: ordered stream-copy assembly of clips this worker itself
+# generated (monetization resolution loop, 2026-08-27). 16 segments of the
+# 97-frame clip is ~65s of film — the v1 assembly ceiling; longer films
+# concat concats. Segments must be uniform (same canvas, same audio
+# presence); anything else is refused, never coerced.
+MIN_CONCAT_SEGMENTS = 2
+MAX_CONCAT_SEGMENTS = 16
+
 # R2 keys are references, not paths: a bounded character set, no leading
 # slash, no parent-directory traversal.
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")
 
 _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
 _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
-_VIDEO_PARAM_FIELDS = frozenset({"prompt"})
+# watermark is a SERVER-derived entitlement relayed by the application —
+# absent means TRUE (marked), the fail-safe: an old or malformed caller
+# can only ever produce the watermarked product, never a free clean one.
+_VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
+_CONCAT_PARAM_FIELDS = frozenset({"segment_keys"})
 
 # Every key the handler may return. Anything not named here is dropped by
 # filter_output before the response leaves the worker.
@@ -102,6 +114,12 @@ OUTPUT_WHITELIST = frozenset(
         "audio_gain_db",
         "tts_ms",
         "mux_ms",
+        # watermark evidence — whether the mark was actually burned, so the
+        # application can fail closed when entitlement and artifact disagree
+        "watermarked",
+        # video_concat evidence
+        "segments",
+        "concat_ms",
     }
 )
 
@@ -186,11 +204,58 @@ def validate_job(raw) -> dict:
                 "invalid-input",
                 f"params.prompt may not exceed {MAX_PROMPT_CHARS} characters",
             )
+        # Absent -> True is the fail-safe; a PRESENT non-bool is a malformed
+        # contract and the job is refused outright rather than guessed at.
+        watermark = params_raw.get("watermark", True)
+        if not isinstance(watermark, bool):
+            raise ContractError(
+                "invalid-input", "params.watermark must be a boolean"
+            )
         return {
             "op": op,
             "input_key": input_key,
             "output_key": output_key,
-            "params": {"prompt": prompt.strip()},
+            "params": {"prompt": prompt.strip(), "watermark": watermark},
+        }
+
+    if op == "video_concat":
+        unknown_params = set(params_raw) - _CONCAT_PARAM_FIELDS
+        if unknown_params:
+            raise ContractError(
+                "invalid-input",
+                "unknown params field(s): " + ", ".join(sorted(unknown_params)),
+            )
+        segments_raw = params_raw.get("segment_keys")
+        if not isinstance(segments_raw, list):
+            raise ContractError(
+                "invalid-input", "params.segment_keys must be a list of keys"
+            )
+        if not (MIN_CONCAT_SEGMENTS <= len(segments_raw) <= MAX_CONCAT_SEGMENTS):
+            raise ContractError(
+                "invalid-input",
+                "params.segment_keys must hold between "
+                f"{MIN_CONCAT_SEGMENTS} and {MAX_CONCAT_SEGMENTS} keys",
+            )
+        segment_keys = [
+            _require_key(k, f"params.segment_keys[{i}]")
+            for i, k in enumerate(segments_raw)
+        ]
+        if len(set(segment_keys)) != len(segment_keys):
+            raise ContractError(
+                "invalid-input", "params.segment_keys may not repeat a key"
+            )
+        # input_key names the first segment so every op still declares one
+        # bounded primary input; a mismatch is a caller bug, refused.
+        if input_key != segment_keys[0]:
+            raise ContractError(
+                "invalid-input",
+                "input_key must equal params.segment_keys[0]",
+            )
+        return {
+            "op": op,
+            "input_key": input_key,
+            "output_key": output_key,
+            "params": {"segment_keys": segment_keys},
         }
 
     if op == "audio_mux":

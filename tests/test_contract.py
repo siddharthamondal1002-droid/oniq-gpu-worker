@@ -118,10 +118,33 @@ def _video_job(**overrides):
     return base
 
 
-def test_video_job_normalizes_to_prompt_only():
+def test_video_job_normalizes_to_prompt_and_watermark():
     job = contract.validate_job(_video_job())
     assert job["op"] == "video_generate"
-    assert job["params"] == {"prompt": "the subject turns toward the camera"}
+    # Absent watermark normalizes to TRUE — the fail-safe: an old caller
+    # can only ever produce the watermarked product.
+    assert job["params"] == {
+        "prompt": "the subject turns toward the camera",
+        "watermark": True,
+    }
+
+
+def test_video_watermark_is_a_strict_boolean():
+    clean = contract.validate_job(
+        _video_job(params={"prompt": "ok", "watermark": False})
+    )
+    assert clean["params"]["watermark"] is False
+    marked = contract.validate_job(
+        _video_job(params={"prompt": "ok", "watermark": True})
+    )
+    assert marked["params"]["watermark"] is True
+    # A present non-bool is a malformed contract: refused, never guessed.
+    for bad in (1, 0, "false", "true", None, [], {}):
+        with pytest.raises(contract.ContractError) as exc:
+            contract.validate_job(
+                _video_job(params={"prompt": "ok", "watermark": bad})
+            )
+        assert exc.value.code == "invalid-input"
 
 
 def test_video_job_requires_a_prompt():
@@ -186,3 +209,78 @@ def test_filter_output_drops_everything_not_whitelisted():
 def test_output_whitelist_is_explicit_and_closed():
     assert "aws_secret" not in contract.OUTPUT_WHITELIST
     assert {"ok", "code", "error", "device", "gpu_name"} <= contract.OUTPUT_WHITELIST
+
+
+# ------------------------------------------------------------ video_concat
+
+
+def _concat_job(**overrides):
+    segments = ["clips/a.mp4", "clips/b.mp4", "clips/c.mp4"]
+    base = {
+        "op": "video_concat",
+        "input_key": segments[0],
+        "output_key": "films/final.mp4",
+        "params": {"segment_keys": list(segments)},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_concat_job_normalizes_ordered_segments():
+    job = contract.validate_job(_concat_job())
+    assert job["op"] == "video_concat"
+    assert job["params"] == {
+        "segment_keys": ["clips/a.mp4", "clips/b.mp4", "clips/c.mp4"]
+    }
+
+
+def test_concat_segment_count_is_bounded_both_ways():
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            _concat_job(
+                input_key="clips/a.mp4",
+                params={"segment_keys": ["clips/a.mp4"]},
+            )
+        )
+    too_many = [f"clips/{i}.mp4" for i in range(contract.MAX_CONCAT_SEGMENTS + 1)]
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            _concat_job(input_key=too_many[0], params={"segment_keys": too_many})
+        )
+    at_cap = [f"clips/{i}.mp4" for i in range(contract.MAX_CONCAT_SEGMENTS)]
+    ok = contract.validate_job(
+        _concat_job(input_key=at_cap[0], params={"segment_keys": at_cap})
+    )
+    assert len(ok["params"]["segment_keys"]) == contract.MAX_CONCAT_SEGMENTS
+
+
+def test_concat_refuses_repeats_bad_keys_and_mismatched_input():
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            _concat_job(params={"segment_keys": ["clips/a.mp4", "clips/a.mp4"]})
+        )
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            _concat_job(params={"segment_keys": ["clips/a.mp4", "../etc/x"]})
+        )
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(_concat_job(input_key="clips/b.mp4"))
+    assert "segment_keys[0]" in exc.value.message
+
+
+def test_concat_refuses_every_extra_knob():
+    for knob in ("watermark", "prompt", "format", "fps"):
+        with pytest.raises(contract.ContractError):
+            contract.validate_job(
+                _concat_job(
+                    params={
+                        "segment_keys": ["clips/a.mp4", "clips/b.mp4"],
+                        knob: 1,
+                    },
+                    input_key="clips/a.mp4",
+                )
+            )
+
+
+def test_concat_evidence_fields_are_whitelisted():
+    assert {"segments", "concat_ms", "watermarked"} <= contract.OUTPUT_WHITELIST

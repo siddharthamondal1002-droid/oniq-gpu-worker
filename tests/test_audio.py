@@ -126,8 +126,10 @@ def test_contract_bounds_narration_length():
 
 
 def test_video_generate_contract_is_untouched_by_audio():
-    """The proven op's params surface must not have widened."""
-    assert contract._VIDEO_PARAM_FIELDS == frozenset({"prompt"})
+    """Audio must not widen the video op. The surface is exactly the
+    prompt plus the server-derived watermark entitlement (monetization
+    resolution loop, 2026-08-27) — narration still cannot leak in."""
+    assert contract._VIDEO_PARAM_FIELDS == frozenset({"prompt", "watermark"})
     with pytest.raises(contract.ContractError):
         contract.validate_job(
             {

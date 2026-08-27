@@ -134,6 +134,145 @@ def test_fit_to_canvas_always_yields_the_video_canvas(size):
     assert fitted.size == (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
 
 
+def test_watermark_defaults_on_and_changes_the_frame(paths):
+    # The default job carries watermark=True; the corner pixels of the
+    # encoded output must differ from an unmarked run of the SAME frames.
+    input_path, output_path = paths
+    pipe = FakePipe()
+    marked = videogen.run(
+        _video_job(), input_path, output_path, load_pipeline=lambda: pipe
+    )
+    assert marked["watermarked"] is True
+
+    clean_path = output_path.replace(".mp4", ".clean.mp4")
+    clean_job = contract.validate_job(
+        {
+            "op": "video_generate",
+            "input_key": "in/a.jpg",
+            "output_key": "out/a.mp4",
+            "params": {"prompt": "the subject blinks", "watermark": False},
+        }
+    )
+    clean = videogen.run(
+        clean_job, input_path, clean_path, load_pipeline=lambda: FakePipe()
+    )
+    assert clean["watermarked"] is False
+
+    import imageio.v3 as iio
+    import numpy as np
+
+    frame_marked = iio.imread(output_path, index=0, plugin="pyav")
+    frame_clean = iio.imread(clean_path, index=0, plugin="pyav")
+    h, w = frame_marked.shape[:2]
+    corner_marked = frame_marked[h - 60 :, w - 160 :]
+    corner_clean = frame_clean[h - 60 :, w - 160 :]
+    # The mark lives in the bottom-right corner and nowhere else.
+    assert np.abs(
+        corner_marked.astype(int) - corner_clean.astype(int)
+    ).max() > 20
+    top_marked = frame_marked[: h // 2]
+    top_clean = frame_clean[: h // 2]
+    assert np.abs(top_marked.astype(int) - top_clean.astype(int)).max() <= 6
+
+
+def test_watermark_frame_is_pure_and_preserves_size():
+    import numpy as np
+
+    frame = Image.new("RGB", (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT), (10, 10, 10))
+    marked = videogen._watermark_frame(frame)
+    assert marked.size == frame.size
+    assert marked.mode == "RGB"
+    original = np.asarray(frame)
+    result = np.asarray(marked)
+    # The original frame object is untouched, and the mark landed in the
+    # bottom-right corner region — nowhere else.
+    assert original.max() == 10
+    corner = result[-70:, -180:]
+    assert corner.max() > 60
+    assert np.array_equal(result[: result.shape[0] // 2], original[: original.shape[0] // 2])
+
+
+# ---------------------------------------------------------------- concat
+
+
+def _tiny_clip(path, n_frames, shade):
+    frames = [
+        Image.new(
+            "RGB",
+            (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT),
+            (shade, 90, 200 - shade),
+        )
+        for _ in range(n_frames)
+    ]
+    videogen._encode_mp4(frames, path)
+
+
+def _concat_job_for(keys):
+    return contract.validate_job(
+        {
+            "op": "video_concat",
+            "input_key": keys[0],
+            "output_key": "films/final.mp4",
+            "params": {"segment_keys": list(keys)},
+        }
+    )
+
+
+def test_concat_joins_ordered_segments_and_measures(tmp_path):
+    a = str(tmp_path / "a.mp4")
+    b = str(tmp_path / "b.mp4")
+    c = str(tmp_path / "c.mp4")
+    _tiny_clip(a, 9, 30)
+    _tiny_clip(b, 17, 120)
+    _tiny_clip(c, 9, 220)
+    out = str(tmp_path / "final.mp4")
+    metrics = videogen.run_concat(
+        _concat_job_for(["k/a.mp4", "k/b.mp4", "k/c.mp4"]), [a, b, c], out
+    )
+    # Decoded, not trusted: every frame of the final must decode.
+    assert metrics["segments"] == 3
+    assert metrics["frames"] == 9 + 17 + 9
+    assert metrics["video_seconds"] == round(35 / contract.VIDEO_FPS, 2)
+    assert metrics["width"] == contract.VIDEO_WIDTH
+    assert metrics["format"] == "mp4"
+    assert metrics["output_bytes"] > 0
+    with open(out, "rb") as fh:
+        assert fh.read(12)[4:8] == b"ftyp"
+
+    # And the frames arrive in declared order: first shade, then second.
+    import imageio.v3 as iio
+
+    first = iio.imread(out, index=0, plugin="pyav")
+    later = iio.imread(out, index=12, plugin="pyav")
+    assert abs(int(first[10, 10, 0]) - 30) < 20
+    assert abs(int(later[10, 10, 0]) - 120) < 20
+
+
+def test_concat_refuses_a_mismatched_canvas(tmp_path):
+    a = str(tmp_path / "a.mp4")
+    _tiny_clip(a, 9, 30)
+    small = str(tmp_path / "small.mp4")
+    frames = [Image.new("RGB", (352, 240), (50, 50, 50)) for _ in range(9)]
+    import imageio.v2 as imageio
+
+    writer = imageio.get_writer(small, fps=contract.VIDEO_FPS, codec="libx264")
+    try:
+        import numpy as np
+
+        for f in frames:
+            writer.append_data(np.asarray(f))
+    finally:
+        writer.close()
+
+    with pytest.raises(videogen.ConcatRefused) as exc:
+        videogen.run_concat(
+            _concat_job_for(["k/a.mp4", "k/small.mp4"]),
+            [a, small],
+            str(tmp_path / "out.mp4"),
+        )
+    assert exc.value.code == "concat-dims-mismatch"
+
+
 def test_frame_count_constant_satisfies_the_8k_plus_1_rule():
     # LTX generates 8k+1 frames; any other count gets silently adjusted
     # by the pipeline, which would falsify the measured video_seconds.
