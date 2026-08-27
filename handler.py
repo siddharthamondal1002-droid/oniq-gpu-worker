@@ -21,6 +21,7 @@ import audio
 import contract
 import preprocess
 import storage
+import storygen
 import videogen
 
 
@@ -66,6 +67,12 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
+        if job["op"] == "story_generate":
+            # Text in the response, no artifact: nothing to upload.
+            metrics = storygen.run(job)
+            _check_deadline(started)
+            return contract.filter_output({**metrics, "cleanup_ok": True})
+
         if job["op"] in ("video_generate", "audio_mux", "video_concat"):
             output_path = f"{workdir}/output.mp4"
         elif job["op"] == "image_generate":
@@ -120,6 +127,9 @@ def handle(event) -> dict:
         return _error(exc.code, exc.message)
     except preprocess.GpuUnavailable as exc:
         return _error(exc.code, exc.message)
+    except storygen.StoryModelUnavailable as exc:
+        # LOCAL_MODEL_UNAVAILABLE. Never a reason to call a provider.
+        return _error("local-model-unavailable", str(exc))
     except videogen.ConcatRefused as exc:
         return _error(exc.code, exc.message)
     except Exception as exc:

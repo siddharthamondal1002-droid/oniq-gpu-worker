@@ -1,9 +1,13 @@
 # ONIQ GPU worker image.
 #
 # Structure is the security posture:
-# - COPY names the six shipped files individually — there is no COPY . .,
+# - COPY names every shipped file individually — there is no COPY . .,
 #   so the image cannot receive a stray .env even if .dockerignore were
-#   wrong (.dockerignore is a second lock, not the only one);
+#   wrong (.dockerignore is a second lock, not the only one). The set is
+#   not a number to remember: test_workflow_gates derives handler.py's
+#   own first-party import closure and fails if any module in it is
+#   missing from either lock. storygen.py reached CI missing from both
+#   (2026-08-27) and the image died on `import storygen` at start-up;
 # - no ARG anywhere, so no build argument can bake a secret into a layer;
 # - each stage builds as root and executes as oniq (uid/gid 10001):
 #   /app, site-packages and the baked model weights end up root-owned
@@ -45,6 +49,7 @@ COPY contract.py /app/contract.py
 COPY preprocess.py /app/preprocess.py
 COPY storage.py /app/storage.py
 COPY videogen.py /app/videogen.py
+COPY storygen.py /app/storygen.py
 COPY audio.py /app/audio.py
 COPY handler.py /app/handler.py
 
@@ -151,6 +156,113 @@ for repo, tag in CANDIDATES:
 if resolved is None:
     raise SystemExit("no candidate model could be baked")
 with open("/app/models/MODEL_ID", "w") as fh:
+    fh.write(resolved + "\n")
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+EOF
+
+# Bake the STORY model — ONIQ's local causal LLM (owner directive
+# 2026-08-27, Qwen3-8B conditionally approved). Same discipline as LTX:
+# candidates tried in order, each REJECTED FROM METADATA before a byte is
+# downloaded, with a size guard so a 14B/32B slip cannot enter the image.
+#
+# ONE ADDITION THE LTX BAKE DOES NOT HAVE: a LICENCE GATE. The owner's
+# approval is conditional on the checkpoint actually being Apache-2.0, and
+# a model card read by a human months ago is not a check. The HF metadata
+# carries the licence tag, so the build asserts it and REFUSES to download
+# anything else. That turns "we believe it is Apache" into something the
+# image cannot be built without.
+#
+# Verified 2026-08-27 from the authors' own repository
+# (github.com/QwenLM/Qwen3): "All our open-weight models are licensed
+# under Apache 2.0", with 8B among the released dense models. Apache-2.0
+# section 2 grants a perpetual, royalty-free, irrevocable right to
+# reproduce and distribute the Work, which is what ONIQ needs to ship the
+# weights inside its own private image; section 4 conditions (licence
+# copy, NOTICE, change notices) are satisfied by keeping the files the
+# snapshot ships.
+RUN python3 - <<'EOF'
+import json, os, shutil
+
+from huggingface_hub import HfApi, snapshot_download
+
+# Quantised first (a smaller image pulls faster on a cold worker), then
+# the base weights, which always exist. A candidate that does not exist
+# simply SKIPs, exactly as in the LTX bake.
+CANDIDATES = [
+    "Qwen/Qwen3-8B-AWQ",
+    "Qwen/Qwen3-8B",
+]
+DEST = "/app/models/story"
+ALLOWED_LICENCES = {"apache-2.0"}
+# An 8B checkpoint in bf16 is ~16.4GB; 20GB refuses a larger class.
+SIZE_GUARD_BYTES = 20 * 1024**3
+NEEDED = ("config.json", "tokenizer_config.json")
+
+
+def survey(api, repo):
+    info = api.model_info(repo, files_metadata=True)
+
+    # THE LICENCE GATE. No licence, or the wrong one, and nothing is
+    # downloaded — the build fails rather than baking weights ONIQ may
+    # not redistribute inside its image.
+    licence = (info.card_data or {}).get("license") if info.card_data else None
+    if licence is None:
+        licence = next(
+            (t.split(":", 1)[1] for t in (info.tags or []) if t.startswith("license:")),
+            None,
+        )
+    if str(licence).lower() not in ALLOWED_LICENCES:
+        raise RuntimeError(
+            f"licence {licence!r} is not in {sorted(ALLOWED_LICENCES)} — refusing to bake"
+        )
+
+    paths = {s.rfilename: (s.size or 0) for s in info.siblings}
+    for needed in NEEDED:
+        if needed not in paths:
+            raise RuntimeError(f"lacks {needed} (not a transformers checkpoint)")
+    weight_bytes = sum(
+        size for p, size in paths.items() if p.endswith(".safetensors")
+    )
+    if not 0 < weight_bytes <= SIZE_GUARD_BYTES:
+        raise RuntimeError(f"{weight_bytes} metadata weight bytes fail the 8B-class guard")
+    return licence, weight_bytes
+
+
+api = HfApi()
+os.makedirs("/app/models", exist_ok=True)
+resolved = None
+for repo in CANDIDATES:
+    try:
+        licence, surveyed = survey(api, repo)
+        print(f"SURVEY {repo}: licence={licence}, {surveyed} weight bytes by metadata")
+        snapshot_download(
+            repo,
+            local_dir=DEST,
+            allow_patterns=["*.json", "*.safetensors", "*.txt", "*.model", "LICENSE*", "NOTICE*"],
+        )
+        with open(os.path.join(DEST, "config.json")) as fh:
+            config = json.load(fh)
+        if "qwen3" not in str(config.get("model_type") or "").lower():
+            raise RuntimeError(f"config model_type is {config.get('model_type')!r}, not qwen3")
+        on_disk = 0
+        for root, _, files in os.walk(DEST):
+            for name in files:
+                if name.endswith(".safetensors"):
+                    on_disk += os.path.getsize(os.path.join(root, name))
+        if not 0 < on_disk <= SIZE_GUARD_BYTES:
+            raise RuntimeError(f"downloaded weights are {on_disk} bytes")
+        resolved = repo
+        print(f"BAKED {resolved} ({on_disk} weight bytes on disk, licence {licence})")
+        break
+    except Exception as exc:
+        print(f"SKIP {repo}: {type(exc).__name__}: {exc}")
+        shutil.rmtree(DEST, ignore_errors=True)
+        shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+
+if resolved is None:
+    raise SystemExit("no story model could be baked")
+with open("/app/models/STORY_MODEL_ID", "w") as fh:
     fh.write(resolved + "\n")
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)

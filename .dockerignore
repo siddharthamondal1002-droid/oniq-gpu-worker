@@ -1,5 +1,8 @@
 # Second lock: deny everything, then admit exactly what the Dockerfile
-# COPYs. The first lock is that COPY names the seven files individually.
+# COPYs. The first lock is that COPY names each file individually.
+# Neither list is maintained by memory — test_workflow_gates derives
+# handler.py's first-party import closure and fails if a module is
+# missing from either. storygen.py was missing from both on 2026-08-27.
 *
 !requirements.txt
 !contract.py
@@ -7,4 +10,5 @@
 !storage.py
 !handler.py
 !videogen.py
+!storygen.py
 !audio.py

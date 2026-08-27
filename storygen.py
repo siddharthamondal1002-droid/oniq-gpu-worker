@@ -1,0 +1,211 @@
+"""The story_generate workload — ONIQ's own causal LLM, on CUDA.
+
+Owner directive 2026-08-27 (Qwen3-8B conditionally approved). The model is
+baked into MODEL_DIR at build time behind a licence gate and loaded with
+local_files_only, so a job never reaches Hugging Face, never reaches any
+provider, and fails clearly when the weights are absent.
+
+THE LIFECYCLE IS THE POINT. LTX peaked at 15.9GB of the A5000's 24GB on
+the measured 2026-08-27 job. The story model therefore runs ALONE:
+
+    load -> generate -> parse -> DELETE -> empty_cache -> (LTX may start)
+
+`run` releases the model in a finally block, so a refusal, a timeout or a
+crash inside generation still hands the card back. A story job that left
+8GB resident would not fail loudly; it would make the NEXT video job fail
+mysteriously, which is the failure this ordering exists to prevent.
+
+Heavy imports happen inside the functions, exactly as videogen does, so
+the CPU test rig can exercise everything except the CUDA pass itself.
+"""
+
+from __future__ import annotations
+
+import os
+import time
+
+import contract
+from preprocess import GpuUnavailable
+
+MODEL_DIR = "/app/models/story"
+MODEL_ID_FILE = "/app/models/STORY_MODEL_ID"
+
+# Server decisions, like the video sampler's: the caller chooses none of
+# them. A story is long-form structured JSON, so the budget is generous
+# and the sampling is deliberately low-variance.
+MAX_NEW_TOKENS = 8192
+TEMPERATURE = 0.7
+TOP_P = 0.9
+SEED = 42
+
+
+class StoryModelUnavailable(Exception):
+    """No local checkpoint. NEVER a reason to call a provider."""
+
+
+def model_id() -> str:
+    try:
+        with open(MODEL_ID_FILE, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return "missing"
+
+
+def weights_present(model_dir: str = MODEL_DIR) -> bool:
+    """A baked checkpoint is a config plus at least one weight shard."""
+    if not os.path.isdir(model_dir):
+        return False
+    if not os.path.exists(os.path.join(model_dir, "config.json")):
+        return False
+    return any(name.endswith(".safetensors") for name in os.listdir(model_dir))
+
+
+def _load_real_model():
+    """Load the baked model onto CUDA. Never touches the network."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
+    kwargs = {"local_files_only": True, "torch_dtype": torch.bfloat16, "device_map": "cuda"}
+    try:
+        from transformers import BitsAndBytesConfig
+
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+        )
+    except Exception:
+        # bf16 is the fallback and still fits alone on a 24GB card, which
+        # is the only way this model ever runs.
+        pass
+    model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **kwargs)
+    model.eval()
+    return model, tokenizer
+
+
+def _release(model) -> None:
+    """Hand the card back. Called in a finally, always."""
+    try:
+        del model
+    except Exception:
+        pass
+    try:
+        import gc
+
+        gc.collect()
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except Exception:
+        # A cleanup that cannot run must not mask the job's own result.
+        pass
+
+
+def _generate(model, tokenizer, prompt: str, max_new_tokens: int) -> str:
+    # torch is imported lazily and tolerated absent, exactly as videogen
+    # does: the CPU rig injects a fake model and exercises everything
+    # here except the CUDA pass itself.
+    try:
+        import torch
+    except ImportError:
+        torch = None
+
+    messages = [{"role": "user", "content": prompt}]
+    text = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    if torch is None:
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        generated = out[0][inputs["input_ids"].shape[-1] :]
+        return tokenizer.decode(generated, skip_special_tokens=True)
+    torch.manual_seed(SEED)
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+    generated = out[0][inputs["input_ids"].shape[-1] :]
+    return tokenizer.decode(generated, skip_special_tokens=True)
+
+
+def run(job: dict, load_model=None) -> dict:
+    """Generate one story. Returns the model's raw text plus measurements.
+
+    THE WORKER DOES NOT VALIDATE THE STORY. Parsing, repair and the Story
+    IR validator live in the application, which already owns them and is
+    where an invalid story must stop before any GPU job is planned. This
+    op's contract is narrower and therefore checkable: produce text from
+    ONIQ's own model, measure it, and release the card.
+    """
+    started = time.monotonic()
+
+    if load_model is None:
+        if not weights_present(MODEL_DIR):
+            raise StoryModelUnavailable(
+                "no story model is baked at " + MODEL_DIR + "; story generation is "
+                "unavailable and no provider substitutes for it"
+            )
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is None or not torch.cuda.is_available():
+            raise GpuUnavailable(
+                "story_generate requires CUDA; there is no CPU fallback"
+            )
+        load_model = _load_real_model
+
+    load_started = time.monotonic()
+    model, tokenizer = load_model()
+    model_load_ms = int((time.monotonic() - load_started) * 1000)
+
+    peak_mb = None
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+    except ImportError:
+        torch = None
+
+    try:
+        infer_started = time.monotonic()
+        text = _generate(
+            model, tokenizer, job["params"]["prompt"], job["params"]["max_tokens"]
+        )
+        inference_ms = int((time.monotonic() - infer_started) * 1000)
+        if torch is not None and torch.cuda.is_available():
+            peak_mb = int(torch.cuda.max_memory_allocated() / (1024 * 1024))
+    finally:
+        # ALWAYS. A refusal must not leave the card occupied for LTX.
+        _release(model)
+
+    if not text.strip():
+        raise contract.ContractError("story-empty", "the model produced no text")
+
+    return {
+        "ok": True,
+        "op": "story_generate",
+        "model": model_id(),
+        "model_load_ms": model_load_ms,
+        "inference_ms": inference_ms,
+        "story_text": text,
+        "story_chars": len(text),
+        "vram_peak_mb": peak_mb,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+    }
