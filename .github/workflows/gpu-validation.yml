@@ -102,7 +102,7 @@ jobs:
       - name: Discover — RAW first, parsed second
         run: python runpod_client.py discover --json discovery.json
 
-      - name: "Phase 6-7: live 3090 figures and the financial gate"
+      - name: "Phase 6-7: live target-GPU figures and the financial gate"
         run: |
           python - <<'EOF'
           import json
