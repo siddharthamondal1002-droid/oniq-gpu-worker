@@ -225,7 +225,9 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
     # as a literal in runpod_client.set_workers_standby_zero.
     doc, raw = _load("gpu-validation.yml")
     mode = _triggers(doc)["workflow_dispatch"]["inputs"]["mode"]
-    assert mode["options"] == ["discover", "spend", "standby-zero"]
+    # "advisory" (2026-08-27) is the standalone free preflight — a $0 read
+    # of the live endpoint that gates nothing and can spend nothing.
+    assert mode["options"] == ["discover", "spend", "standby-zero", "advisory"]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
     assert standby["if"].strip() == "inputs.mode == 'standby-zero'"

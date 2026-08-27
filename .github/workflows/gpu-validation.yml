@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0)."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero]
+        options: [discover, spend, standby-zero, advisory]
         default: discover
       spend:
         description: "Type SPEND (exactly) to allow the spend job."
@@ -138,6 +138,45 @@ jobs:
           name: discovery
           path: discovery.json
           if-no-files-found: ignore
+
+  advisory:
+    # The STANDALONE free preflight (phases 9-10, $0): pods, endpoint
+    # identity/config/exclusivity, R2 env NAMES, live quote + admission.
+    # It does NOT gate the spend path (owner directive 2026-08-25 — no
+    # `needs` anywhere points here) and it cannot spend: the driver's
+    # `preflight` argv never provisions. On this repository's plan the
+    # final advisory step — reading a required-reviewer rule back — is
+    # EXPECTED to refuse with environment-unprotected (the same gap
+    # APPROVAL_MODE owner-dispatch records), so a red run here with the
+    # endpoint facts printed above the stop is the designed outcome; it
+    # exists to READ the live endpoint, not to go green.
+    name: "Advisory free preflight — live endpoint read, $0"
+    if: inputs.mode == 'advisory'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+      deployments: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+      ENDPOINT_ID: ${{ inputs.endpoint_id }}
+      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || vars.GPU_TEST_INPUT_REF }}
+      GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Credential present (owner action if not)
+        run: |
+          if [ -z "$RUNPOD_API_KEY" ]; then
+            echo "::error::RUNPOD_API_KEY secret is not configured on this repository. Adding it is an owner action. Nothing was spent."
+            exit 1
+          fi
+          echo "credential present"
+      - name: "Phases 9-10: every free verification, $0"
+        run: python -m validation.spend_run preflight
 
   spend:
     name: "Phase 9-19: every check in-job, then gated live validation"
