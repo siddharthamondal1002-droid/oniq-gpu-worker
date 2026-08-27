@@ -409,7 +409,7 @@ def _good_status(execution_ms=8000):
             "op": "image_preprocess",
             "output_key": "out/validation/job-1.jpeg",
             "device": "cuda",
-            "gpu_name": "NVIDIA GeForce RTX 3090",
+            "gpu_name": "NVIDIA RTX A5000",
             "vram_total_mb": 24576,
             "vram_peak_mb": 812,
             "output_bytes": 51234,
@@ -436,7 +436,7 @@ def test_one_job_happy_path_row():
     row = _run_one(client)
     assert row["termination"] == spend_run.TERMINATION_CONFIRMED
     assert row["cost_usd"] == "0.01"  # 8s at 0.5/h, ceiled to the cent
-    assert row["gpu_name"] == "NVIDIA GeForce RTX 3090"
+    assert row["gpu_name"] == "NVIDIA RTX A5000"
     assert client.submitted[0][1]["op"] == "image_preprocess"
 
 
@@ -454,6 +454,24 @@ def test_one_job_refuses_wrong_gpu():
     with pytest.raises(spend_run.SpendStop) as exc:
         _run_one(FakeClient(job_statuses=[status]))
     assert exc.value.code == "wrong-gpu"
+
+
+def test_gpu_verify_tracks_the_owner_settled_target():
+    # Regression, 2026-08-27 canary: verify_gpu_success carried a
+    # hardcoded "3090" after the owner retargeted admission to the
+    # A5000, so a generation that SUCCEEDED on the settled card was
+    # stopped as wrong-gpu. The verify must follow admission.TARGET_GPU
+    # — the retired card refuses, and only the exact settled name passes.
+    retired = _good_status()
+    retired["output"]["gpu_name"] = "NVIDIA GeForce RTX 3090"
+    with pytest.raises(spend_run.SpendStop) as exc:
+        _run_one(FakeClient(job_statuses=[retired]))
+    assert exc.value.code == "wrong-gpu"
+    assert admission.TARGET_GPU in exc.value.message
+
+    good = _good_status()
+    assert good["output"]["gpu_name"] == admission.TARGET_GPU
+    spend_run.verify_gpu_success(good["output"])
 
 
 def test_one_job_requires_vram_peak_and_artifact():
@@ -523,7 +541,7 @@ def _good_video_status(execution_ms=180_000):
             "op": "video_generate",
             "output_key": "out/validation/ltx-001.mp4",
             "device": "cuda",
-            "gpu_name": "NVIDIA GeForce RTX 3090",
+            "gpu_name": "NVIDIA RTX A5000",
             "vram_total_mb": 24576,
             "vram_peak_mb": 9000,
             "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",

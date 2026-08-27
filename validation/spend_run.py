@@ -512,8 +512,10 @@ def verify_gpu_success(output) -> None:
         raise SpendStop("job-not-ok", f"worker did not report ok; code={None if not isinstance(output, dict) else output.get('code')}")
     if output.get("device") != "cuda":
         raise SpendStop("not-cuda", "device is not cuda — CPU fallback is not success")
-    if "3090" not in str(output.get("gpu_name") or ""):
-        raise SpendStop("wrong-gpu", "gpu_name does not identify an RTX 3090")
+    if output.get("gpu_name") != admission.TARGET_GPU:
+        raise SpendStop(
+            "wrong-gpu", f"gpu_name is not the owner-settled card ({admission.TARGET_GPU})"
+        )
     if output.get("vram_peak_mb") is None:
         raise SpendStop("no-vram-peak", "peak VRAM was not measured")
     if not output.get("output_bytes"):

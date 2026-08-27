@@ -40,10 +40,11 @@ RUNTIME_CEILING_SECONDS = 900
 # well under the cap, and its community-market signal is LIVE again in
 # today's pulls — this is the very card whose 2026-08-25 null-lowestPrice
 # bytes taught the strict rule, and that strict rule still governs it.
-# The AUDIO workload is CPU-by-design and GPU-agnostic; VIDEO remains
-# measured on the 3090 only, which is why verify_gpu_success still pins
-# "3090" — a video job on this endpoint refuses rather than running on
-# an unmeasured card.
+# VIDEO has since been measured on this card too (production launch,
+# then the 2026-08-27 watermark canary: 97 frames in 42.7s billed), so
+# verify_gpu_success pins TARGET_GPU itself. Its earlier hardcoded
+# "3090" outlived that card's retirement and stopped a canary whose
+# generation had actually succeeded on the A5000 — one target, one name.
 TARGET_GPU = "NVIDIA RTX A5000"
 
 # Server-side allow-list: which card ONIQ rents is an owner decision, and
