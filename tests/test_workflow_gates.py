@@ -215,7 +215,15 @@ def test_op_input_defaults_to_the_image_workload():
     doc, raw = _load("gpu-validation.yml")
     op = _triggers(doc)["workflow_dispatch"]["inputs"]["op"]
     assert op["default"] == "image_preprocess"
-    assert op["options"] == ["image_preprocess", "video_generate", "audio_mux"]
+    # image_generate is ONIQ's own image engine (fully in-house directive,
+    # 2026-08-27): a real generative pass, so it is an explicit choice on
+    # the same footing as the other paid workloads — never the default.
+    assert op["options"] == [
+        "image_preprocess",
+        "image_generate",
+        "video_generate",
+        "audio_mux",
+    ]
     assert "OP: ${{ inputs.op }}" in raw
 
 

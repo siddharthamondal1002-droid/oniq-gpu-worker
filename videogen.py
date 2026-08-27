@@ -63,6 +63,50 @@ def _load_real_pipeline():
     return pipe
 
 
+def _load_real_text_pipeline():
+    """The SAME baked snapshot, opened as text-to-video.
+
+    ONIQ's in-house image engine is not a second model: LTXPipeline and
+    LTXImageToVideoPipeline read the identical transformer/vae/
+    text_encoder/tokenizer already in /app/models/ltx. Nothing is
+    downloaded, nothing new is baked, and local_files_only keeps that
+    true even if the network were reachable.
+    """
+    import torch
+    from diffusers import LTXPipeline
+
+    pipe = LTXPipeline.from_pretrained(
+        MODEL_DIR, torch_dtype=torch.bfloat16, local_files_only=True
+    )
+    pipe.to("cuda")
+    pipe.vae.enable_tiling()
+    return pipe
+
+
+def _generate_still(pipe, prompt: str):
+    """One deterministic T2V pass at the shortest legal length. Returns
+    the frames; frame 0 is the still the caller keeps."""
+    steps = STEPS_DISTILLED if "distilled" in model_id() else STEPS_FULL
+    generator = None
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            generator = torch.Generator(device="cuda").manual_seed(SEED)
+    except ImportError:
+        pass
+    result = pipe(
+        prompt=prompt,
+        negative_prompt=NEGATIVE_PROMPT,
+        width=contract.VIDEO_WIDTH,
+        height=contract.VIDEO_HEIGHT,
+        num_frames=contract.IMAGE_GEN_NUM_FRAMES,
+        num_inference_steps=steps,
+        generator=generator,
+    )
+    return result.frames[0]
+
+
 def _generate(pipe, image, prompt: str):
     """One deterministic I2V pass. Returns a list of PIL frames."""
     steps = (
@@ -241,6 +285,75 @@ class ConcatRefused(Exception):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
+    """ONIQ's in-house image engine: prompt -> still, on this worker's own
+    GPU. Returns measured metrics only.
+
+    The still is a CONDITIONING FRAME for the video stage, so it is
+    written at the video canvas, losslessly, and carries no watermark —
+    the mark belongs to the delivered film, burned by the stage that
+    knows the entitlement of record.
+
+    `load_pipeline` exists for the CPU test rig, exactly as in run().
+    """
+    started = time.monotonic()
+
+    if load_pipeline is None:
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is None or not torch.cuda.is_available():
+            raise GpuUnavailable(
+                "image_generate requires CUDA; there is no CPU fallback"
+            )
+        load_pipeline = _load_real_text_pipeline
+
+    load_started = time.monotonic()
+    pipe = load_pipeline()
+    model_load_ms = int((time.monotonic() - load_started) * 1000)
+
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+    infer_started = time.monotonic()
+    frames = _generate_still(pipe, job["params"]["prompt"])
+    inference_ms = int((time.monotonic() - infer_started) * 1000)
+
+    if not frames:
+        raise contract.ContractError(
+            "no-frames", "the image engine produced no frames"
+        )
+    still = frames[0]
+    if still.mode != "RGB":
+        still = still.convert("RGB")
+
+    encode_started = time.monotonic()
+    still.save(output_path, format=contract.IMAGE_GEN_FORMAT.upper())
+    encode_ms = int((time.monotonic() - encode_started) * 1000)
+
+    width, height = still.size
+    return {
+        "ok": True,
+        "op": "image_generate",
+        "output_key": job["output_key"],
+        "model": model_id(),
+        "model_load_ms": model_load_ms,
+        "inference_ms": inference_ms,
+        "encode_ms": encode_ms,
+        "width": width,
+        "height": height,
+        "format": contract.IMAGE_GEN_FORMAT,
+        "output_bytes": os.path.getsize(output_path),
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        **_gpu_metrics(),
+    }
 
 
 def _gpu_metrics() -> dict:

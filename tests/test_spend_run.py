@@ -1047,3 +1047,131 @@ def test_video_watermark_evidence_must_be_boolean_when_reported():
     with pytest.raises(spend_run.SpendStop) as err:
         spend_run.verify_video_success(bad)
     assert err.value.code == "watermark-evidence-invalid"
+
+
+# ------------------------------------- the in-house image engine's canary
+# ONIQ's own image engine (fully in-house directive, 2026-08-27). The
+# harness must dispatch it TEXT-ONLY and prove it drew something real.
+
+
+def _good_image_status(execution_ms=30_000):
+    return {
+        "status": "COMPLETED",
+        "delayTime": 5_000,
+        "executionTime": execution_ms,
+        "output": {
+            "ok": True,
+            "op": "image_generate",
+            "output_key": "out/validation/still-001.png",
+            "device": "cuda",
+            "gpu_name": "NVIDIA RTX A5000",
+            "vram_total_mb": 24576,
+            "vram_peak_mb": 9000,
+            "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",
+            "model_load_ms": 14_000,
+            "inference_ms": 6_000,
+            "encode_ms": 90,
+            "width": 704,
+            "height": 480,
+            "format": "png",
+            "output_bytes": 410_000,
+            "duration_ms": 21_000,
+            "cleanup_ok": True,
+        },
+    }
+
+
+def _run_one_image(client):
+    ft = FakeTime()
+    facts = _preflight(client)
+    return spend_run.one_job(
+        client, facts, output_key="out/validation/still-001.png",
+        op="image_generate", sleep=ft.sleep, clock=ft.clock,
+    )
+
+
+def test_image_canary_is_dispatched_text_only():
+    # The contract refuses an input_key on image_generate, so the harness
+    # must not send one — and the prompt is a module constant, never a
+    # dispatch input.
+    client = FakeClient(job_statuses=[_good_image_status()])
+    _run_one_image(client)
+    payload = client.submitted[0][1]
+    assert payload["op"] == "image_generate"
+    assert "input_key" not in payload
+    assert payload["params"] == {"prompt": spend_run.IMAGE_PROMPT}
+
+
+def test_image_canary_verifies_a_real_measured_still():
+    client = FakeClient(job_statuses=[_good_image_status()])
+    row = _run_one_image(client)
+    assert row["op"] == "image_generate"
+    assert row["termination"] == spend_run.TERMINATION_CONFIRMED
+
+
+def test_image_verify_refuses_an_unproven_or_wrong_still():
+    good = _good_image_status()["output"]
+    spend_run.verify_image_success(good)
+
+    for field, bad, code in (
+        ("model", "missing", "model-unproven"),
+        ("model_load_ms", 0, "model-unproven"),
+        ("inference_ms", 0, "no-inference"),
+        ("output_bytes", 0, "no-artifact"),
+        ("format", "jpeg", "wrong-format"),
+        ("width", 512, "wrong-canvas"),
+    ):
+        broken = dict(good)
+        broken[field] = bad
+        with pytest.raises(spend_run.SpendStop) as exc:
+            spend_run.verify_image_success(broken)
+        assert exc.value.code == code
+
+
+def test_image_canary_has_exactly_one_shape(monkeypatch):
+    # Like the audio canary: no battery shape exists for it. A habitual
+    # through_phase=18 must refuse BEFORE provisioning, not fan out into
+    # five paid stills. preflight is stubbed so the guard itself is what
+    # this exercises; a passing guard never reaches a submit.
+    submitted = []
+    monkeypatch.setattr(
+        spend_run, "preflight",
+        lambda *a, **k: {"endpoint_id": "ep-123", "input_ref": "in/test.png",
+                         "output_prefix": "out/validation"},
+    )
+    monkeypatch.setattr(
+        spend_run, "one_job",
+        lambda *a, **k: submitted.append(k) or {},
+    )
+    monkeypatch.setattr(spend_run, "_inputs_from_env", lambda: {})
+    monkeypatch.setenv("OP", "image_generate")
+    monkeypatch.setenv("THROUGH_PHASE", "18")
+    monkeypatch.setenv("APPROVAL_MODE", "owner-dispatch")
+
+    assert spend_run.main(["spend_run", "run"]) == 1
+    assert submitted == []  # nothing was provisioned
+
+
+def test_image_canary_runs_one_still_at_phase_16(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        spend_run, "preflight",
+        lambda *a, **k: {"endpoint_id": "ep-123", "input_ref": "in/test.png",
+                         "output_prefix": "out/validation"},
+    )
+    monkeypatch.setattr(
+        spend_run, "one_job",
+        lambda *a, **k: (calls.append(k), _good_image_status()["output"])[1],
+    )
+    monkeypatch.setattr(spend_run, "_inputs_from_env", lambda: {})
+    monkeypatch.setattr(spend_run, "economics", lambda rows: {})
+    monkeypatch.setattr(spend_run, "confirm_termination_or_stop",
+                        lambda *a, **k: None, raising=False)
+    monkeypatch.setenv("OP", "image_generate")
+    monkeypatch.setenv("THROUGH_PHASE", "16")
+    monkeypatch.setenv("APPROVAL_MODE", "owner-dispatch")
+
+    spend_run.main(["spend_run", "run"])
+    assert len(calls) == 1
+    assert calls[0]["op"] == "image_generate"
+    assert calls[0]["output_key"].endswith(".png")

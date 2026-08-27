@@ -68,6 +68,8 @@ def handle(event) -> dict:
         input_path = f"{workdir}/input.bin"
         if job["op"] in ("video_generate", "audio_mux", "video_concat"):
             output_path = f"{workdir}/output.mp4"
+        elif job["op"] == "image_generate":
+            output_path = f"{workdir}/output.{contract.IMAGE_GEN_FORMAT}"
         else:
             output_path = f"{workdir}/output.{job['params']['format']}"
 
@@ -82,6 +84,10 @@ def handle(event) -> dict:
                 segment_paths.append(seg_path)
                 _check_deadline(started)
             metrics = videogen.run_concat(job, segment_paths, output_path)
+        elif job["op"] == "image_generate":
+            # Text-only: there is no source object to fetch. The engine
+            # draws from the prompt on this worker's own GPU.
+            metrics = videogen.run_image(job, output_path)
         else:
             storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
             _check_deadline(started)

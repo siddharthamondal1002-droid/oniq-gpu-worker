@@ -14,12 +14,24 @@ The worker must never move into `oniq-sparkle-pay`.
 | ------------------------- | ----------------------------------------------------------- |
 | `contract.py`             | bounded job contract, error codes, explicit output whitelist |
 | `preprocess.py`           | the workload; CUDA-only by default via `run_gpu_op`         |
-| `videogen.py`             | `video_generate` — LTX-Video image-to-video on CUDA         |
+| `videogen.py`             | `video_generate` (LTX image-to-video), `image_generate` (LTX text-to-video, frame 0), `video_concat` — all CUDA |
 | `audio.py`                | `audio_mux` — in-house narration muxed under a video, CPU   |
 | `storage.py`              | R2 by reference (bucket `oniq-gpu`), fails closed           |
 | `handler.py`              | serverless handler, runtime ceiling, deterministic cleanup  |
 | `runpod_client.py`        | CI harness client — never shipped in the image              |
 | `validation/admission.py` | financial admission — pure functions, no network            |
+
+`image_generate` (2026-08-27, fully in-house directive) is ONIQ's OWN
+image engine, and it is deliberately not a second model: the same baked
+LTX snapshot opened as `LTXPipeline` (text-to-video) instead of
+`LTXImageToVideoPipeline`, sampled for the shortest legal clip, frame 0
+kept as a PNG at the VIDEO canvas. No new weights, nothing downloaded,
+`local_files_only` unchanged — the component that used to be an
+outsourced image API is a different pipeline class over bytes this image
+already carries. It is TEXT-ONLY (an `input_key` is refused, not
+ignored) and carries NO watermark field: a conditioning frame is an
+intermediate, and the mark belongs to the film the video stage burns it
+into from the entitlement of record.
 
 `audio_mux` (2026-08-26) speaks a narration with piper (the sha256-pinned
 `en-us-ryan-high` voice, baked into the media image like the LTX weights)
