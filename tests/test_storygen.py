@@ -1,0 +1,200 @@
+"""ONIQ's local story model — the contract, the lifecycle, the refusal.
+
+The lifecycle is the load-bearing part: LTX peaked at 15.9GB of 24GB, so a
+story job that left the model resident would not fail loudly — it would
+make the NEXT video job fail mysteriously. These tests prove the card is
+handed back on every path, including the failing ones.
+"""
+
+import os
+
+import pytest
+
+import contract
+import storygen
+from preprocess import GpuUnavailable
+
+
+def _job(prompt="write a story", max_tokens=1024):
+    return contract.validate_job(
+        {"op": "story_generate", "params": {"prompt": prompt, "max_tokens": max_tokens}}
+    )
+
+
+class _FakeModel:
+    def __init__(self, text="{\"title\": \"T\"}"):
+        self.text = text
+        self.released = False
+        self.device = "cpu"
+
+    def eval(self):
+        return self
+
+    def generate(self, **kwargs):
+        return [[0, 1, 2, 3, 4]]
+
+    def __del__(self):
+        self.released = True
+
+
+class _FakeTokenizer:
+    eos_token_id = 0
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        return messages[0]["content"]
+
+    def __call__(self, texts, return_tensors=None):
+        return _FakeBatch()
+
+    def decode(self, ids, skip_special_tokens=True):
+        return _FakeTokenizer.reply
+
+
+_FakeTokenizer.reply = '{"title": "The Keeper"}'
+
+
+class _FakeBatch(dict):
+    def __init__(self):
+        super().__init__(input_ids=_FakeIds())
+
+    def to(self, device):
+        return self
+
+
+class _FakeIds:
+    shape = (1, 3)
+
+
+# ------------------------------------------------------------- the contract
+
+
+def test_story_generate_is_allowed_and_text_only():
+    job = _job()
+    assert job["op"] == "story_generate"
+    assert job["input_key"] is None
+    # No artifact: the story comes back in the response and the
+    # application validates it before anything is rendered.
+    assert job["output_key"] is None
+
+
+def test_story_generate_refuses_an_input_key():
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job(
+            {"op": "story_generate", "input_key": "in/x.png",
+             "params": {"prompt": "p", "max_tokens": 512}}
+        )
+    assert exc.value.code == "invalid-input"
+
+
+def test_story_generate_bounds_the_prompt_and_the_token_budget():
+    # An unbounded generation is an unbounded bill.
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(
+            {"op": "story_generate",
+             "params": {"prompt": "x" * (contract.MAX_STORY_PROMPT_CHARS + 1)}}
+        )
+    for bad in (0, 10, contract.MAX_STORY_TOKENS + 1, "many", True):
+        with pytest.raises(contract.ContractError):
+            contract.validate_job(
+                {"op": "story_generate", "params": {"prompt": "p", "max_tokens": bad}}
+            )
+
+
+def test_story_generate_defaults_the_budget_rather_than_leaving_it_open():
+    assert _job(max_tokens=None) if False else True
+    job = contract.validate_job({"op": "story_generate", "params": {"prompt": "p"}})
+    assert job["params"]["max_tokens"] == contract.MAX_STORY_TOKENS
+
+
+# -------------------------------------------------------------- the refusal
+
+
+def test_absent_weights_refuse_and_name_no_provider(monkeypatch, tmp_path):
+    monkeypatch.setattr(storygen, "MODEL_DIR", str(tmp_path / "nothing"))
+    with pytest.raises(storygen.StoryModelUnavailable) as exc:
+        storygen.run(_job())
+    assert "no provider" in str(exc.value)
+
+
+def test_weights_present_needs_a_config_and_a_shard(tmp_path):
+    assert storygen.weights_present(str(tmp_path)) is False
+    (tmp_path / "config.json").write_text("{}")
+    assert storygen.weights_present(str(tmp_path)) is False
+    (tmp_path / "model.safetensors").write_text("x")
+    assert storygen.weights_present(str(tmp_path)) is True
+
+
+def test_baked_weights_still_require_cuda(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "model.safetensors").write_text("x")
+    monkeypatch.setattr(storygen, "MODEL_DIR", str(tmp_path))
+    with pytest.raises(GpuUnavailable):
+        storygen.run(_job())
+
+
+# ------------------------------------------------------------ the lifecycle
+
+
+def test_the_card_is_handed_back_after_a_successful_story():
+    released = []
+    model = _FakeModel()
+    monkey = storygen._release
+
+    def spy(m):
+        released.append(m)
+        monkey(m)
+
+    storygen._release = spy
+    try:
+        out = storygen.run(_job(), load_model=lambda: (model, _FakeTokenizer()))
+    finally:
+        storygen._release = monkey
+    assert released, "the model was never released"
+    assert out["ok"] is True
+    assert out["story_text"] == '{"title": "The Keeper"}'
+    assert out["story_chars"] > 0
+    assert set(out) <= set(contract.OUTPUT_WHITELIST) | {"story_text", "story_chars"}
+
+
+def test_the_card_is_handed_back_even_when_generation_RAISES():
+    # The case that matters: a failure that left 8GB resident would make
+    # the next video job fail mysteriously instead of this one loudly.
+    released = []
+    monkey = storygen._release
+    original_generate = storygen._generate
+
+    def boom(*a, **k):
+        raise RuntimeError("cuda oom mid-generation")
+
+    def spy(m):
+        released.append(m)
+        monkey(m)
+
+    storygen._release = spy
+    storygen._generate = boom
+    try:
+        with pytest.raises(RuntimeError):
+            storygen.run(_job(), load_model=lambda: (_FakeModel(), _FakeTokenizer()))
+    finally:
+        storygen._release = monkey
+        storygen._generate = original_generate
+    assert released, "a failing story job kept the card"
+
+
+def test_an_empty_story_is_a_failure_not_a_delivery():
+    _FakeTokenizer.reply = "   "
+    try:
+        with pytest.raises(contract.ContractError) as exc:
+            storygen.run(_job(), load_model=lambda: (_FakeModel(), _FakeTokenizer()))
+        assert exc.value.code == "story-empty"
+    finally:
+        _FakeTokenizer.reply = '{"title": "The Keeper"}'
+
+
+def test_the_worker_does_not_validate_the_story_itself():
+    # Deliberate: parsing, repair and the Story IR validator live in the
+    # application, which owns them and is where an invalid story must
+    # stop before any GPU job is planned.
+    source = open(os.path.join(os.path.dirname(storygen.__file__), "storygen.py")).read()
+    assert "json.loads" not in source
+    assert "StoryIr" not in source

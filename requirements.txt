@@ -8,7 +8,11 @@ numpy==2.1.3
 # media-inference pins (2026-08-26): diffusers LTX pipelines + the T5
 # tokenizer stack + mp4 encoding. Versions chosen against torch 2.5.1.
 diffusers==0.33.1
-transformers==4.48.3
+# transformers >= 4.51 is REQUIRED by Qwen3: below it the config raises
+# KeyError: 'qwen3' and the story model cannot load at all. The bump is
+# proven against diffusers 0.33.1 / torch 2.5.1 by worker-ci's import
+# test before anything is baked — LTX runs on those pins.
+transformers==4.51.3
 accelerate==1.2.1
 sentencepiece==0.2.0
 protobuf==5.29.3
@@ -22,3 +26,8 @@ piper-tts==1.2.0
 piper-phonemize==1.1.0
 onnxruntime==1.29.0
 av==13.1.0
+
+# 4-bit loading for the story model. The A5000 runs it ALONE (staged
+# execution: story, unload, then LTX), so bf16 would also fit — 4-bit is
+# for load time and headroom, not because the card is short.
+bitsandbytes==0.45.0

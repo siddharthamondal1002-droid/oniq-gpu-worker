@@ -185,7 +185,10 @@ def test_requirements_are_the_recorded_pins():
         "boto3==1.35.76",
         "numpy==2.1.3",
         "diffusers==0.33.1",
-        "transformers==4.48.3",
+        # Bumped 2026-08-27 for Qwen3, which raises KeyError: 'qwen3'
+        # below 4.51. Proven against the diffusers/torch pins LTX runs on
+        # by the image job's coexistence step before anything was baked.
+        "transformers==4.51.3",
         "accelerate==1.2.1",
         "sentencepiece==0.2.0",
         "protobuf==5.29.3",
@@ -196,6 +199,8 @@ def test_requirements_are_the_recorded_pins():
         "piper-phonemize==1.1.0",
         "onnxruntime==1.29.0",
         "av==13.1.0",
+        # 4-bit loading for the story model, which runs ALONE by design.
+        "bitsandbytes==0.45.0",
     ]
 
 

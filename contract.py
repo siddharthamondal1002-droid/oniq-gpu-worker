@@ -25,6 +25,7 @@ ALLOWED_OPS = (
     "video_generate",
     "audio_mux",
     "video_concat",
+    "story_generate",
 )
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
@@ -57,6 +58,14 @@ VIDEO_HEIGHT = 480
 VIDEO_NUM_FRAMES = 97  # LTX wants 8k+1 frames; 97 @ 24fps ≈ 4.0s
 VIDEO_FPS = 24
 MAX_PROMPT_CHARS = 1000
+
+# story_generate: ONIQ's own causal LLM (owner directive 2026-08-27). The
+# prompt is long by nature — a brief, a budget and a schema — so it has
+# its own ceiling rather than the motion prompt's. The token budget is
+# bounded here too: an unbounded generation is an unbounded bill.
+MAX_STORY_PROMPT_CHARS = 20000
+MIN_STORY_TOKENS = 256
+MAX_STORY_TOKENS = 8192
 
 # image_generate: ONIQ's OWN image engine (fully in-house directive,
 # 2026-08-27). It is the SAME baked LTX snapshot as video_generate — the
@@ -98,6 +107,7 @@ _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # can only ever produce the watermarked product, never a free clean one.
 _VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark"})
 _IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt"})
+_STORY_PARAM_FIELDS = frozenset({"prompt", "max_tokens"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
 _CONCAT_PARAM_FIELDS = frozenset({"segment_keys"})
 
@@ -128,6 +138,9 @@ OUTPUT_WHITELIST = frozenset(
         "frames",
         "fps",
         "video_seconds",
+        # story_generate evidence — the text itself plus its measurements
+        "story_text",
+        "story_chars",
         # audio_mux evidence — measured on the worker, never inferred
         "has_audio",
         "narration_seconds",
@@ -201,25 +214,61 @@ def validate_job(raw) -> dict:
             "op must be one of: " + ", ".join(ALLOWED_OPS),
         )
 
-    # image_generate is the one TEXT-ONLY op: it draws from a prompt, so
+    # image_generate and story_generate are the TEXT-ONLY ops: it draws from a prompt, so
     # it has no source object. An input_key sent with it is refused rather
     # than ignored — a caller that thinks it is conditioning on an image
     # must not be told silently that it was.
-    if op == "image_generate":
+    if op in ("image_generate", "story_generate"):
         if raw.get("input_key") is not None:
-            raise ContractError(
-                "invalid-input", "image_generate takes no input_key"
-            )
+            raise ContractError("invalid-input", f"{op} takes no input_key")
         input_key = None
     else:
         input_key = _require_key(raw.get("input_key"), "input_key")
-    output_key = _require_key(raw.get("output_key"), "output_key")
+    output_key = (
+        None if op == "story_generate" else _require_key(raw.get("output_key"), "output_key")
+    )
 
     params_raw = raw.get("params", {})
     if params_raw is None:
         params_raw = {}
     if not isinstance(params_raw, dict):
         raise ContractError("invalid-input", "params must be an object")
+
+    if op == "story_generate":
+        unknown_params = set(params_raw) - _STORY_PARAM_FIELDS
+        if unknown_params:
+            raise ContractError(
+                "invalid-input",
+                "unknown params field(s): " + ", ".join(sorted(unknown_params)),
+            )
+        prompt = params_raw.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ContractError(
+                "invalid-input", "params.prompt must be a non-empty string"
+            )
+        if len(prompt) > MAX_STORY_PROMPT_CHARS:
+            raise ContractError(
+                "invalid-input",
+                f"params.prompt exceeds {MAX_STORY_PROMPT_CHARS} characters",
+            )
+        max_tokens = params_raw.get("max_tokens", MAX_STORY_TOKENS)
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
+            raise ContractError("invalid-input", "params.max_tokens must be an integer")
+        if not MIN_STORY_TOKENS <= max_tokens <= MAX_STORY_TOKENS:
+            raise ContractError(
+                "invalid-input",
+                f"params.max_tokens must be {MIN_STORY_TOKENS}..{MAX_STORY_TOKENS}",
+            )
+        # The story comes back IN THE RESPONSE, not as a stored artifact:
+        # it is structured text the application validates before anything
+        # is rendered, so writing it to the media bucket would create a
+        # file nothing tracks.
+        return {
+            "op": op,
+            "input_key": None,
+            "output_key": None,
+            "params": {"prompt": prompt.strip(), "max_tokens": max_tokens},
+        }
 
     if op == "image_generate":
         unknown_params = set(params_raw) - _IMAGE_GEN_PARAM_FIELDS
