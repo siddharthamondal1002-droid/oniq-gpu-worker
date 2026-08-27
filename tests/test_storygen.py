@@ -198,3 +198,79 @@ def test_the_worker_does_not_validate_the_story_itself():
     source = open(os.path.join(os.path.dirname(storygen.__file__), "storygen.py")).read()
     assert "json.loads" not in source
     assert "StoryIr" not in source
+
+
+# --------------------------------------------------------- load precision
+#
+# CI measured the exact trap these cover: the built image logs
+# "bitsandbytes was compiled without GPU support" while BitsAndBytesConfig
+# imports perfectly well. A build like that fails at from_pretrained, not
+# at the import — so a guard around the import alone would have turned it
+# into a dead PAID job on the rented card.
+
+
+def _fake_transformers(monkeypatch, *, four_bit_raises):
+    """Stand in for transformers with a from_pretrained we control."""
+    import sys
+    import types
+
+    calls = []
+
+    class _AutoModel:
+        @staticmethod
+        def from_pretrained(model_dir, **kwargs):
+            calls.append(kwargs)
+            if "quantization_config" in kwargs and four_bit_raises:
+                raise RuntimeError("bitsandbytes has no CUDA kernels")
+            return _FakeModel()
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_dir, **kwargs):
+            return _FakeTokenizer()
+
+    mod = types.ModuleType("transformers")
+    mod.AutoModelForCausalLM = _AutoModel
+    mod.AutoTokenizer = _AutoTokenizer
+    mod.BitsAndBytesConfig = lambda **kw: {"bnb": kw}
+    monkeypatch.setitem(sys.modules, "transformers", mod)
+
+    torch = types.ModuleType("torch")
+    torch.bfloat16 = "bfloat16"
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    return calls
+
+
+def test_a_four_bit_load_reports_four_bit(monkeypatch):
+    calls = _fake_transformers(monkeypatch, four_bit_raises=False)
+    model, tokenizer, precision = storygen._load_real_model()
+    assert precision == "4bit"
+    assert len(calls) == 1 and "quantization_config" in calls[0]
+
+
+def test_a_four_bit_load_that_FAILS_falls_back_to_bf16(monkeypatch):
+    # The dead-paid-job case. The 4-bit attempt raises at from_pretrained,
+    # and the job must still produce a story rather than die.
+    calls = _fake_transformers(monkeypatch, four_bit_raises=True)
+    model, tokenizer, precision = storygen._load_real_model()
+    assert precision == "bf16"
+    assert len(calls) == 2, "the bf16 retry never happened"
+    assert "quantization_config" not in calls[1], "the retry re-sent the failing config"
+
+
+def test_the_precision_reaches_the_job_response():
+    # Measured, not assumed: 4-bit and bf16 differ by ~12GB of the card,
+    # and the only place that difference can be seen after the fact is the
+    # job's own output.
+    out = storygen.run(
+        _job(), load_model=lambda: (_FakeModel(), _FakeTokenizer(), "bf16")
+    )
+    assert out["precision"] == "bf16"
+    assert "precision" in contract.OUTPUT_WHITELIST
+
+
+def test_a_loader_that_reports_no_precision_is_still_valid():
+    # The two-element seam every other test here uses must keep working.
+    out = storygen.run(_job(), load_model=lambda: (_FakeModel(), _FakeTokenizer()))
+    assert out["precision"] is None
+    assert out["ok"] is True

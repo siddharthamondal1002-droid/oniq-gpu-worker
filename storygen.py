@@ -61,27 +61,55 @@ def weights_present(model_dir: str = MODEL_DIR) -> bool:
 
 
 def _load_real_model():
-    """Load the baked model onto CUDA. Never touches the network."""
+    """Load the baked model onto CUDA. Never touches the network.
+
+    Returns (model, tokenizer, precision) — the precision is REPORTED, not
+    assumed, because the two modes have very different footprints (~4.6GB
+    at 4-bit against ~16.4GB at bf16) and the job's own response is the
+    only place that difference can be seen after the fact.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
     kwargs = {"local_files_only": True, "torch_dtype": torch.bfloat16, "device_map": "cuda"}
+
+    quantised = None
     try:
         from transformers import BitsAndBytesConfig
 
-        kwargs["quantization_config"] = BitsAndBytesConfig(
+        quantised = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
         )
     except Exception:
-        # bf16 is the fallback and still fits alone on a 24GB card, which
-        # is the only way this model ever runs.
-        pass
+        quantised = None
+
+    if quantised is not None:
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL_DIR, quantization_config=quantised, **kwargs
+            )
+            model.eval()
+            return model, tokenizer, "4bit"
+        except Exception as exc:
+            # GUARDING THE IMPORT IS NOT ENOUGH, and CI proved it: the
+            # built image logs "bitsandbytes was compiled without GPU
+            # support" while BitsAndBytesConfig imports perfectly well.
+            # A build like that fails HERE, at load — so a try around the
+            # import alone would have turned it into a dead PAID job on
+            # the card. bf16 is a real fallback rather than a nicety: the
+            # model runs alone by design, and ~16.4GB fits the 24GB A5000
+            # with LTX not resident.
+            print(
+                "story model: 4-bit load failed "
+                f"({type(exc).__name__}: {exc}); falling back to bf16"
+            )
+
     model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **kwargs)
     model.eval()
-    return model, tokenizer
+    return model, tokenizer, "bf16"
 
 
 def _release(model) -> None:
@@ -171,7 +199,12 @@ def run(job: dict, load_model=None) -> dict:
         load_model = _load_real_model
 
     load_started = time.monotonic()
-    model, tokenizer = load_model()
+    # A loader may report the precision it achieved as a third element.
+    # Two elements stays valid so an injected test double — and any older
+    # caller — needs no knowledge of quantisation to exercise this path.
+    loaded = load_model()
+    model, tokenizer = loaded[0], loaded[1]
+    precision = loaded[2] if len(loaded) > 2 else None
     model_load_ms = int((time.monotonic() - load_started) * 1000)
 
     peak_mb = None
@@ -203,6 +236,7 @@ def run(job: dict, load_model=None) -> dict:
         "op": "story_generate",
         "model": model_id(),
         "model_load_ms": model_load_ms,
+        "precision": precision,
         "inference_ms": inference_ms,
         "story_text": text,
         "story_chars": len(text),
