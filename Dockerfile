@@ -1,9 +1,13 @@
 # ONIQ GPU worker image.
 #
 # Structure is the security posture:
-# - COPY names the six shipped files individually — there is no COPY . .,
+# - COPY names every shipped file individually — there is no COPY . .,
 #   so the image cannot receive a stray .env even if .dockerignore were
-#   wrong (.dockerignore is a second lock, not the only one);
+#   wrong (.dockerignore is a second lock, not the only one). The set is
+#   not a number to remember: test_workflow_gates derives handler.py's
+#   own first-party import closure and fails if any module in it is
+#   missing from either lock. storygen.py reached CI missing from both
+#   (2026-08-27) and the image died on `import storygen` at start-up;
 # - no ARG anywhere, so no build argument can bake a secret into a layer;
 # - each stage builds as root and executes as oniq (uid/gid 10001):
 #   /app, site-packages and the baked model weights end up root-owned
@@ -45,6 +49,7 @@ COPY contract.py /app/contract.py
 COPY preprocess.py /app/preprocess.py
 COPY storage.py /app/storage.py
 COPY videogen.py /app/videogen.py
+COPY storygen.py /app/storygen.py
 COPY audio.py /app/audio.py
 COPY handler.py /app/handler.py
 

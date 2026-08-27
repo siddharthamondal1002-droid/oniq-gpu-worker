@@ -137,7 +137,7 @@ def test_dockerfile_user_sits_between_last_copy_and_cmd():
     assert last_copy < user < cmd
 
 
-def test_dockerfile_copies_exactly_the_seven_files():
+def test_dockerfile_copies_exactly_the_shipped_files():
     copies = [l for l in _dockerfile_instructions() if l.startswith("COPY")]
     copied = [l.split()[1] for l in copies]
     assert copied == [
@@ -146,6 +146,7 @@ def test_dockerfile_copies_exactly_the_seven_files():
         "preprocess.py",
         "storage.py",
         "videogen.py",
+        "storygen.py",
         "audio.py",
         "handler.py",
     ]
@@ -168,9 +169,104 @@ def test_dockerignore_denies_by_default():
         "!preprocess.py",
         "!storage.py",
         "!videogen.py",
+        "!storygen.py",
         "!audio.py",
         "!handler.py",
     }
+
+
+# The two lists above are enumerations, and on 2026-08-27 both were
+# wrong in the same way: storygen.py was added to the repo and imported
+# by handler.py, and neither list learned about it. Every offline test
+# stayed green — nothing tied the enumerations to what the worker
+# actually imports — and the defect surfaced only when the built image
+# ran `import storygen` and died. So the enumerations are no longer the
+# gate. The gate is the closure below: it reads handler.py, follows its
+# first-party imports transitively, and demands that every module it
+# reaches be present in BOTH locks. Adding an engine and forgetting to
+# ship it is now a test failure, not a broken image.
+
+
+def _shipped_module_closure():
+    """Every first-party module the worker's entrypoint actually needs.
+
+    A first-party module is one that exists as a top-level .py file in
+    the repo; stdlib and site-packages imports are not our problem.
+    Deferred imports (inside a function, as videogen and storygen do for
+    torch) count exactly as much as top-level ones — the module still has
+    to be in the image — so this walks the whole AST, not just its head.
+    """
+    import ast
+
+    local = {
+        name[:-3]
+        for name in os.listdir(ROOT)
+        if name.endswith(".py") and os.path.isfile(os.path.join(ROOT, name))
+    }
+
+    seen, pending = set(), ["handler"]
+    while pending:
+        module = pending.pop()
+        if module in seen:
+            continue
+        seen.add(module)
+        with open(os.path.join(ROOT, module + ".py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                found = [a.name.split(".")[0] for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                # level > 0 is a relative import; the worker has none.
+                found = [(node.module or "").split(".")[0]]
+            else:
+                continue
+            pending.extend(name for name in found if name in local)
+    return seen
+
+
+def test_every_module_the_handler_imports_is_in_both_locks():
+    needed = {module + ".py" for module in _shipped_module_closure()}
+
+    copied = {
+        l.split()[1]
+        for l in _dockerfile_instructions()
+        if l.startswith("COPY")
+    }
+    missing_copy = needed - copied
+    assert not missing_copy, (
+        f"{sorted(missing_copy)} reachable from handler.py but never COPYed "
+        "into the image — the worker will die on import at start-up"
+    )
+
+    with open(os.path.join(ROOT, ".dockerignore"), encoding="utf-8") as fh:
+        admitted = {
+            l.strip()[1:]
+            for l in fh
+            if l.strip().startswith("!")
+        }
+    missing_admit = needed - admitted
+    assert not missing_admit, (
+        f"{sorted(missing_admit)} is COPYed but denied by .dockerignore — "
+        "the build itself will fail"
+    )
+
+
+def test_the_closure_actually_reaches_the_engines():
+    # Guards the guard: a closure walk that silently found nothing would
+    # make the test above vacuously true.
+    closure = _shipped_module_closure()
+    assert closure == {
+        "handler",
+        "contract",
+        "preprocess",
+        "storage",
+        "videogen",
+        "storygen",
+        "audio",
+    }
+    # runpod_client is the CI harness's, not the worker's. It must NOT be
+    # in the image: it is the only module that talks to the RunPod API.
+    assert "runpod_client" not in closure
 
 
 def test_requirements_are_the_recorded_pins():
