@@ -64,16 +64,19 @@ def test_no_credential_refuses_because_anonymous_cannot_tell_gated_from_gone(cap
     assert "gated" in out and "does not exist" in out
 
 
-def test_the_named_model_being_absent_is_reported_as_not_existing(capsys):
-    get = _registry(["Lightricks/LTX-Video"], {"Lightricks/LTX-Video": _model()})
+def test_a_named_model_absent_from_the_catalogue_is_reported_as_not_existing(capsys):
+    """The state this module was written for: the Dockerfile naming
+    something the publisher does not publish."""
+    other = "Lightricks/LTX-2.5"
+    get = _registry([other], {other: _model()})
     hf_discover.report(_dockerfile(), SECRET, get)
     out = capsys.readouterr().out
     assert "does not exist" in out
-    assert "Lightricks/LTX-Video-0.9.8-2B-distilled" in out
+    assert "Lightricks/LTX-Video" in out
 
 
 def test_the_named_model_being_present_says_the_404_was_something_else(capsys):
-    named = "Lightricks/LTX-Video-0.9.8-2B-distilled"
+    named = "Lightricks/LTX-Video"
     get = _registry([named], {named: _model()})
     hf_discover.report(_dockerfile(), SECRET, get)
     assert "the 404 was something else" in capsys.readouterr().out

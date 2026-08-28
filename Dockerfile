@@ -85,8 +85,9 @@ FROM base AS media
 
 USER root
 
-# Bake the model — ONE model, the distilled 2B the owner chose, and no
-# alternative. It is REJECTED FROM METADATA before a byte is downloaded:
+# Bake the model — ONE model, the one the owner chose on 2026-08-28, at
+# one pinned revision, and no alternative. It is REJECTED FROM METADATA
+# before a byte is downloaded:
 # the HF API lists every file with its size, so a transformer over 16GiB
 # (a 13B-class checkpoint wearing a 2B name), a missing model_index.json,
 # a missing component, or an answer for a different repository stops the
@@ -108,39 +109,71 @@ from huggingface_hub import HfApi, snapshot_download
 def auth_refused(exc):
     """Was this a refusal to AUTHENTICATE, rather than a judgement?
 
-    Measured 2026-08-28 (validation run 51): the first candidate answers
-    HTTP 401 — gated, not gone. The loop below caught that with every
-    other failure and moved on, so an INFRASTRUCTURE problem silently
-    became a MODEL SUBSTITUTION: a build today would ship a different
-    checkpoint than the owner chose, under the same image name, and
-    nothing in the log would read as an error.
+    Kept for the case it names, and worth being precise about after this
+    one misled four runs. Validation run 51 saw HTTP 401 here and it was
+    recorded as "gated". It was not: unauthenticated, Hugging Face answers
+    401 for gated AND absent repositories alike, deliberately, so that
+    existence cannot be probed without credentials. Run 7 presented a
+    working token and got 404 — the repository did not exist. A 401 is
+    therefore never evidence of gating on its own; it is evidence that the
+    question was asked without a credential.
 
-    Falling through because a candidate fails the size or licence gate is
-    a judgement about the model and is exactly what the list is for.
-    Falling through because we could not log in is not a judgement at
-    all. UNKNOWN never becomes success anywhere else in this repo, and it
-    does not become a model choice here.
+    The distinction this function draws still holds. Failing a size or
+    licence gate is a judgement about the model. Failing to authenticate
+    is not a judgement at all, and UNKNOWN never becomes success anywhere
+    else in this repo — so it does not become a model choice here.
     """
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return status in (401, 403)
 
-# OWNER DIRECTIVE 2026-08-28 (option 1): ONE candidate, and it is the
-# distilled 2B. The list previously carried two fallbacks, and run 51
-# measured what that bought: with the head gated behind HTTP 401 the build
-# walked past it and would have shipped Lightricks/LTX-Video — a different
-# model, under the same image name, silently. Guarding a fall-through is
-# weaker than not having one, so the list has one member. If this
-# checkpoint cannot be fetched the build FAILS; nothing else is acceptable
-# and there is nothing else to reach for.
+# OWNER MODEL DECISION 2026-08-28: Lightricks/LTX-Video, pinned to
+# revision 8984fa25007f376c1a299016d0957a37a2f797bb.
+#
+# The name this file carried before — Lightricks/LTX-Video-0.9.8-2B-distilled
+# — DOES NOT EXIST, measured on validation run 7 with a working credential.
+# Unauthenticated the registry answers 401 for gated and for absent
+# repositories alike, so four runs read "gated" where the truth was "gone".
+# There is no 2B at 0.9.8: the 0.9.8 distilled release is 13B (24.29 GiB
+# transformer, refused by the guard below), and the genuine distilled 2B
+# (LTX-Video-2B-0.9.6-Distilled-04-25) ships as a single-file checkpoint
+# with no model_index.json, which this loader cannot consume.
+#
+# Run 53 catalogued every Lightricks LTX repository against the gates this
+# bake applies; three passed, and the owner chose this one: the current
+# main release, a diffusers snapshot, all five components present, a
+# 7.17 GiB transformer inside the 2B-class guard, consumable by the
+# existing loader without a single-file path.
+#
+# ONE candidate, deliberately. The list previously carried fallbacks, and
+# they were the only reason any image ever built — every historical build
+# walked past the absent head and landed somewhere unrecorded. Guarding a
+# fall-through is weaker than not having one, so there is nothing to fall
+# through to and every failure below is terminal.
 CANDIDATES = [
-    ("Lightricks/LTX-Video-0.9.8-2B-distilled", "#distilled"),
+    ("Lightricks/LTX-Video", ""),
 ]
-# The exact revision, once measured. Empty means "resolve it from the
-# registry and RECORD it" — the previous image was destroyed with its
-# builder, so there is no known-good sha to pin to yet. Whatever is
-# resolved is written into the image and printed, so the next build can
-# pin it here and be byte-reproducible.
-PINNED_REVISION = ""
+# THE PIN. A repository name names a moving branch; a sha names bytes —
+# and it also fixes the LICENCE TERMS, because the terms at a commit
+# cannot change after the fact. The build refuses any other revision.
+PINNED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+
+# THE LTX LICENCE GATE — owner directive 2026-08-28.
+#
+# LTX is NOT Apache-2.0. Every Lightricks repository reports the Hugging
+# Face licence tag "other", which means "see the repository's own licence
+# file": the LTX Open Weights Licence. The owner was shown that, in those
+# words, and selected this checkpoint anyway on 2026-08-28. That decision
+# is the acceptance; this gate is its record, and it is written the same
+# way the Qwen Apache gate below is — a set the metadata must match, so
+# the image cannot be built if the terms ever change.
+#
+# "other" alone would be a weak gate: it admits ANY non-standard licence.
+# It is not the whole gate. The revision pin above is, because the licence
+# at 8984fa25 is fixed forever, and the build additionally refuses to ship
+# weights whose LICENCE TEXT did not land beside them — redistributing
+# someone's model without their terms attached is the failure this
+# prevents, and it is why LICENSE*/NOTICE* joined allow_patterns.
+ALLOWED_LICENCES = {"other"}
 DEST = "/app/models/ltx"
 SIZE_GUARD_BYTES = 16 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
@@ -214,6 +247,13 @@ def survey(api, repo):
              if t.startswith("license:")),
             None,
         )
+    if str(licence).lower() not in ALLOWED_LICENCES:
+        raise RuntimeError(
+            f"licence {licence!r} is not in {sorted(ALLOWED_LICENCES)} — refusing "
+            "to bake. The owner accepted the LTX Open Weights terms as they "
+            "stood at the pinned revision; a different licence is a different "
+            "decision and is the owner's to make again."
+        )
     return transformer_bytes, revision, licence
 
 
@@ -231,7 +271,10 @@ for repo, tag in CANDIDATES:
             revision=revision,
             token=TOKEN,
             local_dir=DEST,
-            allow_patterns=["model_index.json"] + [c + "/*" for c in COMPONENTS],
+            allow_patterns=(
+                ["model_index.json", "LICENSE*", "NOTICE*"]
+                + [c + "/*" for c in COMPONENTS]
+            ),
         )
         with open(os.path.join(DEST, "model_index.json")) as fh:
             index = json.load(fh)
@@ -255,6 +298,22 @@ for repo, tag in CANDIDATES:
                     on_disk += os.path.getsize(os.path.join(root, name))
         if not 0 < on_disk <= SIZE_GUARD_BYTES:
             raise RuntimeError(f"downloaded transformer is {on_disk} bytes")
+
+        # The terms must travel WITH the weights. An image that
+        # redistributes someone's model without their licence text beside
+        # it is the compliance failure this catches, and it is caught here
+        # rather than by a human noticing later.
+        licence_files = sorted(
+            name for name in os.listdir(DEST)
+            if name.upper().startswith(("LICENSE", "NOTICE"))
+        )
+        if not licence_files:
+            raise RuntimeError(
+                f"{repo} shipped no LICENSE or NOTICE file at {revision} — "
+                "refusing to redistribute the weights without their terms"
+            )
+        print(f"LICENCE FILES {licence_files}")
+
         resolved = repo + tag
         resolved_revision = revision
         resolved_licence = licence

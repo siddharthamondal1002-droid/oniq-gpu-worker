@@ -19,7 +19,14 @@ name: image-publish
 #
 # It carries TWO credentials and neither reaches the other side:
 # - GITHUB_TOKEN, to push to GHCR. Short-lived, issued per run.
-# - HF_TOKEN, a read-only Hugging Face token for the gated LTX checkpoint.
+# - HF_TOKEN, a read-only Hugging Face token. The chosen checkpoint turned
+#   out to be PUBLIC — the 401 that prompted this token was the registry
+#   refusing to confirm a non-existent repository to an anonymous caller,
+#   not a gate — so the token is not strictly required to download it. It
+#   is kept because owner directive 2026-08-28 asks for it, because it
+#   makes the identity check authoritative rather than best-effort, and
+#   because an authenticated read distinguishes 404 from 401 instead of
+#   conflating them, which is the exact confusion that cost four runs.
 #   It reaches exactly one RUN in the Dockerfile, through a BuildKit secret
 #   mount, and the image is scanned afterwards to prove it did not survive.
 # There is deliberately NO RunPod credential here. Pushing an image cannot
@@ -134,7 +141,6 @@ jobs:
             | python -c "import json,sys; d=json.load(sys.stdin); print('\n'.join('  ' + e['name'] for e in d.get('environments') or [])) or None" \
             || echo "  (could not list environments)"
           echo ""
-          echo "The chosen checkpoint is gated (HTTP 401 measured 2026-08-28)."
           echo "No substitute will be built. Owner action required."
           exit 1
 
@@ -154,10 +160,25 @@ jobs:
           # uses, and they occupy most of the root filesystem. Removing
           # them is the difference between a build that fits and one that
           # dies at 90% with no space left.
+          # MEASURED 2026-08-28: 13.76 GiB free of 71.61 on this runner, one
+          # filesystem, no separate /mnt. The projected media image is
+          # ~40 GiB, so the reclaim is not an optimisation — without it the
+          # build cannot start. df runs on both sides so the reclaimable
+          # figure becomes a measurement instead of the estimate
+          # image_size currently carries.
+          before=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost /usr/local/lib/node_modules \
-                      /opt/hostedtoolcache/CodeQL || true
-          df -B1 --output=source,size,used,avail,target / /mnt || true
+                      /usr/local/graalvm /usr/local/.ghcup \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /opt/hostedtoolcache || true
+          sudo apt-get clean || true
+          # The runner ships preloaded container images this build never
+          # uses, in the same data root the build writes to.
+          docker system prune -af --volumes || true
+          after=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          echo "RECLAIMED: $((after - before)) bytes"
+          df -B1 --output=source,size,used,avail,target / || true
 
       - name: "Free space after reclaim, and refuse a build that cannot finish"
         run: |
@@ -170,7 +191,10 @@ jobs:
           # where its result gets checked rather than assumed.
           AVAIL=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
           echo "FREE AFTER RECLAIM: ${AVAIL} bytes"
-          python -c "import sys; print('FREE AFTER RECLAIM: %.2f GiB' % (int(sys.argv[1]) / 1024**3))" "${AVAIL}"
+          # awk, not python: the reclaim above deletes /opt/hostedtoolcache,
+          # which is where actions/setup-python put the interpreter. Every
+          # python call has to happen BEFORE that step from here on.
+          awk -v b="${AVAIL}" 'BEGIN{printf "FREE AFTER RECLAIM: %.2f GiB\n", b/1073741824}'
           docker info --format 'docker data root: {{.DockerRootDir}}'
           # A build that dies at 90% costs 40 minutes and produces nothing.
           # 30 GiB is not a promise the image fits — it is the floor below
@@ -205,7 +229,7 @@ jobs:
           set -euo pipefail
           SIZE=$(docker image inspect "${IMAGE}:${GITHUB_SHA}" --format '{{.Size}}')
           echo "IMAGE SIZE: ${SIZE} bytes"
-          python -c "import sys; print('IMAGE SIZE: %.2f GiB' % (int(sys.argv[1]) / 1024**3))" "${SIZE}"
+          awk -v b="${SIZE}" 'BEGIN{printf "IMAGE SIZE: %.2f GiB\n", b/1073741824}'
           df -B1 --output=source,size,used,avail,target / /mnt || true
 
       # -------------------------------------------------------- proofs

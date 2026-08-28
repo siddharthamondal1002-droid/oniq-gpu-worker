@@ -451,3 +451,92 @@ def test_the_stale_cancel_job_needs_the_literal_token_and_never_purges():
         module = fh.read()
     assert "purge_queue" not in module
     assert "submit_job" not in module
+
+
+# ------------------------------------------------------- image-publish.yml
+
+
+def _publish_steps():
+    doc, _ = _load("image-publish.yml")
+    return doc["jobs"]["publish"]["steps"]
+
+
+def test_publish_is_dispatch_only_behind_a_literal_token():
+    doc, _ = _load("image-publish.yml")
+    assert set(_triggers(doc)) == {"workflow_dispatch"}
+    assert doc["jobs"]["publish"]["if"] == "inputs.publish == 'PUBLISH-MEDIA-IMAGE'"
+
+
+def test_publish_carries_no_runpod_credential():
+    """Pushing an image must not be able to start a worker. Keeping the
+    two credentials in different workflows means a mistake here cannot
+    become a GPU bill. Asserted on the CREDENTIAL and the CALLERS, not on
+    the word: this workflow's own header explains at length why RunPod
+    cannot build the image, and prose is not a capability."""
+    doc, _ = _load("image-publish.yml")
+    job = doc["jobs"]["publish"]
+
+    # Comments stripped, the same way _dockerfile_instructions does it:
+    # this workflow's header explains at length why RunPod cannot build
+    # the image, and a raw-text scan flags its own documentation. That
+    # trap has now been walked into twice in this file.
+    def _instructions(step):
+        return "\n".join(
+            line for line in (step.get("run") or "").splitlines()
+            if not line.strip().startswith("#")
+        )
+
+    referenced = repr(job.get("env") or {}) + repr(doc.get("env") or {})
+    for step in job["steps"]:
+        referenced += repr(step.get("env") or {}) + _instructions(step)
+
+    assert "RUNPOD" not in referenced.upper()
+    assert "runpod_client" not in referenced
+    assert "template_attach" not in referenced
+    assert "runpod.io" not in referenced
+
+
+def test_publish_never_passes_the_credential_as_a_build_argument():
+    """ARG and ENV both survive into the published image where docker
+    history and docker inspect can read them; a secret mount does not."""
+    _, raw = _load("image-publish.yml")
+    assert "--build-arg" not in raw.replace("grep -qiE 'build-arg", "")
+    assert "--secret id=hf_token,env=HF_TOKEN" in raw
+
+
+def test_every_python_call_happens_before_the_toolcache_is_deleted():
+    """The reclaim removes /opt/hostedtoolcache, which is where
+    actions/setup-python puts the interpreter. A python call after it
+    would fail on a runner that had just been made able to build."""
+    steps = _publish_steps()
+    reclaim_at = next(
+        i for i, s in enumerate(steps)
+        if "/opt/hostedtoolcache || true" in (s.get("run") or "")
+    )
+    for step in steps[reclaim_at:]:
+        run = step.get("run") or ""
+        # Join backslash continuations FIRST: `docker run ... \` followed
+        # by `python3 -c ...` is one command, and reading it line by line
+        # would flag the image's own interpreter as if it were the
+        # runner's — which is exactly what this test did on its first run.
+        for command in run.replace("\\\n", " ").splitlines():
+            stripped = command.strip()
+            if stripped.startswith("#"):
+                continue
+            # python3 inside `docker run` is the IMAGE's interpreter, which
+            # the runner's toolcache has nothing to do with.
+            if "docker run" in stripped or "/proofs/" in stripped:
+                continue
+            assert not stripped.startswith("python"), (step.get("name"), stripped)
+            assert " python " not in f" {stripped} ", (step.get("name"), stripped)
+
+
+def test_the_proofs_all_run_before_the_push():
+    """A pushed image that cannot start, or carries the wrong model, turns
+    a visible dangling reference into a worker that fails at cost."""
+    steps = _publish_steps()
+    names = [s.get("name") or s.get("uses") for s in steps]
+    push_at = next(i for i, n in enumerate(names) if n and "Push" in n)
+    for needle in ("The image starts", "uid 10001", "LTX 2B", "credential did NOT"):
+        at = next(i for i, n in enumerate(names) if n and needle in n)
+        assert at < push_at, needle

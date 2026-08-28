@@ -13,7 +13,8 @@ import pytest
 from validation import hf_auth
 
 GIB = 1024**3
-REPO = "Lightricks/LTX-Video-0.9.8-2B-distilled"
+REPO = "Lightricks/LTX-Video"
+REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
 SECRET = "hf_thisisnotarealtokenvalue"
 
 
@@ -52,8 +53,9 @@ def _ok(info=None):
 # ------------------------------------------- the model it actually checks
 
 def test_the_intended_model_is_the_head_of_the_real_candidate_list():
-    """Not any candidate — the FIRST, because the list is ordered by the
-    owner's model decision and this directive forbids falling past it."""
+    """The owner's model decision, 2026-08-28 option 1. There is exactly
+    one candidate now, so "the first" and "the only" coincide - which is
+    the point: nothing to fall past."""
     assert hf_auth.intended(_dockerfile())["repo"] == REPO
 
 
@@ -94,7 +96,7 @@ def test_a_registry_outage_blocks_too():
 def test_an_answer_for_a_different_repository_is_an_identity_mismatch():
     """A rename or a redirect must not quietly become a different model."""
     with pytest.raises(hf_auth.Blocked) as exc:
-        hf_auth.probe(_dockerfile(), SECRET, _ok(_info(repo="Lightricks/LTX-Video")))
+        hf_auth.probe(_dockerfile(), SECRET, _ok(_info(repo="Lightricks/LTX-2.5")))
     assert exc.value.code == "identity-mismatch"
 
 
@@ -240,7 +242,32 @@ def test_the_ltx_bake_has_exactly_one_candidate():
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video-0.9.8-2B-distilled"]
+    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video"]
+
+
+def test_the_ltx_bake_pins_the_exact_revision_the_owner_named():
+    """A repository name names a moving branch; a sha names bytes - and it
+    fixes the LICENCE TERMS too, because terms at a commit cannot change."""
+    block = _bake_blocks()[0]
+    assert f'PINNED_REVISION = "{REVISION}"' in block
+
+
+def test_the_ltx_bake_now_has_a_licence_gate_of_its_own():
+    """It never did. LTX is not Apache, so the Qwen gate did not cover it,
+    and the owner's acceptance needed somewhere to be recorded."""
+    block = _bake_blocks()[0]
+    assert "ALLOWED_LICENCES" in block
+    assert '"other"' in block.split("ALLOWED_LICENCES", 1)[1][:60]
+    assert "refusing" in block
+
+
+def test_the_ltx_bake_ships_the_licence_text_with_the_weights():
+    """Redistributing someone's model without their terms attached is the
+    compliance failure this catches."""
+    block = _bake_blocks()[0]
+    assert '"LICENSE*"' in block
+    assert '"NOTICE*"' in block
+    assert "refusing to redistribute the weights without their terms" in block
 
 
 def test_the_ltx_bake_pins_the_revision_it_surveyed():

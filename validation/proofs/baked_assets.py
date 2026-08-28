@@ -20,11 +20,16 @@ import json
 import os
 import sys
 
-# The exact identity the owner chose. Not derived from the Dockerfile here
-# on purpose: this is the independent side of the check, and a value read
-# from the same file that produced the image would agree with it by
-# construction rather than by fact.
-EXPECT_LTX = "Lightricks/LTX-Video-0.9.8-2B-distilled#distilled"
+# The exact identity the owner chose (2026-08-28, option 1), and the exact
+# revision. Not derived from the Dockerfile here on purpose: this is the
+# independent side of the check, and a value read from the same file that
+# produced the image would agree with it by construction rather than by
+# fact.
+EXPECT_LTX = "Lightricks/LTX-Video"
+EXPECT_LTX_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+# LTX is NOT Apache. The owner accepted the LTX Open Weights terms as they
+# stand at the pinned revision; the registry reports them as "other".
+EXPECT_LTX_LICENCE = "other"
 EXPECT_STORY_PREFIX = "Qwen/Qwen3-8B"
 LTX_GUARD_BYTES = 16 * 1024**3
 STORY_GUARD_BYTES = 20 * 1024**3
@@ -69,10 +74,29 @@ def check(report=print, root=ROOT):
     report(f"PROOF ltx model: {ltx}")
 
     revision = read(at("LTX_REVISION"))
-    if len(revision) < 7:
-        raise ProofFailed(f"LTX_REVISION is {revision!r}, not a commit sha")
+    if revision != EXPECT_LTX_REVISION:
+        raise ProofFailed(
+            f"LTX_REVISION is {revision!r}, expected {EXPECT_LTX_REVISION!r} — "
+            "the pinned revision is what fixes both the weights and the terms"
+        )
     report(f"PROOF ltx revision: {revision}")
-    report("PROOF ltx licence: " + read(at("LTX_LICENCE")))
+
+    licence = read(at("LTX_LICENCE"))
+    if licence.lower() != EXPECT_LTX_LICENCE:
+        raise ProofFailed(f"LTX_LICENCE is {licence!r}, expected {EXPECT_LTX_LICENCE!r}")
+    report(f"PROOF ltx licence: {licence} (LTX Open Weights, accepted 2026-08-28)")
+
+    # The terms must be IN the image, not merely named by it.
+    licence_files = sorted(
+        name for name in os.listdir(at("ltx"))
+        if name.upper().startswith(("LICENSE", "NOTICE"))
+    )
+    if not licence_files:
+        raise ProofFailed(
+            "no LICENSE or NOTICE file beside the LTX weights — the image "
+            "redistributes the model without its terms"
+        )
+    report(f"PROOF ltx licence files: {licence_files}")
 
     story = read(at("STORY_MODEL_ID"))
     if not story.startswith(EXPECT_STORY_PREFIX):
@@ -112,6 +136,8 @@ def check(report=print, root=ROOT):
     return {
         "ltx": ltx,
         "ltx_revision": revision,
+        "ltx_licence": licence,
+        "ltx_licence_files": licence_files,
         "story": story,
         "ltx_bytes": ltx_bytes,
         "story_bytes": story_bytes,

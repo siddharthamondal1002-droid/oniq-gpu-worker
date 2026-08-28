@@ -14,8 +14,8 @@ import pytest
 from validation.proofs import baked_assets, no_credential
 
 GIB = 1024**3
-GOOD_LTX = "Lightricks/LTX-Video-0.9.8-2B-distilled#distilled"
-SHA = "0123456789abcdef0123456789abcdef01234567"
+GOOD_LTX = "Lightricks/LTX-Video"
+SHA = "8984fa25007f376c1a299016d0957a37a2f797bb"
 
 
 def _tree(tmp_path, ltx_id=GOOD_LTX, story="Qwen/Qwen3-8B-AWQ", revision=SHA,
@@ -34,6 +34,7 @@ def _tree(tmp_path, ltx_id=GOOD_LTX, story="Qwen/Qwen3-8B-AWQ", revision=SHA,
     (root / "ltx" / "transformer" / "w.safetensors").write_bytes(b"x" * ltx_bytes)
     (root / "story" / "config.json").write_text(json.dumps({"model_type": model_type}))
     (root / "story" / "w.safetensors").write_bytes(b"x" * story_bytes)
+    (root / "ltx" / "LICENSE.md").write_text("LTX Open Weights Licence")
     (root / "piper" / "en-us-ryan-high.onnx").write_bytes(b"onnx")
     (root / "piper" / "en-us-ryan-high.onnx.json").write_text("{}")
 
@@ -66,24 +67,51 @@ def test_every_proof_line_is_printed(tmp_path, capsys):
 
 # ---------------------------------------------------- the wrong image
 
-def test_the_substituted_checkpoint_is_caught_by_NAME(tmp_path):
-    """The exact failure run 51 would have shipped. Lightricks/LTX-Video
-    passes every SHAPE check — right class, right components, transformer
-    inside the guard — so only the name catches it."""
+def test_a_substituted_checkpoint_is_caught_by_NAME(tmp_path):
+    """Another Lightricks repo passes every SHAPE check — right class,
+    right components, transformer inside the guard — so only the literal
+    name catches it. Run 53 measured three that would."""
     with pytest.raises(baked_assets.ProofFailed) as exc:
-        _check(_tree(tmp_path, ltx_id="Lightricks/LTX-Video"))
+        _check(_tree(tmp_path, ltx_id="Lightricks/LTX-Video-0.9.5"))
     assert "MODEL_ID" in str(exc.value)
 
 
-def test_the_undistilled_variant_of_the_right_repo_is_still_caught(tmp_path):
+def test_a_name_that_does_not_exist_is_caught_too(tmp_path):
+    """The one this file named for weeks. It never existed."""
     with pytest.raises(baked_assets.ProofFailed):
         _check(_tree(tmp_path, ltx_id="Lightricks/LTX-Video-0.9.8-2B-distilled"))
+
+
+def test_the_right_repo_at_the_WRONG_revision_is_caught(tmp_path):
+    """The pin fixes both the weights and the licence terms, so a drifted
+    revision is as wrong as a different repository."""
+    with pytest.raises(baked_assets.ProofFailed) as exc:
+        _check(_tree(tmp_path, revision="f" * 40))
+    assert "LTX_REVISION" in str(exc.value)
 
 
 def test_a_missing_revision_fails(tmp_path):
     with pytest.raises(baked_assets.ProofFailed) as exc:
         _check(_tree(tmp_path, revision="none"))
     assert "LTX_REVISION" in str(exc.value)
+
+
+def test_a_wrong_licence_fails(tmp_path):
+    """The owner accepted the LTX Open Weights terms specifically. A
+    different licence is a different decision, and theirs to make again."""
+    with pytest.raises(baked_assets.ProofFailed) as exc:
+        _check(_tree(tmp_path, licence="apache-2.0"))
+    assert "LTX_LICENCE" in str(exc.value)
+
+
+def test_weights_without_their_licence_text_fail(tmp_path):
+    """An image that redistributes the model without its terms beside it
+    is the compliance failure the LICENSE*/NOTICE* patterns exist for."""
+    root = _tree(tmp_path)
+    os.remove(os.path.join(root, "ltx", "LICENSE.md"))
+    with pytest.raises(baked_assets.ProofFailed) as exc:
+        _check(root)
+    assert "without its terms" in str(exc.value)
 
 
 def test_a_different_story_model_fails(tmp_path):
@@ -131,12 +159,18 @@ def test_the_guards_are_the_same_numbers_the_dockerfile_declares():
     assert baked_assets.STORY_GUARD_BYTES == bakes[1]["size_guard_bytes"]
 
 
+def test_the_expected_revision_matches_the_dockerfiles_pin():
+    with open("Dockerfile", encoding="utf-8") as fh:
+        text = fh.read()
+    assert f'PINNED_REVISION = "{baked_assets.EXPECT_LTX_REVISION}"' in text
+
+
 def test_the_expected_name_matches_the_dockerfiles_only_candidate():
     from validation import image_size
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert baked_assets.EXPECT_LTX.split("#")[0] == bakes[0]["candidates"][0]
+    assert baked_assets.EXPECT_LTX == bakes[0]["candidates"][0]
 
 
 # -------------------------------------------------- the credential scan
