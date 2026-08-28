@@ -81,6 +81,16 @@ def measure(repo: str, gates: dict, token, get=_get) -> dict:
         (s.get("rfilename") or ""): (s.get("size") or 0)
         for s in info.get("siblings") or []
     }
+    # WHERE ARE THE TERMS? Run 8's build downloaded all 18 files and then
+    # refused, because this repository ships no file named LICENSE* or
+    # NOTICE*. "license: other" on Hugging Face means "see the card", so
+    # the card's own fields and the repository's root files are what
+    # actually carry them — measured here rather than assumed.
+    card_all = info.get("cardData") or {}
+    row["licence_name"] = card_all.get("license_name")
+    row["licence_link"] = card_all.get("license_link")
+    row["root_files"] = sorted(p for p in paths if "/" not in p)
+
     row["is_diffusers"] = "model_index.json" in paths
     row["components"] = [
         c for c in gates["components"] if any(p.startswith(c + "/") for p in paths)
@@ -152,6 +162,10 @@ def report(text: str, token, get=_get) -> tuple:
         row = measure(repo, gates, token, get)
         rows.append(row)
         size = row.get("transformer_bytes") or 0
+        if repo == named:
+            print(f"    root files: {row.get('root_files')}")
+            print(f"    license_name: {row.get('licence_name')!r}")
+            print(f"    license_link: {row.get('licence_link')!r}")
         print(
             f"  {row['verdict']:14s} {repo}"
             + (f"  licence={row.get('licence')!r}" if row.get("licence") else "")
