@@ -35,10 +35,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel]
         default: discover
+      stale_job_id:
+        description: "RunPod run id for queue-probe / stale-cancel."
+        type: string
+        default: ""
+      cancel_token:
+        description: "Type CANCEL-STALE-RUN (exactly) to allow stale-cancel. Cancels ONE named run - never a queue purge."
+        type: string
+        default: ""
       spend:
         description: "Type SPEND (exactly) to allow the spend job."
         type: string
@@ -138,6 +146,46 @@ jobs:
           name: discovery
           path: discovery.json
           if-no-files-found: ignore
+
+  queue_probe:
+    name: "queue probe - read-only, $0"
+    if: inputs.mode == 'queue-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Can this run still execute?"
+        run: python -m validation.queue_probe "${{ inputs.stale_job_id }}"
+
+  stale_cancel:
+    # Cancels ONE run on ONE endpoint, both named on the dispatch, and
+    # only when the literal token is typed. NOT a queue purge: draining
+    # every queued job is broader than the authorization given, and
+    # validation/stale_run.py carries a gate asserting the queue-wide
+    # verb appears nowhere in it. Cancelling costs nothing; endpoint,
+    # template and worker bounds are untouched.
+    name: "stale run cancel - ONE job, $0"
+    if: inputs.mode == 'stale-cancel' && inputs.cancel_token == 'CANCEL-STALE-RUN'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Verify the owner endpoint, cancel the one run, re-verify"
+        run: python -m validation.stale_run "${{ inputs.stale_job_id }}" "${{ inputs.endpoint_id }}" "${{ inputs.cancel_token }}"
 
   advisory:
     # The STANDALONE free preflight (phases 9-10, $0): pods, endpoint

@@ -349,12 +349,18 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
     # standby-probe joined 2026-08-27: the READ-ONLY twin of standby-zero,
     # so the diagnostic can be re-run without re-attempting a mutation the
     # API has already refused.
+    # queue-probe and stale-cancel joined 2026-08-28. The first is a
+    # pure read of queue counts. The second is the ONLY job-level
+    # mutation on this workflow, and it is deliberately the narrow one:
+    # cancel ONE named run, never purge_queue.
     assert mode["options"] == [
         "discover",
         "spend",
         "standby-zero",
         "standby-probe",
         "advisory",
+        "queue-probe",
+        "stale-cancel",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -396,3 +402,38 @@ def test_the_standby_probe_job_cannot_spend_or_write():
     assert "validation.standby_zero probe" in commands
     for forbidden in ("spend_run", "SPEND", "submit", "standby_zero\n"):
         assert forbidden not in commands
+
+
+def test_the_queue_probe_job_is_read_only():
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["queue_probe"]
+    assert job["if"].strip() == "inputs.mode == 'queue-probe'"
+    commands = " ".join(str(step.get("run", "")) for step in job["steps"])
+    assert "validation.queue_probe" in commands
+    for forbidden in ("stale_run", "spend_run", "standby_zero", "SPEND"):
+        assert forbidden not in commands
+
+
+def test_the_stale_cancel_job_needs_the_literal_token_and_never_purges():
+    """The narrow mutation. Owner authorization 2026-08-28 covered ONE
+    stranded run, so the gate proves the job cannot become a queue drain:
+    it is token-gated, it names one run and one endpoint from the
+    dispatch, and purge_queue appears nowhere in it or in the module it
+    calls."""
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["stale_cancel"]
+    condition = job["if"].strip()
+    assert "inputs.mode == 'stale-cancel'" in condition
+    assert "inputs.cancel_token == 'CANCEL-STALE-RUN'" in condition
+
+    commands = " ".join(str(step.get("run", "")) for step in job["steps"])
+    assert "validation.stale_run" in commands
+    assert "inputs.stale_job_id" in commands
+    assert "inputs.endpoint_id" in commands
+    for forbidden in ("purge", "purge_queue", "submit", "SPEND", "spend_run"):
+        assert forbidden not in commands
+
+    with open(os.path.join(ROOT, "validation", "stale_run.py"), encoding="utf-8") as fh:
+        module = fh.read()
+    assert "purge_queue" not in module
+    assert "submit_job" not in module
