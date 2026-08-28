@@ -96,16 +96,31 @@ jobs:
                       /opt/hostedtoolcache/CodeQL || true
           df -B1 --output=source,size,used,avail,target / /mnt || true
 
-      - name: "Move the docker data root onto /mnt"
+      - name: "Free space after reclaim, and refuse a build that cannot finish"
         run: |
-          # /mnt is the large ephemeral disk; / is not big enough to hold
-          # this image's layers and its assembled copy at the same time.
-          # Done before any build so no layer is ever written to /.
-          sudo systemctl stop docker docker.socket || true
-          sudo mkdir -p /mnt/docker
-          printf '{ "data-root": "/mnt/docker" }\n' | sudo tee /etc/docker/daemon.json
-          sudo systemctl start docker
+          set -euo pipefail
+          # MEASURED 2026-08-28 (run 3): `df / /mnt` reported /dev/root for
+          # BOTH targets on these runners — there is no separate /mnt temp
+          # disk, whatever the documented default says. An earlier version
+          # of this workflow moved docker's data root onto /mnt for exactly
+          # nothing. So the reclaim above is the only lever, and this is
+          # where its result gets checked rather than assumed.
+          AVAIL=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          echo "FREE AFTER RECLAIM: ${AVAIL} bytes"
+          python -c "import sys; print('FREE AFTER RECLAIM: %.2f GiB' % (int(sys.argv[1]) / 1024**3))" "${AVAIL}"
           docker info --format 'docker data root: {{.DockerRootDir}}'
+          # A build that dies at 90% costs 40 minutes and produces nothing.
+          # 30 GiB is not a promise the image fits — it is the floor below
+          # which it certainly does not. Shell arithmetic, not a heredoc: a
+          # heredoc terminator indented inside a YAML block scalar never
+          # closes, because <<- strips tabs and not spaces.
+          FLOOR=$((30 * 1024 * 1024 * 1024))
+          if [ "${AVAIL}" -lt "${FLOOR}" ]; then
+            echo "BLOCKED: only ${AVAIL} bytes free, below the ${FLOOR} byte floor."
+            echo "Reclaim more, or build on a runner with a bigger disk."
+            exit 1
+          fi
+          echo "disk floor cleared"
 
       # --------------------------------------------------------- build
 

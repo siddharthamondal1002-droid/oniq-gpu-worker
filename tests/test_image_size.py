@@ -254,7 +254,7 @@ def _both(transformer_gib, weight_gib):
     return fetch
 
 
-def test_a_small_image_fits_as_is(capsys):
+def test_a_small_image_fits_with_room_for_both_copies(capsys):
     def tiny(repo):
         if "story" in repo:
             return _repo({"config.json": 1, "tokenizer_config.json": 1,
@@ -267,13 +267,15 @@ def test_a_small_image_fits_as_is(capsys):
 
     code, _ = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=tiny, head=lambda u: 1)
     assert code == 0
-    assert "VERDICT: FITS as-is" in capsys.readouterr().out
+    assert "VERDICT: FITS with room for both copies" in capsys.readouterr().out
 
 
-def test_a_large_image_needs_the_mount(capsys):
+def test_an_image_that_fits_once_but_not_twice_is_reported_tight(capsys):
+    """A build holds the layer cache and the assembled image at the same
+    time, so fitting once is not the question."""
     code, _ = isz.report(DOCKERFILE, base_image_bytes=8 * GIB, fetch=_both(4, 6), head=lambda u: 1)
     assert code == 0
-    assert "FITS ONLY ON /mnt" in capsys.readouterr().out
+    assert "VERDICT: TIGHT" in capsys.readouterr().out
 
 
 def test_an_image_too_big_for_the_mount_is_refused(capsys):
@@ -282,10 +284,14 @@ def test_an_image_too_big_for_the_mount_is_refused(capsys):
     assert "DOES NOT FIT" in capsys.readouterr().out
 
 
-def test_the_budget_accounts_for_the_build_holding_two_copies():
-    """One times the floor fitting is not the question: docker keeps the
-    layer cache and the assembled image at the same time."""
-    assert isz.RUNNER_MNT_FREE_BYTES > isz.RUNNER_ROOT_FREE_BYTES
+def test_the_runner_budget_is_a_measurement_plus_a_named_estimate():
+    """Measured 2026-08-28: one filesystem, 13.76 GiB free, no separate
+    /mnt. An earlier version planned against a 65 GiB /mnt that does not
+    exist on these runners."""
+    assert isz.RUNNER_FREE_BYTES == 14773895168
+    assert isz.RUNNER_TOTAL_BYTES == 76887154688
+    assert isz.RUNNER_USABLE_BYTES == isz.RUNNER_FREE_BYTES + isz.RECLAIMABLE_BYTES
+    assert not hasattr(isz, "RUNNER_MNT_FREE_BYTES")
 
 
 # ------------------------------------- the substitution the build refuses

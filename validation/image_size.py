@@ -40,13 +40,27 @@ import urllib.request
 DOCKERFILE = "Dockerfile"
 API = "https://huggingface.co/api/models/{repo}?blobs=true"
 
-# What a GitHub-hosted ubuntu runner can actually hold. The pair matters:
-# the build needs room for the layers AND the assembled image, and docker
-# keeps both. These are the documented defaults, not measurements of this
-# account's runners, so the CI job prints the real `df` above this and the
-# numbers here are only the planning budget.
-RUNNER_ROOT_FREE_BYTES = 21 * 1024**3
-RUNNER_MNT_FREE_BYTES = 65 * 1024**3
+# MEASURED on this account's runners, 2026-08-28 (image-publish run 3):
+#
+#   /dev/root  76887154688 total  62096482304 used  14773895168 avail
+#
+# and `df / /mnt` reported /dev/root for BOTH — so there is NO separate
+# /mnt temp disk here, whatever the documented default says. An earlier
+# version of this file planned against a 65 GiB /mnt that does not exist
+# on these runners, and the publish workflow moved docker's data root onto
+# it for nothing.
+#
+# 13.76 GiB free before anything is reclaimed. The preinstalled toolchains
+# the publish workflow deletes are worth roughly 25 GB more, which is the
+# only reason a build of this size is even arguable.
+RUNNER_TOTAL_BYTES = 76887154688
+RUNNER_FREE_BYTES = 14773895168
+# What the reclaim step frees, NOT MEASURED as a total — the workflow
+# prints df after it so a real number replaces this the first time a build
+# gets that far. Deliberately conservative: overstating it would let this
+# module bless a build that then dies at 90%.
+RECLAIMABLE_BYTES = 20 * 1024**3
+RUNNER_USABLE_BYTES = RUNNER_FREE_BYTES + RECLAIMABLE_BYTES
 
 
 class SizeParseError(Exception):
@@ -380,22 +394,25 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
     projected = base_image_bytes + total
     print(f"PROJECTED MEDIA IMAGE (FLOOR): {_gib(projected)}")
     print(
-        f"RUNNER PLANNING BUDGET: root {_gib(RUNNER_ROOT_FREE_BYTES)}, "
-        f"/mnt {_gib(RUNNER_MNT_FREE_BYTES)}"
+        f"RUNNER (measured): {_gib(RUNNER_FREE_BYTES)} free of "
+        f"{_gib(RUNNER_TOTAL_BYTES)}, one filesystem, no separate /mnt"
     )
-    if projected * 2 > RUNNER_MNT_FREE_BYTES:
+    print(f"AFTER RECLAIM (estimated): {_gib(RUNNER_USABLE_BYTES)}")
+    if projected > RUNNER_USABLE_BYTES:
         print(
-            "VERDICT: DOES NOT FIT — twice the floor exceeds even /mnt. A hosted "
-            "runner cannot build this image; the build needs a bigger disk."
+            "VERDICT: DOES NOT FIT — the image alone exceeds the reclaimed disk. "
+            "A hosted runner cannot build this; it needs a bigger disk."
         )
         return 1, rows
-    if projected * 2 > RUNNER_ROOT_FREE_BYTES:
+    if projected * 2 > RUNNER_USABLE_BYTES:
         print(
-            "VERDICT: FITS ONLY ON /mnt — the docker data root must be moved off "
-            "the root filesystem before the build, and free space reclaimed."
+            "VERDICT: TIGHT — the image fits but not twice over, and a build "
+            "holds layers and the assembled image at once. Reclaim first and "
+            "watch the df the workflow prints; treat a failure here as "
+            "expected, not surprising."
         )
         return 0, rows
-    print("VERDICT: FITS as-is on the root filesystem.")
+    print("VERDICT: FITS with room for both copies.")
     return 0, rows
 
 
