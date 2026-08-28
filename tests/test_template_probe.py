@@ -8,14 +8,17 @@ rather than acting on it.
 
 from validation import template_probe as tp
 
+_UNSET = object()
+
 
 class Client:
     """Records every call, so a mutation shows up as a failed assertion."""
 
-    def __init__(self, templates, surface, env=None):
+    def __init__(self, templates, surface, env=None, rest=_UNSET):
         self._templates = templates
         self._surface = surface
         self._env = env
+        self._rest = rest
         self.calls = []
 
     def list_templates_graphql(self):
@@ -29,6 +32,14 @@ class Client:
     def template_env_names_graphql(self, template_id):
         self.calls.append("template_env_names_graphql")
         return self._env
+
+    def get_template(self, template_id):
+        self.calls.append("get_template")
+        if self._rest is _UNSET:            # default: REST agrees with GraphQL
+            if self._env is None:
+                raise AssertionError("unreadable")
+            return 200, {"env": {k: "value-that-must-never-be-printed" for k in self._env}}
+        return 200, self._rest
 
     def __getattr__(self, name):
         raise AssertionError(f"the probe must not call {name!r}")
@@ -170,6 +181,7 @@ def test_the_probe_still_only_reads_when_it_checks_storage():
     assert client.calls == [
         "list_templates_graphql",
         "template_env_names_graphql",
+        "get_template",
         "rest_template_surface",
     ]
 
@@ -203,3 +215,63 @@ def test_the_summary_carries_the_ready_verdict_too(capsys):
     tp.report(Client(HERE, IMAGE_ONLY, env=R2), "aqa3wkdf8g")
     _, _, tail = capsys.readouterr().out.partition("=== SUMMARY ===")
     assert "STORAGE READY" in tail
+
+
+# ------------------------- one path is an opinion, two are a measurement
+
+def test_the_env_is_read_over_BOTH_apis(capsys):
+    client = Client(HERE, IMAGE_ONLY, env=R2)
+    tp.report(client, "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "template_env_names_graphql" in client.calls
+    assert "get_template" in client.calls
+    assert "ENV via GraphQL" in out
+    assert "ENV via REST" in out
+
+
+def test_the_two_apis_disagreeing_is_itself_the_finding(capsys):
+    """If one view says the variables are set and the other says they are
+    not, reporting either number would be a guess wearing a measurement's
+    clothes. Refuse, and name what each one saw."""
+    client = Client(HERE, IMAGE_ONLY, env=set(), rest={"env": {n: "v" for n in R2}})
+    code, facts = tp.report(client, "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "ENV DISAGREEMENT" in out
+    assert "R2_S3_ENDPOINT" in out
+    assert code == 1
+    assert facts["storage"] is None
+
+
+def test_rest_env_as_a_key_value_list_is_read_too(capsys):
+    """RunPod returns env as a mapping in one place and a list of
+    {key, value} in another. Both are the same fact."""
+    client = Client(HERE, IMAGE_ONLY, env=R2,
+                    rest={"env": [{"key": n, "value": "secret"} for n in R2]})
+    code, _ = tp.report(client, "aqa3wkdf8g")
+    assert code == 0
+    assert "STORAGE READY" in capsys.readouterr().out
+
+
+def test_a_template_with_no_env_key_is_none_set_not_unreadable(capsys):
+    client = Client(HERE, IMAGE_ONLY, env=set(), rest={"name": "oniq"})
+    code, facts = tp.report(client, "aqa3wkdf8g")
+    assert facts["storage"] is False
+    assert "STORAGE NOT READY" in capsys.readouterr().out
+
+
+def test_no_environment_VALUE_is_ever_printed(capsys):
+    """The REST template carries values; this probe carries names."""
+    client = Client(HERE, IMAGE_ONLY, env=R2)
+    tp.report(client, "aqa3wkdf8g")
+    assert "value-that-must-never-be-printed" not in capsys.readouterr().out
+
+
+def test_an_unreadable_rest_falls_back_to_graphql_rather_than_going_blind(capsys):
+    class NoRest(Client):
+        def get_template(self, template_id):
+            raise RuntimeError("HTTP 404")
+
+    tp.report(NoRest(HERE, IMAGE_ONLY, env=R2), "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "ENV via REST   : unreadable (UNKNOWN)" in out
+    assert "STORAGE READY" in out

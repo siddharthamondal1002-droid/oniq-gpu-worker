@@ -17,6 +17,41 @@ import json
 import storage
 
 
+def _render(names):
+    if names is None:
+        return "unreadable (UNKNOWN)"
+    return f"{len(names)} set - " + (", ".join(sorted(names)) or "(none)")
+
+
+def _rest_env_names(client, template_id: str):
+    """The same question asked of the REST template, NAMES ONLY.
+
+    RunPod's REST template carries env as either a mapping or a list of
+    {key, value} pairs depending on the shape of the day; both are read,
+    and the values are dropped on the floor here rather than travelling
+    any further.
+    """
+    try:
+        _, doc = client.get_template(template_id)
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    env = doc.get("env")
+    if isinstance(env, dict):
+        return set(env.keys())
+    if isinstance(env, list):
+        return {
+            e.get("key") for e in env
+            if isinstance(e, dict) and e.get("key")
+        }
+    if env is None:
+        # A template with no env at all answers with nothing, and that is
+        # a real "none set" rather than a failure to look.
+        return set()
+    return None
+
+
 def _report_storage(client, template_id: str):
     """Which storage variables are set on the template. NAMES ONLY.
 
@@ -30,7 +65,29 @@ def _report_storage(client, template_id: str):
     Unreadable is UNKNOWN, never "ready". Returns (state, verdict line),
     where state is True, False or None.
     """
-    names = client.template_env_names_graphql(template_id)
+    # TWO PATHS, because one path is an opinion. The GraphQL view and the
+    # REST view of a template are different endpoints on different hosts,
+    # and the owner has now said three times that these variables are set
+    # while one of them said otherwise. If they disagree, the disagreement
+    # IS the finding - reporting either number alone would be a guess
+    # wearing a measurement's clothes.
+    graph = client.template_env_names_graphql(template_id)
+    rest = _rest_env_names(client, template_id)
+    print(f"ENV via GraphQL: {_render(graph)}")
+    print(f"ENV via REST   : {_render(rest)}")
+
+    if graph is not None and rest is not None and graph != rest:
+        only_rest = sorted(rest - graph)
+        only_graph = sorted(graph - rest)
+        verdict = (
+            "ENV DISAGREEMENT: the two APIs do not describe the same template - "
+            f"REST-only {only_rest}, GraphQL-only {only_graph}. Trust neither "
+            "until this is explained."
+        )
+        print(verdict)
+        return None, verdict
+
+    names = rest if rest is not None else graph
     if names is None:
         verdict = "ENV: unreadable - the answer is UNKNOWN, not 'nothing is set'"
         print(verdict)
