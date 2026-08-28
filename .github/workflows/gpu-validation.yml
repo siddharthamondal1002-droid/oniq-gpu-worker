@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, advisory]
+        options: [discover, spend, standby-zero, standby-probe, advisory]
         default: discover
       spend:
         description: "Type SPEND (exactly) to allow the spend job."
@@ -215,6 +215,28 @@ jobs:
       - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
         run: python -m validation.spend_run run
 
+  standby_probe:
+    # READ-ONLY twin of the standby job. Owner directive 2026-08-27: run
+    # the standby diagnostic, and stop re-attempting a mutation already
+    # proven unsupported. Both were impossible together while the probes
+    # lived inside the patch-failure branch — reading the answer required
+    # attempting the write. This job calls the same two introspections
+    # through a path that cannot write, so the evidence is repeatable at
+    # $0 without touching the endpoint.
+    name: "standby diagnostic — read-only, $0"
+    if: inputs.mode == 'standby-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend # the key is an environment secret; see discover
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Read standby facts and the API schema (no write)
+        run: python -m validation.standby_zero probe
+
   standby:
     # The harness's ONLY endpoint mutation, owner-directed 2026-08-26:
     # workersStandby -> the literal 0 (NO JOB = NO GPU WORKER). The
@@ -237,7 +259,7 @@ jobs:
 
   sweep:
     name: "orphan sweep — None is never 0"
-    needs: [discover, spend, standby]
+    needs: [discover, spend, standby, standby_probe]
     if: always()
     runs-on: ubuntu-latest
     environment: gpu-spend # the key is an environment secret; see discover

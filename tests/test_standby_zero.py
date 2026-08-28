@@ -106,3 +106,124 @@ def test_never_prints_secret_values(capsys):
     out = capsys.readouterr().out
     assert "SUPERSECRETVALUE" not in out
     assert "R2_SECRET_ACCESS_KEY" in out  # the NAME may appear
+
+
+# ------------------------------------------------ the read-only probe path
+#
+# Owner directive 2026-08-27: run the standby diagnostic, and stop
+# re-attempting a mutation already proven unsupported. Those two were in
+# tension because the probes lived inside the patch-failure branch —
+# reading the answer required attempting the write first. The probe path
+# exists to break that tie, so the tests that matter are the ones proving
+# it cannot write.
+
+
+class _ProbeClient:
+    """Records every call, and screams if a mutation is attempted."""
+
+    def __init__(self, standby=1):
+        self.calls = []
+        self._standby = standby
+
+    def get_endpoints(self):
+        self.calls.append("get_endpoints")
+        doc = [
+            {
+                "id": "p3zmlv8ek10dzt",
+                "workersStandby": self._standby,
+                "workersMin": 0,
+                "workersMax": 1,
+            }
+        ]
+        return json.dumps(doc), doc
+
+    def standby_schema_probe(self):
+        self.calls.append("standby_schema_probe")
+        return {
+            "endpoint_input_fields": ["gpuTypeIds", "workersMax", "workersMin"],
+            "standby_shaped_mutations": [],
+            "endpoint_shaped_mutations": ["saveEndpoint"],
+            "worker_shaped_mutations": [],
+        }
+
+    def rest_schema_probe(self):
+        self.calls.append("rest_schema_probe")
+        return {
+            "spec_url": "https://rest.runpod.io/openapi.json",
+            "patch_endpoint_properties": ["gpuTypeIds", "workersMax", "workersMin"],
+            "standby_shaped_names": ["workersStandby"],
+        }
+
+    def set_workers_standby_zero(self, endpoint_id):  # pragma: no cover
+        raise AssertionError("the probe path attempted a MUTATION")
+
+
+def test_the_probe_path_never_mutates():
+    client = _ProbeClient()
+    facts = standby_zero.read_only(client)
+    assert facts["workers_standby"] == 1
+    assert "set_workers_standby_zero" not in client.calls
+    assert "standby_schema_probe" in client.calls
+    assert "rest_schema_probe" in client.calls
+
+
+def test_probe_argv_selects_the_read_only_path(capsys, monkeypatch):
+    client = _ProbeClient()
+    monkeypatch.setitem(__import__("sys").modules, "runpod_client", client)
+    assert standby_zero.main(["probe"]) == 0
+    out = capsys.readouterr().out
+    # The answer the redaction bug was hiding must be visible here.
+    assert "workersStandby" in out
+    assert "<redacted>" not in out
+    assert "standby_shaped_names" in out
+
+
+def test_the_probe_reports_unreadable_rather_than_empty():
+    """None is never []. An introspection that cannot run is not proof
+    that no standby mutation exists — the sweep's rule, applied here."""
+
+    class _Blind(_ProbeClient):
+        def standby_schema_probe(self):
+            return None
+
+        def rest_schema_probe(self):
+            return None
+
+    client = _Blind()
+    standby_zero.probe_only(client)  # must not raise
+    assert "set_workers_standby_zero" not in client.calls
+
+
+def test_the_mutating_path_is_still_the_only_writer():
+    """The probe path must not have become a second way to write.
+
+    Counted as CALL SITES, not as occurrences of the name: the module
+    docstring also names the function, and a text count would have this
+    test failing on a comment edit while still passing if someone added a
+    real second call inside a string-free branch.
+    """
+    import ast
+
+    tree = ast.parse(open(standby_zero.__file__, encoding="utf-8").read())
+    call_sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "set_workers_standby_zero"
+    ]
+    assert len(call_sites) == 1, f"{len(call_sites)} call sites write standby"
+
+    # ...and it is inside run(), never inside the probe path.
+    writers = [
+        fn.name
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        and any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "set_workers_standby_zero"
+            for n in ast.walk(fn)
+        )
+    ]
+    assert writers == ["run"], writers
