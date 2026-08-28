@@ -37,7 +37,7 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, ltx-discover]
         default: discover
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
@@ -225,6 +225,30 @@ jobs:
           python-version: "3.11"
       - name: "Create the template, attach it, re-read the endpoint"
         run: python -m validation.template_attach "${{ inputs.endpoint_id }}" "${{ inputs.image_ref }}" "${{ inputs.attach_token }}"
+
+  ltx_discover:
+    # Which LTX checkpoints actually EXIST, measured with the credential.
+    # Run 7 proved the Dockerfile names one that does not: unauthenticated
+    # the registry answers 401 for gated and for absent alike, and with a
+    # working token the same path answers 404. Read-only, $0, and it
+    # deliberately CHOOSES nothing - which checkpoint ships is the owner's
+    # decision, and a name picked here to make a build succeed would be the
+    # substitution the directive forbids.
+    name: "LTX catalogue - read-only, $0"
+    if: inputs.mode == 'ltx-discover'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "List what the publisher actually offers, and measure each"
+        run: python -m validation.hf_discover
 
   queue_probe:
     name: "queue probe - read-only, $0"

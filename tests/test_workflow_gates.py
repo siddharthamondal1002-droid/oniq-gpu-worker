@@ -371,6 +371,10 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # naming an already-published image, ONE endpoint repointed. It
         # sends templateId alone, so no spend bound can move.
         "template-attach",
+        # ltx-discover joined 2026-08-28 after run 7 measured that the
+        # Dockerfile names a checkpoint which does not exist. Read-only,
+        # and it picks nothing.
+        "ltx-discover",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
