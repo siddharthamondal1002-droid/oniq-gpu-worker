@@ -154,9 +154,19 @@ jobs:
     if: inputs.mode == 'advisory'
     runs-on: ubuntu-latest
     environment: gpu-spend
+    # MEASURED 2026-08-28: the environments API wants actions:read, not
+    # deployments:read. deployments:read alone answered 403 on runs
+    # 26-40 while the hint kept blaming it; adding actions:read on run
+    # 41 returned 200 and the gate read the environment back for the
+    # first time. It reported environment-unprotected — gpu-spend exists
+    # and carries NO required reviewer — which independently confirms
+    # owner directive 2026-08-25 through the API rather than through the
+    # console UI failing to render the section. Unverifiable became
+    # verified; the gate is unchanged and still stops. Read-only.
     permissions:
       contents: read
       deployments: read
+      actions: read
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
