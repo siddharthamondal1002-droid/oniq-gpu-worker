@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size]
         default: discover
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
@@ -167,6 +167,31 @@ jobs:
           python-version: "3.11"
       - name: "What templates exist, and is there an API to make one?"
         run: python -m validation.template_probe "${{ inputs.template_id }}"
+
+  image_size:
+    name: "image size projection - read-only, $0"
+    if: inputs.mode == 'image-size'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "The runner's real disk, not the planning number"
+        run: |
+          df -B1 --output=source,size,avail,target / /mnt || true
+
+      - name: "Build the base stage - the one addend no registry can answer"
+        run: docker build --target base -t oniq-gpu-worker:size .
+
+      - name: "Project the media image from the Dockerfile's own parameters"
+        run: |
+          BASE=$(docker image inspect oniq-gpu-worker:size --format '{{.Size}}')
+          echo "base stage measured at ${BASE} bytes"
+          python -m validation.image_size "${BASE}"
 
   queue_probe:
     name: "queue probe - read-only, $0"

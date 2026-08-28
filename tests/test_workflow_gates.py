@@ -362,6 +362,10 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         "queue-probe",
         "stale-cancel",
         "template-probe",
+        # image-size joined 2026-08-28 with the owner's route-2 directive:
+        # it builds only the base stage and reads file sizes from the model
+        # registry, so it spends nothing and can mutate nothing.
+        "image-size",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

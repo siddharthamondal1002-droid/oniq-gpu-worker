@@ -16,13 +16,24 @@
 # - exec-form CMD only — no shell surface.
 #
 # Two stages, one security boundary:
-# - `base` is the complete worker (code + deps). CI builds THIS stage
-#   only (--target base): GitHub runners must never download the model.
+# - `base` is the complete worker (code + deps). worker-ci builds THIS
+#   stage on every push, because it is small enough to build per commit.
 # - `media` bakes the LTX-Video weights on top at BUILD time, so a job
 #   never fetches a model over the network (videogen loads with
 #   local_files_only). Which model ships is a server decision made here,
 #   recorded in /app/models/MODEL_ID, with a size guard so a 13B-class
 #   checkpoint can never slip in under a 2B name.
+#
+# OWNER DIRECTIVE 2026-08-28: the media image is built in CI and pushed to
+# a container registry, and the RunPod template names the pushed image.
+# This replaces the earlier rule that GitHub runners must never download
+# the model. That rule was written when RunPod's own builder held the only
+# copy of the image — and deleting the worker destroyed it. RunPod's API
+# cannot build from a repository (POST /templates requires an imageName
+# and accepts no repo field, measured 2026-08-28), so an image that
+# already exists somewhere is now a precondition for the endpoint working
+# at all. The media build runs ON DEMAND, never on every push: it is far
+# too large to build per commit.
 #
 # torch installs from the cu121 index. That host is unreachable from some
 # dev containers; RunPod's builder and GitHub's runners are normal hosts.
