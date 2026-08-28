@@ -34,7 +34,10 @@ def _tree(tmp_path, ltx_id=GOOD_LTX, story="Qwen/Qwen3-8B-AWQ", revision=SHA,
     (root / "ltx" / "transformer" / "w.safetensors").write_bytes(b"x" * ltx_bytes)
     (root / "story" / "config.json").write_text(json.dumps({"model_type": model_type}))
     (root / "story" / "w.safetensors").write_bytes(b"x" * story_bytes)
-    (root / "ltx" / "LICENSE.md").write_text("LTX Open Weights Licence")
+    # The REAL filename this publisher uses, measured on run 55. A
+    # fixture called LICENSE.md would have kept passing while the build
+    # failed, which is exactly what happened.
+    (root / "ltx" / "LTX-Video-Open-Weights-License-0.X.txt").write_text("terms")
     (root / "piper" / "en-us-ryan-high.onnx").write_bytes(b"onnx")
     (root / "piper" / "en-us-ryan-high.onnx.json").write_text("{}")
 
@@ -108,7 +111,7 @@ def test_weights_without_their_licence_text_fail(tmp_path):
     """An image that redistributes the model without its terms beside it
     is the compliance failure the LICENSE*/NOTICE* patterns exist for."""
     root = _tree(tmp_path)
-    os.remove(os.path.join(root, "ltx", "LICENSE.md"))
+    os.remove(os.path.join(root, "ltx", "LTX-Video-Open-Weights-License-0.X.txt"))
     with pytest.raises(baked_assets.ProofFailed) as exc:
         _check(root)
     assert "without its terms" in str(exc.value)

@@ -87,9 +87,13 @@ def check(report=print, root=ROOT):
     report(f"PROOF ltx licence: {licence} (LTX Open Weights, accepted 2026-08-28)")
 
     # The terms must be IN the image, not merely named by it.
+    # Matched on CONTENT of the name, not its prefix: this publisher's
+    # terms ship as LTX-Video-Open-Weights-License-0.X.txt, which no
+    # LICENSE* glob will ever catch (measured, run 55).
     licence_files = sorted(
         name for name in os.listdir(at("ltx"))
-        if name.upper().startswith(("LICENSE", "NOTICE"))
+        if "LICENSE" in name.upper() or "LICENCE" in name.upper()
+        or name.upper().startswith("NOTICE")
     )
     if not licence_files:
         raise ProofFailed(

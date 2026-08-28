@@ -272,7 +272,17 @@ for repo, tag in CANDIDATES:
             token=TOKEN,
             local_dir=DEST,
             allow_patterns=(
-                ["model_index.json", "LICENSE*", "NOTICE*"]
+                # MEASURED 2026-08-28 (run 55): this repository's terms are
+                # NOT in a file called LICENSE. They ship as
+                # LTX-Video-Open-Weights-License-0.X.txt, plus a
+                # per-checkpoint ltx-video-2b-v0.9.N.license.txt. Run 8's
+                # build downloaded everything and then refused, because
+                # "LICENSE*" anchors at the start of the name and these
+                # start with "LTX-" and "ltx-". The gate was right; the
+                # glob was wrong. These are kilobytes, so nothing about
+                # the image size changes.
+                ["model_index.json", "LICENSE*", "NOTICE*",
+                 "*icense*.txt", "*icence*.txt"]
                 + [c + "/*" for c in COMPONENTS]
             ),
         )
@@ -305,7 +315,8 @@ for repo, tag in CANDIDATES:
         # rather than by a human noticing later.
         licence_files = sorted(
             name for name in os.listdir(DEST)
-            if name.upper().startswith(("LICENSE", "NOTICE"))
+            if "LICENSE" in name.upper() or "LICENCE" in name.upper()
+            or name.upper().startswith("NOTICE")
         )
         if not licence_files:
             raise RuntimeError(
