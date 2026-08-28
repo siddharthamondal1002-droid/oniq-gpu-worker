@@ -154,13 +154,15 @@ jobs:
     if: inputs.mode == 'advisory'
     runs-on: ubuntu-latest
     environment: gpu-spend
-    # MEASURED 2026-08-28: deployments:read alone answers 403 here
-    # (runs 26-40), so the hint that named it was wrong. GitHub's docs
-    # put the environments endpoint behind the Actions permission, and
-    # the spend job — which already carries actions:read — is the only
-    # job that ever read this API. Granting it here tests that directly;
-    # the run's X-Accepted-GitHub-Permissions header is the proof, and
-    # the gate itself is unchanged either way. Read-only.
+    # MEASURED 2026-08-28: the environments API wants actions:read, not
+    # deployments:read. deployments:read alone answered 403 on runs
+    # 26-40 while the hint kept blaming it; adding actions:read on run
+    # 41 returned 200 and the gate read the environment back for the
+    # first time. It reported environment-unprotected — gpu-spend exists
+    # and carries NO required reviewer — which independently confirms
+    # owner directive 2026-08-25 through the API rather than through the
+    # console UI failing to render the section. Unverifiable became
+    # verified; the gate is unchanged and still stops. Read-only.
     permissions:
       contents: read
       deployments: read
