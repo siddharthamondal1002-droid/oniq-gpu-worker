@@ -361,6 +361,7 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         "advisory",
         "queue-probe",
         "stale-cancel",
+        "template-probe",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

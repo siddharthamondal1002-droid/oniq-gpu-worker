@@ -268,6 +268,75 @@ def template_env_names_graphql(template_id: str):
         return None
 
 
+def list_templates_graphql():
+    """Every template on the account: id, name, image. NAMES ONLY.
+
+    Deliberately does NOT select `env`. The existing
+    template_env_names_graphql asks for env because it must report which
+    KEYS are set, and it strips the values on the way out — but a listing
+    has no reason to pull secret values across the wire at all, so it does
+    not ask for them. The narrower query is the safer one.
+
+    Returns a list, or None when the answer is unknown — never [] for
+    "could not look", which would read as "the account has no templates".
+    """
+    query = "query { myself { podTemplates { id name imageName } } }"
+    try:
+        status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+        if status != 200:
+            return None
+        doc = json.loads(raw)
+        templates = ((doc.get("data") or {}).get("myself") or {}).get("podTemplates")
+        if not isinstance(templates, list):
+            return None
+        return [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "imageName": t.get("imageName"),
+            }
+            for t in templates
+            if isinstance(t, dict)
+        ]
+    except (RunPodApiError, json.JSONDecodeError):
+        return None
+
+
+def rest_template_surface():
+    """Does the REST API expose a way to CREATE a template and ATTACH it?
+
+    Read-only: this reads the public OpenAPI document and reports which
+    template paths and verbs exist. Asking the spec is cheaper and safer
+    than probing with a real POST, and it is the same technique
+    rest_schema_probe used to settle the standby question — where the
+    answer turned out to be that the field simply is not in the schema.
+    """
+    for url in (f"{REST_BASE}/openapi.json", "https://rest.runpod.io/openapi.json"):
+        try:
+            status, raw = _request(url, bearer=False)
+        except RunPodApiError:
+            continue
+        if status != 200 or not raw.lstrip().startswith("{"):
+            continue
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        paths = doc.get("paths") or {}
+        found = {}
+        for path, spec in paths.items():
+            if "template" in path.lower():
+                found[path] = sorted(
+                    v.upper() for v in spec if v.lower() in
+                    ("get", "post", "patch", "put", "delete")
+                )
+        endpoint_patch = sorted(
+            (paths.get("/endpoints/{endpointId}") or {}).keys()
+        )
+        return {"template_paths": found, "endpoint_verbs": endpoint_patch}
+    return None
+
+
 def standby_schema_probe():
     """Read-only GraphQL introspection: which mutations exist, and which
     fields EndpointInput really carries. Run #36 proved workersStandby is
