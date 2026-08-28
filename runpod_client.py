@@ -339,7 +339,13 @@ def rest_schema_probe():
         return {
             "spec_url": url,
             "patch_endpoint_properties": patch_props,
-            "standby_shaped_keys": sorted(
+            # NOT "…_keys": the spend_run redactor blanks any key whose
+            # name CONTAINS "KEY", so a field called standby_shaped_keys
+            # printed as "<redacted>" — hiding the one answer this probe
+            # exists to give (measured 2026-08-27, run #32). The redactor
+            # is right to over-redact; the diagnostic is what must be
+            # named so it cannot collide.
+            "standby_shaped_names": sorted(
                 set(_re.findall(r'"(\w*[Ss]tandby\w*)"', raw))
             ),
         }

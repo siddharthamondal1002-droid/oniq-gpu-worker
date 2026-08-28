@@ -311,4 +311,56 @@ def test_rest_schema_probe_reduces_the_openapi_spec(monkeypatch):
     monkeypatch.setattr(rp, "_request", transport)
     probe = rp.rest_schema_probe()
     assert probe["patch_endpoint_properties"] == ["idleTimeout", "workersMax", "workersMin"]
-    assert probe["standby_shaped_keys"] == ["workersStandby"]
+    assert probe["standby_shaped_names"] == ["workersStandby"]
+
+
+def test_no_probe_field_name_is_swallowed_by_the_redactor():
+    """The diagnostics must survive being printed.
+
+    spend_run.redact blanks any key whose name CONTAINS a secret marker,
+    and "KEY" is one of them. That is the right direction to err in — but
+    it silently ate rest_schema_probe's "standby_shaped_keys" on run #32,
+    which was the single field that answers whether workersStandby is
+    settable at all. Three cycles were spent on that question while its
+    answer was being printed as "<redacted>".
+
+    So the probes' own field names are checked against the markers here.
+    A future diagnostic named "…_key…" fails this test instead of
+    disappearing at the moment someone needs to read it.
+    """
+    from validation.spend_run import _REDACT_MARKERS, redact
+
+    # Every field name either probe can return, with a recognisable value.
+    probe_fields = {
+        "endpoint_input_fields": ["workersMax"],
+        "standby_shaped_mutations": [],
+        "endpoint_shaped_mutations": ["saveEndpoint"],
+        "worker_shaped_mutations": [],
+        "spec_url": "https://rest.runpod.io/openapi.json",
+        "patch_endpoint_properties": ["gpuTypeIds"],
+        "standby_shaped_names": ["workersStandby"],
+    }
+
+    swallowed = [
+        name
+        for name in probe_fields
+        if any(marker in name.upper() for marker in _REDACT_MARKERS)
+    ]
+    assert not swallowed, (
+        f"{swallowed} collide with a redaction marker and would print as "
+        "'<redacted>' — rename the field, do not weaken the redactor"
+    )
+
+    # And prove it end to end: nothing is blanked on the way out.
+    assert redact(probe_fields) == probe_fields
+
+
+def test_the_redactor_still_hides_real_secrets():
+    """Guards the guard above: the fix must not have relaxed redaction."""
+    from validation.spend_run import redact
+
+    assert redact({"RUNPOD_API_KEY": "live"})["RUNPOD_API_KEY"] == "<redacted>"
+    assert redact({"R2_ACCESS_KEY_ID": "live"})["R2_ACCESS_KEY_ID"] == "<redacted>"
+    assert redact({"R2_SECRET_ACCESS_KEY": "x"})["R2_SECRET_ACCESS_KEY"] == "<redacted>"
+    pair = redact({"key": "RUNPOD_API_KEY", "value": "live"})
+    assert pair["value"] == "<redacted>"
