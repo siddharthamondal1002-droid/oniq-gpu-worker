@@ -12,6 +12,7 @@ their values.
 from __future__ import annotations
 
 import os
+import re
 
 import contract
 
@@ -41,8 +42,27 @@ class StorageError(Exception):
         self.message = message
 
 
+# RunPod substitutes {{ RUNPOD_SECRET_<name> }} in a template's env at
+# start-up. When the substitution does NOT happen - the secret was renamed,
+# deleted, or serverless resolves references differently from pods - the
+# container receives the reference TEXT. That text is a non-empty string,
+# so a plain truthiness check calls it configured, the job is admitted, the
+# GPU is paid for, and the upload fails at the very end against an endpoint
+# URL of "{{ RUNPOD_SECRET_... }}". Owner directive 2026-08-28 put these
+# variables in by reference, which is what makes this reachable.
+UNRESOLVED = re.compile(r"\{\{.*\}\}", re.DOTALL)
+
+
+def is_configured(value) -> bool:
+    """A value the worker can actually use: present, and not a reference
+    that nobody expanded."""
+    if not value or not value.strip():
+        return False
+    return not UNRESOLVED.search(value)
+
+
 def missing_vars():
-    return [name for name in REQUIRED_VARS if not os.environ.get(name)]
+    return [name for name in REQUIRED_VARS if not is_configured(os.environ.get(name))]
 
 
 def require_configured() -> None:

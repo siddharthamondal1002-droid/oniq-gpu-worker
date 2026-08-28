@@ -371,6 +371,13 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # naming an already-published image, ONE endpoint repointed. It
         # sends templateId alone, so no spend bound can move.
         "template-attach",
+        # template-env joined 2026-08-28 too, and is the third job-level
+        # mutation: it writes the env field of ONE template with RunPod
+        # secret REFERENCES, never a credential, and sends env alone so
+        # the image cannot move underneath the endpoint. This list stays
+        # pinned so a new mutation is a deliberate act rather than
+        # something that arrives inside a diff.
+        "template-env",
         # ltx-discover joined 2026-08-28 after run 7 measured that the
         # Dockerfile names a checkpoint which does not exist. Read-only,
         # and it picks nothing.

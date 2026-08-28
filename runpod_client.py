@@ -633,6 +633,28 @@ def attach_template(endpoint_id: str, template_id: str):
     return raw, json.loads(raw) if raw.strip().startswith("{") else {}
 
 
+def set_template_env(template_id: str, env: dict):
+    """Set a template's env. `env` is the ONLY field sent.
+
+    The same discipline as attach_template: PATCH /templates/{id} also
+    accepts imageName, containerDiskInGb, name and dockerStartCmd, and
+    sending any of them - even at what is believed to be the current
+    value - would let a stale read silently rewrite the image this
+    endpoint runs. One field goes in the body. Callers must re-read.
+
+    Values here are RunPod secret REFERENCES, not credentials, and are
+    never logged by this function or its callers.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/templates/{template_id}",
+        method="PATCH",
+        body={"env": env},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /templates/{template_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
+
+
 def main(argv) -> int:
     if len(argv) >= 2 and argv[1] == "discover":
         out = None

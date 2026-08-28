@@ -37,7 +37,7 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, ltx-discover]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-env, ltx-discover]
         default: discover
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
@@ -75,6 +75,14 @@ on:
         default: ""
       attach_token:
         description: "Type ATTACH-TEMPLATE (exactly) to allow template-attach. Creates ONE template and repoints ONE endpoint."
+        type: string
+        default: ""
+      secret_names:
+        description: "template-env: the RunPod SECRET NAMES backing the three storage variables, comma-separated, in storage.REQUIRED_VARS order (endpoint, access key id, secret access key). Names only - never a value. Blank refuses, because a guessed name expands to nothing and looks like success. The variable names themselves are deliberately not spelled in this file: gate 6 forbids them here so they can never be wired to a GitHub secret."
+        type: string
+        default: ""
+      env_token:
+        description: "Type SET-TEMPLATE-ENV (exactly) to allow template-env. Writes the env field of ONE template, by reference."
         type: string
         default: ""
       test_input_key:
@@ -225,6 +233,33 @@ jobs:
           python-version: "3.11"
       - name: "Create the template, attach it, re-read the endpoint"
         run: python -m validation.template_attach "${{ inputs.endpoint_id }}" "${{ inputs.image_ref }}" "${{ inputs.attach_token }}"
+
+  template_env:
+    # Puts the three storage variables on the template BY REFERENCE, so
+    # the worker can write its output. Owner directive 2026-08-28: the
+    # values stay in RunPod's secret store; what is written here is
+    # `{{ RUNPOD_SECRET_<name> }}`, which carries no credential. No R2
+    # value enters this repository, a GitHub secret, or a log line.
+    #
+    # Sends the env field and nothing else, so the image the proofs ran
+    # against cannot move underneath the endpoint. Refuses foreign env
+    # rather than clobbering it, and verifies over BOTH the REST and
+    # GraphQL views. Costs nothing: no pod starts.
+    name: "template env - ONE template, by reference, $0"
+    if: inputs.mode == 'template-env' && inputs.env_token == 'SET-TEMPLATE-ENV'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Set the storage variables by reference, then re-read both views"
+        run: python -m validation.template_env "${{ inputs.template_id }}" "${{ inputs.secret_names }}" "${{ inputs.env_token }}"
 
   ltx_discover:
     # Which LTX checkpoints actually EXIST, measured with the credential.

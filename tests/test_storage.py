@@ -241,3 +241,47 @@ def test_operations_fail_closed_when_unconfigured(tmp_path):
         storage.download("k", str(tmp_path / "f"), 100)
     with pytest.raises(storage.StorageNotConfigured):
         storage.upload(__file__, "k")
+
+
+# ------------------------ an unexpanded secret reference is not a value
+
+def test_an_unexpanded_runpod_reference_is_not_configured(monkeypatch):
+    """Owner directive 2026-08-28 put these in by REFERENCE. If RunPod
+    does not expand one, the container gets the reference text - a
+    non-empty string that a truthiness check calls configured. The job
+    would then be admitted, billed, and fail at the upload."""
+    for name in storage.REQUIRED_VARS:
+        monkeypatch.setenv(name, "value")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "{{ RUNPOD_SECRET_R2_ACCESS_KEY_ID }}")
+    assert storage.missing_vars() == ["R2_ACCESS_KEY_ID"]
+
+
+def test_a_real_value_is_still_configured(monkeypatch):
+    for name in storage.REQUIRED_VARS:
+        monkeypatch.setenv(name, "https://example.r2.cloudflarestorage.com")
+    assert storage.missing_vars() == []
+
+
+def test_whitespace_is_not_a_value(monkeypatch):
+    for name in storage.REQUIRED_VARS:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("R2_S3_ENDPOINT", "   ")
+    assert storage.missing_vars() == ["R2_S3_ENDPOINT"]
+
+
+def test_require_configured_raises_for_an_unexpanded_reference(monkeypatch):
+    for name in storage.REQUIRED_VARS:
+        monkeypatch.setenv(name, "{{ RUNPOD_SECRET_x }}")
+    with pytest.raises(storage.StorageNotConfigured) as exc:
+        storage.require_configured()
+    assert set(exc.value.missing) == set(storage.REQUIRED_VARS)
+
+
+def test_a_value_that_merely_contains_braces_elsewhere_is_still_rejected(monkeypatch):
+    """Conservative on purpose: a credential does not contain {{ }}, and
+    refusing costs a job that fails closed rather than one that is paid
+    for and then fails."""
+    for name in storage.REQUIRED_VARS:
+        monkeypatch.setenv(name, "x")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "prefix{{ RUNPOD_SECRET_y }}suffix")
+    assert storage.missing_vars() == ["R2_SECRET_ACCESS_KEY"]
