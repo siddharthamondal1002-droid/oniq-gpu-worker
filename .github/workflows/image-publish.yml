@@ -197,14 +197,26 @@ jobs:
           awk -v b="${AVAIL}" 'BEGIN{printf "FREE AFTER RECLAIM: %.2f GiB\n", b/1073741824}'
           docker info --format 'docker data root: {{.DockerRootDir}}'
           # A build that dies at 90% costs 40 minutes and produces nothing.
-          # 30 GiB is not a promise the image fits — it is the floor below
-          # which it certainly does not. Shell arithmetic, not a heredoc: a
-          # heredoc terminator indented inside a YAML block scalar never
-          # closes, because <<- strips tabs and not spaces.
-          FLOOR=$((30 * 1024 * 1024 * 1024))
+          # MEASURED, validation run 54, for the pinned model:
+          #   base stage        7.79 GiB
+          #   Lightricks/LTX-Video @ 8984fa25   26.47 GiB
+          #   Qwen/Qwen3-8B-AWQ                  5.69 GiB
+          #   piper                              0.10 GiB
+          #   projected image (FLOOR)           40.05 GiB
+          # The floor is that projection, not a round number: below it the
+          # build certainly cannot finish, and starting one anyway wastes
+          # the runner's time to learn what a $0 read already knew. It is
+          # not a promise the build fits — the peak also holds the layer
+          # cache — so clearing it is necessary, not sufficient.
+          # Shell arithmetic, not a heredoc: a heredoc terminator indented
+          # inside a YAML block scalar never closes, since <<- strips tabs
+          # and not spaces.
+          FLOOR=43002000000
           if [ "${AVAIL}" -lt "${FLOOR}" ]; then
             echo "BLOCKED: only ${AVAIL} bytes free, below the ${FLOOR} byte floor."
-            echo "Reclaim more, or build on a runner with a bigger disk."
+            awk -v a="${AVAIL}" -v f="${FLOOR}" 'BEGIN{printf "  free %.2f GiB, need %.2f GiB, short by %.2f GiB\n", a/1073741824, f/1073741824, (f-a)/1073741824}'
+            echo "The reclaim above is the only lever on a hosted runner."
+            echo "This needs a larger runner, or a smaller image."
             exit 1
           fi
           echo "disk floor cleared"
