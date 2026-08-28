@@ -48,6 +48,17 @@ jobs:
     if: inputs.publish == 'PUBLISH-MEDIA-IMAGE'
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # MEASURED 2026-08-28 (run 4): HF_TOKEN interpolated EMPTY on a job with
+    # no environment declared. This repository's other credential,
+    # RUNPOD_API_KEY, is a gpu-spend ENVIRONMENT secret, and gpu-validation
+    # run #7 failed the same way for the same reason — a job that references
+    # an environment secret without declaring the environment reads an empty
+    # string rather than erroring. Declaring it here costs nothing and gates
+    # nothing: owner directive 2026-08-25, confirmed through the API on run
+    # 41, records that gpu-spend carries no required reviewers on this plan.
+    # A REPOSITORY secret resolves with or without this line; an ENVIRONMENT
+    # secret resolves only with it. Declaring it covers both.
+    environment: gpu-spend
     env:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
@@ -61,19 +72,48 @@ jobs:
 
       - name: "The credential is present (owner action if not)"
         env:
+          # NAMES only, never values. GitHub cannot be asked to list its
+          # secrets, but an unset one interpolates to the empty string — so
+          # naming the plausible spellings turns "absent" into "absent under
+          # THIS name, present under THAT one", which is a diagnosis instead
+          # of another round trip. None of these is accepted as a substitute
+          # for HF_TOKEN; they are reported so the owner can rename one.
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ALT_HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          ALT_HUGGING_FACE_TOKEN: ${{ secrets.HUGGING_FACE_TOKEN }}
+          ALT_HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          ALT_HUGGINGFACE_HUB_TOKEN: ${{ secrets.HUGGINGFACE_HUB_TOKEN }}
+          ALT_HF_ACCESS_TOKEN: ${{ secrets.HF_ACCESS_TOKEN }}
+          ALT_HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
-          # NAME only, never the value. The chosen LTX checkpoint is gated,
-          # so an absent token means the build cannot start — and must not
-          # start, because the only thing it could do instead is bake a
-          # model nobody chose.
-          if [ -z "${HF_TOKEN}" ]; then
-            echo "BLOCKED: repository secret HF_TOKEN is not set."
-            echo "The chosen checkpoint is gated (HTTP 401 measured 2026-08-28)."
-            echo "No substitute will be built. Owner action required."
-            exit 1
+          if [ -n "${HF_TOKEN}" ]; then
+            echo "HF_TOKEN is present (name only)"
+            exit 0
           fi
-          echo "HF_TOKEN is present (name only)"
+          echo "BLOCKED: HF_TOKEN resolved empty in this job."
+          echo "This job declares environment: gpu-spend, so both repository"
+          echo "and gpu-spend environment secrets would resolve here."
+          echo ""
+          echo "Other spellings, presence only:"
+          for name in ALT_HUGGINGFACE_TOKEN ALT_HUGGING_FACE_TOKEN \
+                      ALT_HF_API_TOKEN ALT_HUGGINGFACE_HUB_TOKEN \
+                      ALT_HF_ACCESS_TOKEN ALT_HF_READ_TOKEN; do
+            if [ -n "${!name}" ]; then
+              echo "  PRESENT: ${name#ALT_}"
+            else
+              echo "  absent:  ${name#ALT_}"
+            fi
+          done
+          echo ""
+          echo "If one above is PRESENT, the secret exists under that name —"
+          echo "rename it to HF_TOKEN, or say the word and the workflow will"
+          echo "read that name instead."
+          echo "If all are absent, check it was saved under Secrets and not"
+          echo "Variables, and on this repository or the gpu-spend environment."
+          echo ""
+          echo "The chosen checkpoint is gated (HTTP 401 measured 2026-08-28)."
+          echo "No substitute will be built. Owner action required."
+          exit 1
 
       - name: "The intended checkpoint answers, and IS the model that was chosen"
         env:
