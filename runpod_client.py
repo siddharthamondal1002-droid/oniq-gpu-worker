@@ -333,7 +333,35 @@ def rest_template_surface():
         endpoint_patch = sorted(
             (paths.get("/endpoints/{endpointId}") or {}).keys()
         )
-        return {"template_paths": found, "endpoint_verbs": endpoint_patch}
+
+        # WHAT CREATE ACTUALLY ACCEPTS. A path existing is not the same as a
+        # path that can do the job: if the create body only takes an
+        # imageName, then a template cannot be built from a repository here
+        # and no amount of POSTing will produce one.
+        def _props(node):
+            try:
+                schema = node["requestBody"]["content"]["application/json"]["schema"]
+            except (KeyError, TypeError):
+                return None
+            ref = schema.get("$ref") if isinstance(schema, dict) else None
+            if ref:
+                name = str(ref).rsplit("/", 1)[-1]
+                schema = ((doc.get("components") or {}).get("schemas") or {}).get(name)
+            if not isinstance(schema, dict):
+                return None
+            return {
+                "required": schema.get("required"),
+                "properties": sorted((schema.get("properties") or {}).keys()),
+            }
+
+        create = _props((paths.get("/templates") or {}).get("post") or {})
+        patch_ep = _props((paths.get("/endpoints/{endpointId}") or {}).get("patch") or {})
+        return {
+            "template_paths": found,
+            "endpoint_verbs": endpoint_patch,
+            "template_create_body": create,
+            "endpoint_patch_body": patch_ep,
+        }
     return None
 
 
