@@ -109,12 +109,28 @@ def _default_env_fetch(url: str, token: str):
         # The error body is the diagnosis (GitHub says WHY: missing token
         # permission vs. plan limitation) — losing it cost a debugging
         # round on 2026-08-25, the same way the Cloudflare 1010 body did.
+        #
+        # 2026-08-28: the body says "Resource not accessible by
+        # integration" and stops there. The HEADER says which permission
+        # would have worked, so keep it too — guessing the permission
+        # from the body is what cost this loop a cycle. The key name
+        # deliberately contains no redaction marker (KEY/SECRET/TOKEN/
+        # PASSWORD/CREDENTIAL/AUTHORIZATION); naming it *_key would have
+        # printed the answer as <redacted>, which already happened once.
+        accepted = ""
+        try:
+            accepted = exc.headers.get("X-Accepted-GitHub-Permissions") or ""
+        except Exception:
+            accepted = ""
         body = ""
         try:
             body = exc.read().decode("utf-8", errors="replace")
-            return exc.code, json.loads(body)
+            doc = json.loads(body)
         except Exception:
-            return exc.code, {"raw": body[:300]}
+            doc = {"raw": body[:300]}
+        if isinstance(doc, dict) and accepted:
+            doc["accepted_github_permissions"] = accepted
+        return exc.code, doc
     except Exception:
         return 0, {}
 
@@ -123,7 +139,16 @@ def check_environment_protection(fetch=_default_env_fetch) -> int:
     """The gpu-spend environment must exist AND carry a required-reviewer
     rule. Referencing a missing environment silently creates an
     UNPROTECTED one, so 'the job waited for approval' cannot be assumed —
-    it must be read back from the API. Returns the reviewer-rule count."""
+    it must be read back from the API. Returns the reviewer-rule count.
+
+    Note (2026-08-28): clearing a 403 here does NOT make this gate pass.
+    PASS requires a required_reviewers rule, and owner directive
+    2026-08-25 recorded that required reviewers are not offered on this
+    private repository's plan. A readable API therefore turns
+    environment-unverifiable into environment-unprotected — an honest
+    verified answer rather than a blind spot, which is the whole point,
+    but not a green light. The spend path does not come through here at
+    all: it uses check_run_approval with APPROVAL_MODE=owner-dispatch."""
     repo = os.environ.get("GITHUB_REPOSITORY")
     token = os.environ.get("GITHUB_TOKEN")
     if not repo or not token:
@@ -145,13 +170,25 @@ def check_environment_protection(fetch=_default_env_fetch) -> int:
         detail = ""
         if isinstance(doc, dict):
             detail = doc.get("message") or doc.get("raw") or ""
-        hint = (
-            " — 403 here means either the workflow token lacks "
-            "'deployments: read' permission, or environments are not "
-            "available on this repository's plan (private repo)"
-            if status == 403
-            else ""
-        )
+        accepted = ""
+        if isinstance(doc, dict):
+            accepted = doc.get("accepted_github_permissions") or ""
+        hint = ""
+        if status == 403:
+            # Until 2026-08-28 this hint named 'deployments: read' as the
+            # likely cause. The advisory job has granted exactly that
+            # since run 26 and still answers 403, so the guess was wrong
+            # and sent a whole loop after a permission already in place.
+            # GitHub answers the question itself in the response header;
+            # report what it said instead of guessing a second time.
+            hint = (
+                " — GitHub's X-Accepted-GitHub-Permissions header says: "
+                + (accepted or "<header absent>")
+                + ". 'deployments: read' is ALREADY granted on this job, so "
+                "it is not the cause. Grant exactly the permission named "
+                "above, read-only. An absent header means environments are "
+                "not readable on this repository's plan at all"
+            )
         raise SpendStop(
             "environment-unverifiable",
             f"environments API answered {status}"

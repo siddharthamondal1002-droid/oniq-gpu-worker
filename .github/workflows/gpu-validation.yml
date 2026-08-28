@@ -154,9 +154,17 @@ jobs:
     if: inputs.mode == 'advisory'
     runs-on: ubuntu-latest
     environment: gpu-spend
+    # MEASURED 2026-08-28: deployments:read alone answers 403 here
+    # (runs 26-40), so the hint that named it was wrong. GitHub's docs
+    # put the environments endpoint behind the Actions permission, and
+    # the spend job — which already carries actions:read — is the only
+    # job that ever read this API. Granting it here tests that directly;
+    # the run's X-Accepted-GitHub-Permissions header is the proof, and
+    # the gate itself is unchanged either way. Read-only.
     permissions:
       contents: read
       deployments: read
+      actions: read
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}

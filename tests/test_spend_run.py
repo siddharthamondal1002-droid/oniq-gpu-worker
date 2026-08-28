@@ -184,7 +184,61 @@ def test_environment_unverifiable_carries_the_servers_own_words():
             lambda u, t: (403, {"message": "Resource not accessible by integration"})
         )
     assert "Resource not accessible by integration" in exc.value.message
-    assert "deployments: read" in exc.value.message
+
+
+def test_the_403_hint_no_longer_blames_a_permission_that_is_granted():
+    # The old hint guessed "the workflow token lacks 'deployments: read'".
+    # The advisory job has granted it since run 26 and still 403s, so the
+    # guess was false and cost a loop. The message must say so rather
+    # than repeat it.
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_environment_protection(
+            lambda u, t: (403, {"message": "Resource not accessible by integration"})
+        )
+    assert "is not the cause" in exc.value.message
+    assert "ALREADY granted" in exc.value.message
+
+
+def test_the_403_reports_the_permission_github_itself_named():
+    # GitHub answers "which permission?" in X-Accepted-GitHub-Permissions.
+    # Guessing it from the body is what went wrong; surface the header.
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_environment_protection(
+            lambda u, t: (
+                403,
+                {
+                    "message": "Resource not accessible by integration",
+                    "accepted_github_permissions": "actions=read",
+                },
+            )
+        )
+    assert "actions=read" in exc.value.message
+    assert exc.value.code == "environment-unverifiable"
+
+
+def test_a_missing_accepted_permissions_header_is_named_not_faked():
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_environment_protection(
+            lambda u, t: (403, {"message": "nope"})
+        )
+    assert "<header absent>" in exc.value.message
+
+
+def test_the_accepted_permissions_key_survives_the_redactor():
+    # standby_shaped_keys was eaten by _REDACT_MARKERS because it
+    # contained "KEY", and three cycles went to a question whose answer
+    # printed as <redacted>. This diagnostic must not repeat that.
+    shown = spend_run.redact({"accepted_github_permissions": "actions=read"})
+    assert shown["accepted_github_permissions"] == "actions=read"
+
+
+def test_clearing_the_403_still_cannot_pass_without_a_reviewer_rule():
+    # The point of the permission fix is unverifiable -> verified, NOT
+    # unverifiable -> pass. A readable API with no required_reviewers
+    # rule must still stop.
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.check_environment_protection(lambda u, t: (200, {"protection_rules": []}))
+    assert exc.value.code == "environment-unprotected"
 
 
 def test_run_approval_passes_on_a_recorded_approval():
