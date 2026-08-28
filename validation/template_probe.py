@@ -14,6 +14,39 @@ from __future__ import annotations
 
 import json
 
+import storage
+
+
+def _report_storage(client, template_id: str):
+    """Which storage variables are set on the template. NAMES ONLY.
+
+    A RunPod serverless worker reads its environment from its TEMPLATE, so
+    "the secrets are added" is a claim about this object and nowhere else -
+    not about the endpoint, and certainly not about a GitHub secret. Checked
+    here because a job that cannot write its output should never have been
+    started, and because the owner is entitled to see the claim verified
+    rather than assumed.
+
+    Unreadable is UNKNOWN, never "ready". Returns True, False or None.
+    """
+    names = client.template_env_names_graphql(template_id)
+    if names is None:
+        print("ENV: unreadable - the answer is UNKNOWN, not 'nothing is set'")
+        return None
+    print(
+        f"ENV ON {template_id}: {len(names)} set - "
+        f"{', '.join(sorted(names)) or '(none)'}  (names only, never values)"
+    )
+    absent = [name for name in storage.REQUIRED_VARS if name not in names]
+    if absent:
+        print(
+            f"STORAGE NOT READY: {', '.join(absent)} not set - every job would "
+            "fail closed with storage-not-configured"
+        )
+        return False
+    print("STORAGE READY: every variable storage.py requires is set on the template")
+    return True
+
 
 def report(client, expected_template_id: str) -> tuple:
     # A blank id would make the membership test trivially true and print
@@ -26,6 +59,7 @@ def report(client, expected_template_id: str) -> tuple:
         print("NO TEMPLATE ID GIVEN: nothing to look for, so nothing is proven")
         return 2, {"templates": None, "surface": None}
 
+    storage_state = "unchecked"
     templates = client.list_templates_graphql()
     if templates is None:
         print("TEMPLATES: unreadable — the answer is UNKNOWN, not 'none exist'")
@@ -36,6 +70,7 @@ def report(client, expected_template_id: str) -> tuple:
         ids = {t.get("id") for t in templates}
         if expected_template_id in ids:
             print(f"FOUND: {expected_template_id} exists after all")
+            storage_state = _report_storage(client, expected_template_id)
         else:
             print(
                 f"MISSING: {expected_template_id} is NOT among them — the endpoint's "
@@ -70,13 +105,17 @@ def report(client, expected_template_id: str) -> tuple:
             )
         build_like = surface.get("build_like_paths")
         print(f"BUILD-LIKE PATHS ANYWHERE IN THE API: {build_like}")
+    facts = {"templates": templates, "surface": surface, "storage": storage_state}
     if not surface or not surface.get("template_paths"):
         print(
             "NO TEMPLATE API: the spec exposes no template path, so creating one "
             "is a console action. Saying so beats probing with a real POST."
         )
-        return 1, {"templates": templates, "surface": surface}
-    return 0, {"templates": templates, "surface": surface}
+        return 1, facts
+    if storage_state in (False, None):
+        print("NOT LAUNCH READY: the storage variables above are not confirmed set")
+        return 1, facts
+    return 0, facts
 
 
 def main(argv) -> int:

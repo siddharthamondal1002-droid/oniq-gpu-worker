@@ -12,9 +12,10 @@ from validation import template_probe as tp
 class Client:
     """Records every call, so a mutation shows up as a failed assertion."""
 
-    def __init__(self, templates, surface):
+    def __init__(self, templates, surface, env=None):
         self._templates = templates
         self._surface = surface
+        self._env = env
         self.calls = []
 
     def list_templates_graphql(self):
@@ -24,6 +25,10 @@ class Client:
     def rest_template_surface(self):
         self.calls.append("rest_template_surface")
         return self._surface
+
+    def template_env_names_graphql(self, template_id):
+        self.calls.append("template_env_names_graphql")
+        return self._env
 
     def __getattr__(self, name):
         raise AssertionError(f"the probe must not call {name!r}")
@@ -104,3 +109,74 @@ def test_whitespace_is_not_an_id_either(capsys):
     code, _ = tp.report(Client([], IMAGE_ONLY), "   ")
     assert code == 2
     assert "NO TEMPLATE ID GIVEN" in capsys.readouterr().out
+
+
+# ------------------------------------------- the storage variables
+
+R2 = {"R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"}
+HERE = [{"id": "aqa3wkdf8g", "name": "oniq-gpu-worker", "imageName": "x@sha256:1"}]
+
+
+def test_every_required_variable_set_reads_as_ready(capsys):
+    code, facts = tp.report(Client(HERE, IMAGE_ONLY, env=R2 | {"PYTHONUNBUFFERED"}), "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "STORAGE READY" in out
+    assert code == 0
+    assert facts["storage"] is True
+
+
+def test_one_absent_variable_names_it_and_fails_the_probe(capsys):
+    code, facts = tp.report(Client(HERE, IMAGE_ONLY, env=R2 - {"R2_SECRET_ACCESS_KEY"}), "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "STORAGE NOT READY" in out
+    assert "R2_SECRET_ACCESS_KEY" in out
+    assert "NOT LAUNCH READY" in out
+    assert code == 1
+    assert facts["storage"] is False
+
+
+def test_an_unreadable_env_is_UNKNOWN_and_never_becomes_ready(capsys):
+    """The standing rule: UNKNOWN is never converted into success. A job
+    started against an unverified template is the one that fails after it
+    has already been paid for."""
+    code, facts = tp.report(Client(HERE, IMAGE_ONLY, env=None), "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    assert "UNKNOWN" in out
+    assert "STORAGE READY" not in out
+    assert code == 1
+    assert facts["storage"] is None
+
+
+def test_the_env_is_read_by_the_names_only_query(capsys):
+    """runpod_client has two template readers; only one of them asks the
+    API for values, and it strips them. The probe must use that one."""
+    client = Client(HERE, IMAGE_ONLY, env=R2)
+    tp.report(client, "aqa3wkdf8g")
+    assert "template_env_names_graphql" in client.calls
+
+
+def test_a_template_that_is_not_there_is_not_asked_for_its_env(capsys):
+    """No point querying the environment of something that does not exist,
+    and no reason to pull secret material for a question nobody asked."""
+    client = Client([{"id": "other", "name": "stock", "imageName": "x"}], IMAGE_ONLY)
+    code, facts = tp.report(client, "aqa3wkdf8g")
+    assert "template_env_names_graphql" not in client.calls
+    assert facts["storage"] == "unchecked"
+
+
+def test_the_probe_still_only_reads_when_it_checks_storage():
+    client = Client(HERE, IMAGE_ONLY, env=R2)
+    tp.report(client, "aqa3wkdf8g")
+    assert client.calls == [
+        "list_templates_graphql",
+        "template_env_names_graphql",
+        "rest_template_surface",
+    ]
+
+
+def test_the_required_names_come_from_storage_not_a_copy():
+    """A second hand-written list would drift from the one the worker
+    actually enforces at runtime."""
+    import storage
+
+    assert set(storage.REQUIRED_VARS) == R2
