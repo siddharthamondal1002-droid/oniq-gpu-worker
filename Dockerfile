@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # ONIQ GPU worker image.
 #
 # Structure is the security posture:
@@ -8,7 +9,16 @@
 #   own first-party import closure and fails if any module in it is
 #   missing from either lock. storygen.py reached CI missing from both
 #   (2026-08-27) and the image died on `import storygen` at start-up;
-# - no ARG anywhere, so no build argument can bake a secret into a layer;
+# - no ARG and no ENV credential anywhere, so no build argument can bake a
+#   secret into a layer. The ONE credential this build needs — a read-only
+#   Hugging Face token, for the gated LTX checkpoint — arrives through a
+#   BUILDKIT SECRET MOUNT instead (owner directive 2026-08-28, option 1).
+#   That is a different mechanism, not a loophole: --mount=type=secret
+#   exposes the value on a tmpfs for the duration of ONE RUN, and it is
+#   written to no layer, recorded in no image history entry, and present
+#   in no image config. ARG and ENV are both permanently readable off the
+#   published image with `docker history` / `docker inspect`; this is not.
+#   The token is used to DOWNLOAD weights and never survives beside them;
 # - each stage builds as root and executes as oniq (uid/gid 10001):
 #   /app, site-packages and the baked model weights end up root-owned
 #   and merely readable, so a compromised job cannot rewrite the code —
@@ -75,21 +85,21 @@ FROM base AS media
 
 USER root
 
-# Bake the model. Candidates are tried in order — distilled 2B first per
-# the owner's model decision — and each is REJECTED FROM METADATA before
-# a byte is downloaded: the HF API lists every file with its size, so a
-# transformer over 16GiB (a 13B-class checkpoint wearing a 2B name), a
-# missing model_index.json, or a missing component skips the candidate
-# at $0 network cost. Only a surveyed candidate is downloaded, and only
-# its pipeline components (the repos also carry multi-GB single-file
-# checkpoints this image must not haul in). After download: the class
-# is an LTX pipeline, every declared component is one the worker's
-# LTXImageToVideoPipeline can actually accept (a mismatch here would
-# otherwise become a PAID TypeError at job time), and the size guard is
-# re-checked against what landed on disk. The resolved id lands in
-# /app/models/MODEL_ID (suffixed #distilled when applicable) so the
-# worker reports exactly what it ran.
-RUN python3 - <<'EOF'
+# Bake the model — ONE model, the distilled 2B the owner chose, and no
+# alternative. It is REJECTED FROM METADATA before a byte is downloaded:
+# the HF API lists every file with its size, so a transformer over 16GiB
+# (a 13B-class checkpoint wearing a 2B name), a missing model_index.json,
+# a missing component, or an answer for a different repository stops the
+# build at $0 network cost. Only a surveyed model is downloaded, pinned to
+# the exact commit the survey saw, and only its pipeline components (the
+# repo also carries a multi-GB single-file checkpoint this image must not
+# haul in). After download: the class is an LTX pipeline, every declared
+# component is one the worker's LTXImageToVideoPipeline can actually
+# accept (a mismatch here would otherwise become a PAID TypeError at job
+# time), and the size guard is re-checked against what landed on disk.
+# The resolved id, its revision and its licence land in /app/models/ so
+# the worker reports exactly what it ran and under what terms.
+RUN --mount=type=secret,id=hf_token python3 - <<'EOF'
 import inspect, json, os, shutil
 
 from huggingface_hub import HfApi, snapshot_download
@@ -114,18 +124,58 @@ def auth_refused(exc):
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return status in (401, 403)
 
+# OWNER DIRECTIVE 2026-08-28 (option 1): ONE candidate, and it is the
+# distilled 2B. The list previously carried two fallbacks, and run 51
+# measured what that bought: with the head gated behind HTTP 401 the build
+# walked past it and would have shipped Lightricks/LTX-Video — a different
+# model, under the same image name, silently. Guarding a fall-through is
+# weaker than not having one, so the list has one member. If this
+# checkpoint cannot be fetched the build FAILS; nothing else is acceptable
+# and there is nothing else to reach for.
 CANDIDATES = [
     ("Lightricks/LTX-Video-0.9.8-2B-distilled", "#distilled"),
-    ("Lightricks/LTX-Video-0.9.7-distilled", "#distilled"),
-    ("Lightricks/LTX-Video", ""),
 ]
+# The exact revision, once measured. Empty means "resolve it from the
+# registry and RECORD it" — the previous image was destroyed with its
+# builder, so there is no known-good sha to pin to yet. Whatever is
+# resolved is written into the image and printed, so the next build can
+# pin it here and be byte-reproducible.
+PINNED_REVISION = ""
 DEST = "/app/models/ltx"
 SIZE_GUARD_BYTES = 16 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 
+# The credential arrives on a tmpfs for the duration of this RUN only, via
+# BuildKit's secret mount. Read here, passed explicitly to the two calls
+# that need it, and never written anywhere. It is deliberately NOT put in
+# os.environ: huggingface_hub picks HF_TOKEN up implicitly, and an
+# implicit credential is one that can travel somewhere unnoticed.
+def build_token():
+    try:
+        with open("/run/secrets/hf_token", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+TOKEN = build_token()
+if not TOKEN:
+    raise SystemExit(
+        "NO CREDENTIAL: /run/secrets/hf_token is absent or empty. The chosen "
+        "checkpoint is gated, so there is nothing to do but stop — the owner "
+        "directive forbids substituting an ungated model."
+    )
+
 
 def survey(api, repo):
-    info = api.model_info(repo, files_metadata=True)
+    info = api.model_info(repo, files_metadata=True, token=TOKEN)
+
+    # IDENTITY, before a byte moves. A rename or a redirect must not
+    # quietly become a different model wearing the requested name.
+    answered = getattr(info, "id", None) or getattr(info, "modelId", None)
+    if answered != repo:
+        raise RuntimeError(f"asked for {repo}, registry answered for {answered!r}")
+
     paths = {s.rfilename: (s.size or 0) for s in info.siblings}
     if "model_index.json" not in paths:
         raise RuntimeError("no model_index.json (not a diffusers snapshot)")
@@ -140,7 +190,31 @@ def survey(api, repo):
         raise RuntimeError(
             f"transformer {transformer_bytes} metadata bytes exceed the 2B-class guard"
         )
-    return transformer_bytes
+
+    # The commit this build will pin to. A repository name names a moving
+    # branch; a sha names bytes.
+    revision = getattr(info, "sha", None)
+    if not revision:
+        raise RuntimeError(f"{repo} reports no commit sha to pin to")
+    if PINNED_REVISION and revision != PINNED_REVISION:
+        raise RuntimeError(
+            f"{repo} is at {revision}, but this build is pinned to "
+            f"{PINNED_REVISION} — refusing to bake a different revision"
+        )
+
+    licence = None
+    card = getattr(info, "card_data", None) or {}
+    try:
+        licence = card.get("license")
+    except AttributeError:
+        licence = None
+    if licence is None:
+        licence = next(
+            (t.split(":", 1)[1] for t in (getattr(info, "tags", None) or [])
+             if t.startswith("license:")),
+            None,
+        )
+    return transformer_bytes, revision, licence
 
 
 api = HfApi()
@@ -148,9 +222,14 @@ os.makedirs("/app/models", exist_ok=True)
 resolved = None
 for repo, tag in CANDIDATES:
     try:
-        print(f"SURVEY {repo}: {survey(api, repo)} transformer bytes by metadata")
+        surveyed, revision, licence = survey(api, repo)
+        print(f"SURVEY {repo}: {surveyed} transformer bytes by metadata")
+        print(f"REVISION {revision}")
+        print(f"LICENCE {licence!r}")
         snapshot_download(
             repo,
+            revision=revision,
+            token=TOKEN,
             local_dir=DEST,
             allow_patterns=["model_index.json"] + [c + "/*" for c in COMPONENTS],
         )
@@ -177,26 +256,43 @@ for repo, tag in CANDIDATES:
         if not 0 < on_disk <= SIZE_GUARD_BYTES:
             raise RuntimeError(f"downloaded transformer is {on_disk} bytes")
         resolved = repo + tag
-        print(f"BAKED {resolved} ({on_disk} transformer bytes on disk)")
+        resolved_revision = revision
+        resolved_licence = licence
+        print(f"BAKED {resolved} at {revision} ({on_disk} transformer bytes on disk)")
         break
     except Exception as exc:
+        # There is nothing to fall through to — the list has one member by
+        # owner directive — so every failure here is terminal. It is spelled
+        # out rather than left to the loop ending, because a build that
+        # quietly produced an image with no model would be far worse than
+        # one that stops.
         if auth_refused(exc):
             raise SystemExit(
-                f"AUTH REFUSED for {repo}: the registry will not serve it without "
-                "credentials. Refusing to fall through to another checkpoint — "
-                "that would ship a model nobody chose. Either supply a token or "
-                "change the candidate list deliberately."
+                f"AUTH REFUSED for {repo}: the registry will not serve it with the "
+                "credential presented. The token may be absent, expired, or issued "
+                "by an account that has not accepted this model's terms. Refusing "
+                "to substitute another checkpoint."
             )
-        print(f"SKIP {repo}: {type(exc).__name__}: {exc}")
-        shutil.rmtree(DEST, ignore_errors=True)
-        shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+        raise SystemExit(f"CANNOT BAKE {repo}: {type(exc).__name__}: {exc}")
 
 if resolved is None:
-    raise SystemExit("no candidate model could be baked")
+    raise SystemExit("the intended model could not be baked")
 with open("/app/models/MODEL_ID", "w") as fh:
     fh.write(resolved + "\n")
+# The revision and licence travel INSIDE the image, so the running worker
+# can report exactly which bytes it is executing and under what terms —
+# rather than that being knowable only from a build log that scrolls away.
+with open("/app/models/LTX_REVISION", "w") as fh:
+    fh.write(resolved_revision + "\n")
+with open("/app/models/LTX_LICENCE", "w") as fh:
+    fh.write(str(resolved_licence) + "\n")
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+# Both possible cache homes, not just the one HOME points at: this stage
+# runs as root while HOME is /home/oniq, and a token cache written to
+# either would otherwise ride into the published layer.
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
+shutil.rmtree("/root/.cache/huggingface", ignore_errors=True)
+shutil.rmtree("/home/oniq/.cache/huggingface", ignore_errors=True)
 EOF
 
 # Bake the STORY model — ONIQ's local causal LLM (owner directive

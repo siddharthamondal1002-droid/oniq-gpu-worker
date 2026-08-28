@@ -3,23 +3,28 @@ name: image-publish
 # Build the `media` image and push it to a registry, so a RunPod template
 # has something to name.
 #
-# OWNER DIRECTIVE 2026-08-28 (route 2). RunPod's API cannot build an image
-# from a repository — POST /templates requires an imageName and accepts no
-# repo, git or build field, measured from the live OpenAPI document on
-# 2026-08-28 — so a template can only ever REFERENCE an image that already
-# exists. The endpoint p3zmlv8ek10dzt has referenced a template that does
-# not exist since the worker was deleted, because RunPod's own builder
-# held the only copy of the image. This workflow ends that: the image
-# lives in a registry ONIQ controls, and can be rebuilt from source.
+# OWNER DIRECTIVE 2026-08-28 (route 2, then option 1). RunPod's API cannot
+# build an image from a repository — POST /templates requires an imageName
+# and accepts no repo, git or build field, measured from the live OpenAPI
+# document on 2026-08-28 — so a template can only ever REFERENCE an image
+# that already exists. The endpoint p3zmlv8ek10dzt has referenced a
+# template that does not exist since the worker was deleted, because
+# RunPod's own builder held the only copy of the image. This workflow ends
+# that: the image lives in a registry ONIQ controls, and can be rebuilt.
 #
 # NEVER on push. The media stage bakes an LTX pipeline, an 8B causal LLM
 # and a torch+CUDA stack; building it per commit would burn hours of
 # runner time for nothing. Dispatch only, behind a literal token, the same
 # shape as the stale-run cancel.
 #
-# This workflow deliberately carries NO RunPod credential and touches no
-# endpoint. Pushing an image cannot start a worker or spend GPU money;
-# keeping the two apart means a mistake here cannot become a GPU bill.
+# It carries TWO credentials and neither reaches the other side:
+# - GITHUB_TOKEN, to push to GHCR. Short-lived, issued per run.
+# - HF_TOKEN, a read-only Hugging Face token for the gated LTX checkpoint.
+#   It reaches exactly one RUN in the Dockerfile, through a BuildKit secret
+#   mount, and the image is scanned afterwards to prove it did not survive.
+# There is deliberately NO RunPod credential here. Pushing an image cannot
+# start a worker or spend GPU money, and keeping the two apart means a
+# mistake in this workflow cannot become a GPU bill.
 
 on:
   workflow_dispatch:
@@ -43,10 +48,41 @@ jobs:
     if: inputs.publish == 'PUBLISH-MEDIA-IMAGE'
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: "Disk before anything — the figure the projection is checked against"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ---------------------------------------------------- preconditions
+
+      - name: "The credential is present (owner action if not)"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          # NAME only, never the value. The chosen LTX checkpoint is gated,
+          # so an absent token means the build cannot start — and must not
+          # start, because the only thing it could do instead is bake a
+          # model nobody chose.
+          if [ -z "${HF_TOKEN}" ]; then
+            echo "BLOCKED: repository secret HF_TOKEN is not set."
+            echo "The chosen checkpoint is gated (HTTP 401 measured 2026-08-28)."
+            echo "No substitute will be built. Owner action required."
+            exit 1
+          fi
+          echo "HF_TOKEN is present (name only)"
+
+      - name: "The intended checkpoint answers, and IS the model that was chosen"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m validation.hf_auth
+
+      # ---------------------------------------------------------- disk
+
+      - name: "Disk before anything"
         run: df -B1 --output=source,size,used,avail,target / /mnt || true
 
       - name: "Reclaim the runner's preinstalled toolchains"
@@ -57,7 +93,7 @@ jobs:
           # dies at 90% with no space left.
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /usr/local/share/boost /usr/local/lib/node_modules \
-                      "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache/CodeQL}" || true
+                      /opt/hostedtoolcache/CodeQL || true
           df -B1 --output=source,size,used,avail,target / /mnt || true
 
       - name: "Move the docker data root onto /mnt"
@@ -71,6 +107,79 @@ jobs:
           sudo systemctl start docker
           docker info --format 'docker data root: {{.DockerRootDir}}'
 
+      # --------------------------------------------------------- build
+
+      - name: "Build the media stage"
+        env:
+          # Through the environment into BuildKit's secret mount. Never an
+          # ARG, never an ENV in the image, never on a command line.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          docker build --target media \
+            --secret id=hf_token,env=HF_TOKEN \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" .
+
+      - name: "Image size, measured"
+        run: |
+          set -euo pipefail
+          SIZE=$(docker image inspect "${IMAGE}:${GITHUB_SHA}" --format '{{.Size}}')
+          echo "IMAGE SIZE: ${SIZE} bytes"
+          python -c "import sys; print('IMAGE SIZE: %.2f GiB' % (int(sys.argv[1]) / 1024**3))" "${SIZE}"
+          df -B1 --output=source,size,used,avail,target / /mnt || true
+
+      # -------------------------------------------------------- proofs
+      # Everything below runs BEFORE the push. A pushed image that cannot
+      # start, or that carries the wrong model, is worse than no image: it
+      # turns a visible dangling reference into a worker that fails on the
+      # rented card, at cost.
+
+      - name: "The image starts"
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+            python3 -c "import handler; print('PROOF start: handler imports')"
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+            python3 -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda; print('PROOF torch:', torch.__version__, torch.version.cuda)"
+
+      - name: "It runs as uid 10001, not root"
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" id | tee /dev/stderr | grep -q 'uid=10001'
+          echo "PROOF uid: 10001"
+
+      - name: "LTX 2B, Qwen3-8B, piper and the licence records"
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}/validation/proofs:/proofs:ro" \
+            "${IMAGE}:${GITHUB_SHA}" python3 /proofs/baked_assets.py
+
+      - name: "The credential did NOT survive into the image"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Checked from outside the container too: an ARG or ENV
+          # credential would be readable here even with a clean filesystem.
+          if docker image inspect "${IMAGE}:${GITHUB_SHA}" \
+               --format '{{json .Config.Env}}' | grep -qiE 'hf_token|token='; then
+            echo "FAIL: an image environment variable names a credential"; exit 1
+          fi
+          echo "PROOF image env: no credential variable"
+          if docker history --no-trunc "${IMAGE}:${GITHUB_SHA}" \
+               | grep -qiE 'build-arg|hf_token='; then
+            echo "FAIL: build history carries a credential"; exit 1
+          fi
+          echo "PROOF build history: no build argument"
+          # The value goes IN and only a count comes out.
+          docker run --rm -e SCAN_FOR="${HF_TOKEN}" \
+            -v "${PWD}/validation/proofs:/proofs:ro" \
+            "${IMAGE}:${GITHUB_SHA}" python3 /proofs/no_credential.py
+
+      # ---------------------------------------------------------- push
+
       - name: "Log in to GHCR"
         env:
           # Through the environment, never interpolated into the script
@@ -80,49 +189,11 @@ jobs:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_USER: ${{ github.actor }}
         run: |
-          # The workflow's own short-lived token. No long-lived credential
-          # is stored for the push side; the PULL side is a separate
-          # credential that lives only in RunPod.
           printf '%s' "${REGISTRY_TOKEN}" \
             | docker login ghcr.io -u "${REGISTRY_USER}" --password-stdin
 
-      - name: "Build the media stage"
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}
-        run: |
-          set -euo pipefail
-          docker build --target media \
-            -t "${IMAGE}:${GITHUB_SHA}" \
-            -t "${IMAGE}:latest" .
-          docker image inspect "${IMAGE}:${GITHUB_SHA}" --format \
-            'built size: {{.Size}} bytes'
-
-      - name: "The image proves itself before it is published"
-        env:
-          IMAGE: ghcr.io/${{ github.repository }}
-        run: |
-          set -euo pipefail
-          # A pushed image that cannot start is worse than no image: it
-          # turns a visible dangling reference into a worker that fails on
-          # the rented card, at cost. These are the same in-image proofs
-          # worker-ci runs on the base stage, plus the two facts only the
-          # media stage can answer.
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" python3 -c "import handler; print('handler imports')"
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" python3 -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" sh -c 'cat /app/models/MODEL_ID /app/models/STORY_MODEL_ID'
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" python3 -c "
-import os
-for p in ('/app/models/ltx/model_index.json', '/app/models/story/config.json',
-          '/app/models/piper/en-us-ryan-high.onnx'):
-    assert os.path.exists(p), p
-print('every baked asset is present')
-"
-          docker run --rm "${IMAGE}:${GITHUB_SHA}" id | grep -q 'uid=10001' \
-            && echo 'runs as uid 10001, not root'
-
       - name: "Push, and record the immutable digest"
         env:
-          IMAGE: ghcr.io/${{ github.repository }}
           EXTRA: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -132,8 +203,8 @@ print('every baked asset is present')
             docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:${EXTRA}"
             docker push "${IMAGE}:${EXTRA}"
           fi
-          # A TAG IS NOT AN IDENTITY. Tags move; a digest does not, and
-          # the template is to name the digest so the endpoint can never
+          # A TAG IS NOT AN IDENTITY. Tags move; a digest does not, and the
+          # template is to name the digest so the endpoint can never
           # silently start running a different image than the one these
           # proofs passed on.
           DIGEST=$(docker image inspect "${IMAGE}:${GITHUB_SHA}" \
@@ -148,6 +219,6 @@ print('every baked asset is present')
             echo "Name the DIGEST in the template, never the tag."
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: "Disk after — so the next projection has a real figure"
+      - name: "Disk after"
         if: always()
         run: df -B1 --output=source,size,used,avail,target / /mnt || true
