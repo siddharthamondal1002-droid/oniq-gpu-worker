@@ -862,14 +862,34 @@ def one_job(
 # ----------------------------------------------------- five-scene battery
 
 
-def check_standby_zero(client) -> None:
-    """Owner directive 2026-08-26 (production launch, Phase 6),
-    superseding the same-day battery gate: workersStandby is not
-    settable by any reachable API (three-surface proof, ledger §16p)
-    and the production financial rule concerns ACTIVE COMPUTE, so a
-    non-zero standby is RECORDED as STANDBY_PROVIDER_MANAGED and never
-    blocks the run — and never lets anyone claim the total worker count
-    is zero. Only endpoint ambiguity still stops here."""
+def record_standby_state(client) -> None:
+    """Record workersStandby. It is OBSERVABILITY, not a gate.
+
+    Owner directive 2026-08-27 removes workersStandby == 0 as a blocker
+    outright and names what replaces it:
+
+        workersMin == 0 AND workersMax == 1
+        AND active GPU pods == 0 AND orphan pods == 0
+        AND the GPU allow-list is the target card only
+
+    which is the state that actually means "no idle GPU worker is running
+    before the canary". preflight() already enforces every one of those —
+    unexpected-pods, check_endpoint_config, endpoint-not-target and
+    endpoint-gpu-list-not-exclusive — and the sweep covers orphans, so
+    this function's job is to make the provider's number visible, never to
+    stop on it.
+
+    It was called check_standby_zero until 2026-08-27, which is the
+    misleading part worth naming: the code has never blocked on standby,
+    but a reader grepping for the gate found a function whose name
+    promised one. Four cycles were spent looking for a control that no
+    longer gated anything.
+
+    Superseded directive, 2026-08-26 (production launch, Phase 6):
+    workersStandby is not settable by any reachable API (three-surface
+    proof, ledger §16p) and the production financial rule concerns ACTIVE
+    COMPUTE. Recording it also stops anyone claiming the TOTAL worker
+    count is zero. Only endpoint ambiguity still stops here."""
     _, endpoints = client.get_endpoints()
     ep_list = endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     if len(ep_list) != 1:
@@ -892,7 +912,7 @@ def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic
     billing reconciliation and termination confirmation — one_job raises
     on ANY failure or UNKNOWN termination, which stops the battery cold
     with no retry and no next submission (Phase 7)."""
-    check_standby_zero(client)
+    record_standby_state(client)
     rows = []
     for index, (slug, prompt) in enumerate(VIDEO_BATTERY, start=1):
         print(f"--- scene {index}/5 [{slug}] ---")
