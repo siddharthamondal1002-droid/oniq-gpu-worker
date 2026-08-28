@@ -1175,3 +1175,144 @@ def test_image_canary_runs_one_still_at_phase_16(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["op"] == "image_generate"
     assert calls[0]["output_key"].endswith(".png")
+
+
+# ============================================ the no-idle-worker invariant
+#
+# Owner directive 2026-08-27: workersStandby == 0 is REMOVED as a hard
+# blocker and replaced with the state that actually matters —
+#
+#     workersMin == 0 AND workersMax == 1
+#     AND active GPU pods == 0 AND orphan pods == 0
+#     AND the GPU allow-list is the target card only
+#
+# The harness already enforced all of it and never blocked on standby, but
+# nothing PINNED that, and the function doing the recording was called
+# check_standby_zero — a name that promised a gate the code did not have.
+# These tests make the directive enforceable in both directions: each real
+# condition blocks, and standby alone does not.
+
+
+def _inv_endpoint(**over):
+    base = {
+        "id": "p3zmlv8ek10dzt",
+        "workersMin": 0,
+        "workersMax": 1,
+        "workersStandby": 1,  # the value the owner made informational
+        "gpuTypeIds": [admission.TARGET_GPU],
+        "templateId": "hhhdwtjw0y",
+    }
+    base.update(over)
+    return base
+
+
+class _InvariantClient:
+    """Minimal preflight client; every knob the invariant names."""
+
+    def __init__(self, *, pods=(), endpoint=None):
+        self._pods = list(pods)
+        self._endpoint = endpoint if endpoint is not None else _inv_endpoint()
+
+    def get_pods(self):
+        return json.dumps(self._pods), self._pods
+
+    def get_endpoints(self):
+        doc = [self._endpoint]
+        return json.dumps(doc), doc
+
+    @staticmethod
+    def parse_endpoint(doc):
+        import runpod_client
+
+        return runpod_client.parse_endpoint(doc)
+
+
+def _stop_code(client):
+    """Run preflight far enough to see which gate fires, if any."""
+    try:
+        spend_run.preflight(client, endpoint_id="")
+    except spend_run.SpendStop as stop:
+        return stop.code
+    except admission.AdmissionRefused as refused:
+        # AdmissionRefused carries .code; args[0] is the human message.
+        return refused.code
+    except Exception as exc:  # a later stage we do not model here
+        return f"reached-later-stage:{type(exc).__name__}"
+    return None
+
+
+#: every gate the new invariant owns. Standby is deliberately not here.
+INVARIANT_STOPS = {
+    "unexpected-pods",
+    "endpoint-config-refused",
+    "endpoint-not-target",
+    "endpoint-gpu-list-not-exclusive",
+    "endpoint-not-singular",
+}
+
+
+def test_standby_one_alone_does_NOT_block():
+    """The directive's whole point: a standby of 1, with every real
+    condition satisfied, passes every gate the invariant owns.
+
+    Preflight continues past them into stages this fixture does not model
+    (test refs, live quote), so the assertion is that no INVARIANT gate
+    fired — not that preflight ran to completion.
+    """
+    code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersStandby=1)))
+    assert code not in INVARIANT_STOPS, code
+
+
+def test_a_running_pod_blocks():
+    code = _stop_code(_InvariantClient(pods=[{"id": "pod-1"}]))
+    assert code == "unexpected-pods"
+
+
+def test_min_workers_above_zero_blocks():
+    code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersMin=1)))
+    assert code == "endpoint-config-refused"
+
+
+def test_max_workers_above_one_blocks():
+    code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersMax=2)))
+    assert code == "endpoint-config-refused"
+
+
+def test_a_second_gpu_on_the_allow_list_blocks():
+    code = _stop_code(
+        _InvariantClient(
+            endpoint=_inv_endpoint(gpuTypeIds=[admission.TARGET_GPU, "NVIDIA L4"])
+        )
+    )
+    assert code == "endpoint-gpu-list-not-exclusive"
+
+
+def test_the_wrong_card_blocks():
+    code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(gpuTypeIds=["NVIDIA L4"])))
+    assert code == "endpoint-not-target"
+
+
+def test_the_recorder_records_and_never_raises():
+    """It is observability. It must print the provider's number and let
+    the run continue — that is the difference between this and a gate."""
+    client = _InvariantClient(endpoint=_inv_endpoint(workersStandby=3))
+    spend_run.record_standby_state(client)  # must not raise
+
+
+def test_no_function_name_still_promises_a_standby_gate():
+    """The name check_standby_zero cost four cycles: it advertised a gate
+    the code did not have. A future 'check_standby_*' would do it again."""
+    import ast
+
+    tree = ast.parse(open(spend_run.__file__, encoding="utf-8").read())
+    promises = [
+        fn.name
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef)
+        and "standby" in fn.name.lower()
+        and fn.name.lower().startswith(("check_", "require_", "assert_"))
+    ]
+    assert not promises, (
+        f"{promises} name a standby GATE, but standby is informational — "
+        "rename to record_/read_ so the name matches the behaviour"
+    )
