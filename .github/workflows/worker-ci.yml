@@ -14,6 +14,25 @@ permissions:
   contents: read
 
 jobs:
+  qwen-licence:
+    # The media build's licence gate, asked of the live registry from
+    # METADATA ONLY — no weights, no GPU, seconds not minutes. The gate
+    # itself stays in the Dockerfile, which is the only place that can
+    # actually stop a bake; this job parses its parameters back out and
+    # checks the world against them, so a withdrawn repo or a changed
+    # licence is found before an owner spends a long media build on it.
+    # Restating CANDIDATES here instead of deriving them is the defect
+    # that put storygen.py in three lists and none of the images.
+    name: Qwen licence gate — metadata only, no weights
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: The gate, against the live registry
+        run: python -m validation.qwen_assets
+
   tests:
     name: tests (uid 10001, read-only /app)
     runs-on: ubuntu-latest
@@ -27,7 +46,7 @@ jobs:
       - name: Secret and shell-surface scan
         run: |
           set -eu
-          FILES="contract.py preprocess.py storage.py handler.py videogen.py audio.py runpod_client.py validation/admission.py validation/spend_run.py validation/standby_zero.py"
+          FILES="contract.py preprocess.py storage.py handler.py videogen.py audio.py runpod_client.py validation/admission.py validation/spend_run.py validation/standby_zero.py validation/qwen_assets.py"
           for pattern in 'eval(' 'exec(' 'subprocess' 'os.system' 'pickle' 'shell=True'; do
             if grep -Fn "$pattern" $FILES; then
               echo "FORBIDDEN CALL FOUND: $pattern"; exit 1
