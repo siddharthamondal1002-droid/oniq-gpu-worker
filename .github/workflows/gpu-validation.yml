@@ -65,6 +65,10 @@ on:
         description: "Endpoint id (optional; must match the single live endpoint)."
         type: string
         default: ""
+      template_id:
+        description: "Template id to look for in template-probe. Defaults to the id the endpoint references."
+        type: string
+        default: "hhhdwtjw0y"
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket."
         type: string
@@ -162,7 +166,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: "What templates exist, and is there an API to make one?"
-        run: python -m validation.template_probe "${{ inputs.endpoint_id }}"
+        run: python -m validation.template_probe "${{ inputs.template_id }}"
 
   queue_probe:
     name: "queue probe - read-only, $0"

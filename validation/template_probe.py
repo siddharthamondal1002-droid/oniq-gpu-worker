@@ -16,6 +16,16 @@ import json
 
 
 def report(client, expected_template_id: str) -> tuple:
+    # A blank id would make the membership test trivially true and print
+    # "MISSING" for a question nobody asked - run 49 did exactly that, because
+    # the workflow handed this the endpoint id input, which was empty. An
+    # assertion that cannot fail is worse than no assertion: it reads like
+    # evidence. Refuse instead.
+    expected_template_id = (expected_template_id or "").strip()
+    if not expected_template_id:
+        print("NO TEMPLATE ID GIVEN: nothing to look for, so nothing is proven")
+        return 2, {"templates": None, "surface": None}
+
     templates = client.list_templates_graphql()
     if templates is None:
         print("TEMPLATES: unreadable — the answer is UNKNOWN, not 'none exist'")

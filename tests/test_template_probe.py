@@ -88,3 +88,19 @@ def test_the_probe_only_reads(capsys):
     client = Client([], IMAGE_ONLY)
     tp.report(client, "hhhdwtjw0y")
     assert client.calls == ["list_templates_graphql", "rest_template_surface"]
+
+
+def test_a_blank_id_refuses_rather_than_printing_a_trivially_true_missing(capsys):
+    client = Client([{"id": "other", "name": "stock", "imageName": "x"}], IMAGE_ONLY)
+    code, _ = tp.report(client, "")
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "MISSING" not in out
+    assert "NO TEMPLATE ID GIVEN" in out
+    assert client.calls == []
+
+
+def test_whitespace_is_not_an_id_either(capsys):
+    code, _ = tp.report(Client([], IMAGE_ONLY), "   ")
+    assert code == 2
+    assert "NO TEMPLATE ID GIVEN" in capsys.readouterr().out
