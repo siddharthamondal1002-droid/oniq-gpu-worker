@@ -41,6 +41,10 @@ on:
 permissions:
   contents: read
   packages: write
+  # For the environments listing in the credential diagnostic. Read-only,
+  # and it is the permission GitHub itself named on run 41 when the
+  # environments API answered 403 to deployments:read.
+  actions: read
 
 jobs:
   publish:
@@ -85,6 +89,8 @@ jobs:
           ALT_HUGGINGFACE_HUB_TOKEN: ${{ secrets.HUGGINGFACE_HUB_TOKEN }}
           ALT_HF_ACCESS_TOKEN: ${{ secrets.HF_ACCESS_TOKEN }}
           ALT_HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+          VAR_HF_TOKEN: ${{ vars.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -n "${HF_TOKEN}" ]; then
             echo "HF_TOKEN is present (name only)"
@@ -108,8 +114,25 @@ jobs:
           echo "If one above is PRESENT, the secret exists under that name —"
           echo "rename it to HF_TOKEN, or say the word and the workflow will"
           echo "read that name instead."
-          echo "If all are absent, check it was saved under Secrets and not"
-          echo "Variables, and on this repository or the gpu-spend environment."
+          echo ""
+          echo "Same name under Variables rather than Secrets:"
+          if [ -n "${VAR_HF_TOKEN}" ]; then
+            echo "  PRESENT: vars.HF_TOKEN — it was saved as a Variable."
+            echo "  Variables are not secret and are not read by this build."
+            echo "  Delete it and re-add it under Secrets."
+          else
+            echo "  absent:  vars.HF_TOKEN"
+          fi
+          echo ""
+          echo "This job is running in: ${GITHUB_REPOSITORY}"
+          echo "Secrets must be on THAT repository. If the token was added to"
+          echo "the app repo (oniq-sparkle-pay) it will never resolve here."
+          echo "Environments that exist on this repository:"
+          curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments" \
+            | python -c "import json,sys; d=json.load(sys.stdin); print('\n'.join('  ' + e['name'] for e in d.get('environments') or [])) or None" \
+            || echo "  (could not list environments)"
           echo ""
           echo "The chosen checkpoint is gated (HTTP 401 measured 2026-08-28)."
           echo "No substitute will be built. Owner action required."
