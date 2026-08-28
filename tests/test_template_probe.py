@@ -180,3 +180,26 @@ def test_the_required_names_come_from_storage_not_a_copy():
     import storage
 
     assert set(storage.REQUIRED_VARS) == R2
+
+
+def test_the_verdict_is_repeated_after_the_schema_dump(capsys):
+    """The schema dump is two hundred lines. A reader tailing the log has
+    to reach the answer, so it is printed again at the very end."""
+    tp.report(Client(HERE, IMAGE_ONLY, env=R2 - {"R2_S3_ENDPOINT"}), "aqa3wkdf8g")
+    out = capsys.readouterr().out
+    head, _, tail = out.partition("=== SUMMARY ===")
+    assert "STORAGE NOT READY" in head          # said once where it happens
+    assert "STORAGE NOT READY" in tail          # and again where it is read
+    assert "TEMPLATE aqa3wkdf8g: present" in tail
+
+
+def test_the_summary_says_absent_without_saying_it_twice(capsys):
+    tp.report(Client([{"id": "other", "name": "s", "imageName": "x"}], IMAGE_ONLY), "aqa3wkdf8g")
+    _, _, tail = capsys.readouterr().out.partition("=== SUMMARY ===")
+    assert "TEMPLATE aqa3wkdf8g: absent" in tail
+
+
+def test_the_summary_carries_the_ready_verdict_too(capsys):
+    tp.report(Client(HERE, IMAGE_ONLY, env=R2), "aqa3wkdf8g")
+    _, _, tail = capsys.readouterr().out.partition("=== SUMMARY ===")
+    assert "STORAGE READY" in tail

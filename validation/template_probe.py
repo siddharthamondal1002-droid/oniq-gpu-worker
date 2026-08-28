@@ -27,25 +27,29 @@ def _report_storage(client, template_id: str):
     started, and because the owner is entitled to see the claim verified
     rather than assumed.
 
-    Unreadable is UNKNOWN, never "ready". Returns True, False or None.
+    Unreadable is UNKNOWN, never "ready". Returns (state, verdict line),
+    where state is True, False or None.
     """
     names = client.template_env_names_graphql(template_id)
     if names is None:
-        print("ENV: unreadable - the answer is UNKNOWN, not 'nothing is set'")
-        return None
+        verdict = "ENV: unreadable - the answer is UNKNOWN, not 'nothing is set'"
+        print(verdict)
+        return None, verdict
     print(
         f"ENV ON {template_id}: {len(names)} set - "
         f"{', '.join(sorted(names)) or '(none)'}  (names only, never values)"
     )
     absent = [name for name in storage.REQUIRED_VARS if name not in names]
     if absent:
-        print(
+        verdict = (
             f"STORAGE NOT READY: {', '.join(absent)} not set - every job would "
             "fail closed with storage-not-configured"
         )
-        return False
-    print("STORAGE READY: every variable storage.py requires is set on the template")
-    return True
+        print(verdict)
+        return False, verdict
+    verdict = "STORAGE READY: every variable storage.py requires is set on the template"
+    print(verdict)
+    return True, verdict
 
 
 def report(client, expected_template_id: str) -> tuple:
@@ -60,6 +64,8 @@ def report(client, expected_template_id: str) -> tuple:
         return 2, {"templates": None, "surface": None}
 
     storage_state = "unchecked"
+    storage_line = None
+    present = False
     templates = client.list_templates_graphql()
     if templates is None:
         print("TEMPLATES: unreadable — the answer is UNKNOWN, not 'none exist'")
@@ -70,7 +76,8 @@ def report(client, expected_template_id: str) -> tuple:
         ids = {t.get("id") for t in templates}
         if expected_template_id in ids:
             print(f"FOUND: {expected_template_id} exists after all")
-            storage_state = _report_storage(client, expected_template_id)
+            present = True
+            storage_state, storage_line = _report_storage(client, expected_template_id)
         else:
             print(
                 f"MISSING: {expected_template_id} is NOT among them — the endpoint's "
@@ -105,6 +112,14 @@ def report(client, expected_template_id: str) -> tuple:
             )
         build_like = surface.get("build_like_paths")
         print(f"BUILD-LIKE PATHS ANYWHERE IN THE API: {build_like}")
+    # THE VERDICT GOES LAST. Twice now the one line this job exists to
+    # print has landed ABOVE a two-hundred-line schema dump, out of reach
+    # of anyone reading the tail of a log.
+    print("=== SUMMARY ===")
+    print(f"TEMPLATE {expected_template_id}: {'present' if present else 'absent'}")
+    if storage_line:
+        print(storage_line)
+
     facts = {"templates": templates, "surface": surface, "storage": storage_state}
     if not surface or not surface.get("template_paths"):
         print(
