@@ -51,7 +51,17 @@ def test_gate4_orphan_sweep_always_runs():
     doc, _ = _load("gpu-validation.yml")
     sweep = doc["jobs"]["sweep"]
     assert sweep["if"].strip() == "always()"
-    assert set(sweep["needs"]) == {"discover", "spend", "standby"}
+    # The load-bearing part: the sweep must run after the job that can
+    # PROVISION a worker, or an orphan outlives the run that made it.
+    assert "spend" in sweep["needs"]
+    # The full set, exact, so a new job cannot quietly skip the sweep.
+    # standby_probe joined 2026-08-27 (read-only standby diagnostic).
+    assert set(sweep["needs"]) == {
+        "discover",
+        "spend",
+        "standby",
+        "standby_probe",
+    }
 
 
 def test_gate5_no_endpoint_creation_anywhere():
@@ -336,7 +346,16 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
     mode = _triggers(doc)["workflow_dispatch"]["inputs"]["mode"]
     # "advisory" (2026-08-27) is the standalone free preflight — a $0 read
     # of the live endpoint that gates nothing and can spend nothing.
-    assert mode["options"] == ["discover", "spend", "standby-zero", "advisory"]
+    # standby-probe joined 2026-08-27: the READ-ONLY twin of standby-zero,
+    # so the diagnostic can be re-run without re-attempting a mutation the
+    # API has already refused.
+    assert mode["options"] == [
+        "discover",
+        "spend",
+        "standby-zero",
+        "standby-probe",
+        "advisory",
+    ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
     assert standby["if"].strip() == "inputs.mode == 'standby-zero'"
@@ -361,3 +380,19 @@ def test_dockerfile_media_stage_loads_locally_only():
     assert "snapshot_download" in raw  # bake at BUILD time...
     with open(os.path.join(ROOT, "videogen.py"), encoding="utf-8") as fh:
         assert "local_files_only=True" in fh.read()  # ...never at job time
+
+
+def test_the_standby_probe_job_cannot_spend_or_write():
+    """The read-only twin. It exists so the diagnostic is repeatable
+    without re-attempting a mutation the API has already refused, so the
+    thing to prove is that it stayed read-only."""
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["standby_probe"]
+    assert job["if"].strip() == "inputs.mode == 'standby-probe'"
+    commands = " ".join(
+        str(step.get("run", "")) for step in job["steps"]
+    )
+    # The probe argv, and nothing that patches or submits.
+    assert "validation.standby_zero probe" in commands
+    for forbidden in ("spend_run", "SPEND", "submit", "standby_zero\n"):
+        assert forbidden not in commands
