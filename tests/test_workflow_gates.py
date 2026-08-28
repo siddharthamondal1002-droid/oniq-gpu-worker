@@ -366,6 +366,11 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # it builds only the base stage and reads file sizes from the model
         # registry, so it spends nothing and can mutate nothing.
         "image-size",
+        # template-attach is the other half of that directive and the
+        # second job-level mutation on this workflow: ONE template created
+        # naming an already-published image, ONE endpoint repointed. It
+        # sends templateId alone, so no spend bound can move.
+        "template-attach",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

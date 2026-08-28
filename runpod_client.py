@@ -589,6 +589,50 @@ def discover(out_path=None) -> dict:
     return report
 
 
+def create_template(name: str, image_name: str, container_disk_gb: int):
+    """Create a serverless template naming an EXISTING image.
+
+    Deliberately minimal. POST /templates accepts fourteen properties
+    (measured 2026-08-28) and this sends five: anything unsent keeps
+    RunPod's default, and every field named here is a field that could be
+    got wrong. In particular it sends NO `env`: the worker's three R2
+    variables live in the RunPod environment and nowhere else — storage.py
+    states that as the contract — so this function has no parameter that
+    could carry a credential, and cannot leak one it never receives.
+    """
+    body = {
+        "name": name,
+        "imageName": image_name,
+        "isServerless": True,
+        "isPublic": False,
+        "containerDiskInGb": container_disk_gb,
+    }
+    status, raw = _request(f"{REST_BASE}/templates", method="POST", body=body)
+    if status not in (200, 201):
+        raise RunPodApiError(f"POST /templates -> {status}: {raw[:200]}")
+    return raw, json.loads(raw)
+
+
+def attach_template(endpoint_id: str, template_id: str):
+    """Point an endpoint at a template. templateId is the ONLY field sent.
+
+    PATCH /endpoints/{id} also accepts workersMax, workersMin, gpuTypeIds,
+    idleTimeout and executionTimeoutMs. Sending any of them — even at what
+    is believed to be the current value — would let a stale read silently
+    rewrite the endpoint's spend bounds. One field goes in the body, so
+    nothing else can change. Callers must re-read; no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"templateId": template_id},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /endpoints/{endpoint_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
+
+
 def main(argv) -> int:
     if len(argv) >= 2 and argv[1] == "discover":
         out = None

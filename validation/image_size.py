@@ -8,10 +8,18 @@ LLM and a torch+CUDA stack on top of each other.
 
 So the size is surveyed from metadata first, for nothing, the same way the
 licence gate is. Every parameter is PARSED FROM THE Dockerfile: which
-candidates, which components, which file patterns each bake downloads. A
-second hand-maintained copy of those patterns would drift from the build it
-claims to predict, and a prediction that does not track the build is worse
-than no prediction.
+candidates, which components, which file patterns each bake downloads, and
+which size guard each bake applies. A second hand-maintained copy of those
+would drift from the build it claims to predict, and a prediction that does
+not track the build is worse than no prediction.
+
+IT MUST PICK THE CANDIDATE THE BUILD WOULD PICK. Run 50 measured what
+happens otherwise: the first LTX candidate answered an HTTP error, and this
+module fell to the next one and reported 44.36 GiB — the 13B repository,
+which the Dockerfile's own 16GiB transformer guard REFUSES. It sized a
+model the build would never bake and declared the image did not fit. So the
+guards are applied here too: a candidate missing a required file, missing a
+component, or over its guard is SKIPPED exactly as the build skips it.
 
 What this can and cannot answer:
 - Model bytes are MEASURED, from the registry's own per-file sizes.
@@ -26,18 +34,17 @@ from __future__ import annotations
 import fnmatch
 import json
 import re
+import urllib.error
 import urllib.request
-
-from validation import qwen_assets
 
 DOCKERFILE = "Dockerfile"
 API = "https://huggingface.co/api/models/{repo}?blobs=true"
 
 # What a GitHub-hosted ubuntu runner can actually hold. The pair matters:
-# the build needs room for the layers AND the final image, and `docker
-# build` keeps both. These are the documented defaults, not measurements of
-# this account's runners, so the CI job re-reads the real figure with `df`
-# and this is only the planning number.
+# the build needs room for the layers AND the assembled image, and docker
+# keeps both. These are the documented defaults, not measurements of this
+# account's runners, so the CI job prints the real `df` above this and the
+# numbers here are only the planning budget.
 RUNNER_ROOT_FREE_BYTES = 21 * 1024**3
 RUNNER_MNT_FREE_BYTES = 65 * 1024**3
 
@@ -46,16 +53,7 @@ class SizeParseError(Exception):
     """The Dockerfile no longer states a bake in a readable form."""
 
 
-def _block(text: str, dest: str) -> str:
-    """One bake, isolated by its DEST — every bake declares CANDIDATES."""
-    start = text.find(f'DEST = "{dest}"')
-    if start == -1:
-        raise SizeParseError(f"no block declares DEST = {dest!r}")
-    head = text.rfind("CANDIDATES = [", 0, start)
-    if head == -1:
-        raise SizeParseError(f"the {dest} block declares no CANDIDATES")
-    end = text.find("\nEOF", start)
-    return text[head : end if end != -1 else len(text)]
+# ------------------------------------------------------------ parsing
 
 
 def _balanced(text: str, open_at: int) -> str:
@@ -97,9 +95,7 @@ def _first_strings(block: str, name: str, opener: str, closer: str) -> list:
     COMPONENTS is a flat tuple all on ONE line, where every entry is
     itself the string wanted. Reading first-per-LINE gets the first right
     and silently returns only 'transformer' for the second, which would
-    have understated the LTX bake by its VAE and text encoder: several
-    GiB missing from a projection whose whole job is to say whether the
-    image fits.
+    have understated the LTX bake by its VAE and text encoder.
     """
     match = re.search(rf"^{name}\s*=\s*\{opener}", block, re.M)
     if not match:
@@ -114,13 +110,20 @@ def _first_strings(block: str, name: str, opener: str, closer: str) -> list:
     return found
 
 
-def _patterns(block: str) -> list:
-    """allow_patterns as the bake actually passes them to the downloader.
+def _block(text: str, dest: str) -> str:
+    """One bake, isolated by its DEST — every bake declares CANDIDATES."""
+    start = text.find(f'DEST = "{dest}"')
+    if start == -1:
+        raise SizeParseError(f"no block declares DEST = {dest!r}")
+    head = text.rfind("CANDIDATES = [", 0, start)
+    if head == -1:
+        raise SizeParseError(f"the {dest} block declares no CANDIDATES")
+    end = text.find("\nEOF", start)
+    return text[head : end if end != -1 else len(text)]
 
-    Two forms appear: a plain list of globs, and the LTX form that builds
-    per-component globs from COMPONENTS. Both are read from the source
-    rather than restated, so a change to either tracks straight through.
-    """
+
+def _patterns(block: str) -> list:
+    """allow_patterns as the bake actually passes them to the downloader."""
     at = block.find("allow_patterns=")
     if at == -1:
         at = block.find("allow_patterns =")
@@ -144,6 +147,31 @@ def _patterns(block: str) -> list:
     return patterns
 
 
+def _needed_files(block: str) -> list:
+    """Files whose absence makes the bake skip a candidate.
+
+    Two forms again: a NEEDED tuple iterated over, and a direct
+    `if "x" not in paths` guard. Both are refusals, so both are read.
+    """
+    needed = []
+    if re.search(r"^NEEDED\s*=\s*\(", block, re.M):
+        needed += _first_strings(block, "NEEDED", "(", ")")
+    needed += re.findall(r"[\"']([^\"']+)[\"']\s+not in paths", block)
+    return sorted(set(needed))
+
+
+def _guard_prefix(block: str) -> str:
+    """Which files the size guard weighs.
+
+    The LTX bake guards the TRANSFORMER only — that is what distinguishes a
+    2B from a 13B — while the story bake guards every weight file. Taking
+    the wrong one turns a passing candidate into a failing one or the
+    reverse, so it is read rather than assumed.
+    """
+    match = re.search(r"p\.startswith\([\"']([^\"']+)[\"']\)", block)
+    return match.group(1) if match else ""
+
+
 def parse_bakes(text: str) -> list:
     """Every model bake in the Dockerfile, in build order."""
     bakes = []
@@ -152,11 +180,17 @@ def parse_bakes(text: str) -> list:
         guard = re.search(r"^SIZE_GUARD_BYTES\s*=\s*(\d+)\s*\*\s*1024\*\*3", block, re.M)
         if not guard:
             raise SizeParseError(f"{dest} declares no parseable SIZE_GUARD_BYTES")
+        components = []
+        if re.search(r"^COMPONENTS\s*=\s*\(", block, re.M):
+            components = _first_strings(block, "COMPONENTS", "(", ")")
         bakes.append(
             {
                 "dest": dest,
                 "candidates": _first_strings(block, "CANDIDATES", "[", "]"),
                 "patterns": _patterns(block),
+                "needed_files": _needed_files(block),
+                "components": components,
+                "guard_prefix": _guard_prefix(block),
                 "size_guard_bytes": int(guard.group(1)) * 1024**3,
             }
         )
@@ -174,6 +208,9 @@ def parse_piper(text: str) -> str:
     return match.group(1)
 
 
+# ------------------------------------------------------------ surveying
+
+
 def _default_fetch(repo: str) -> dict:
     with urllib.request.urlopen(API.format(repo=repo), timeout=60) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -185,26 +222,79 @@ def _default_head(url: str) -> int:
         return int(resp.headers.get("Content-Length") or 0)
 
 
-def download_bytes(repo: str, patterns, fetch=_default_fetch) -> dict:
-    """What this candidate would actually pull, by the registry's own sizes.
+def _why(exc: Exception) -> str:
+    """The HTTP CODE, not the exception's class name.
 
-    Only files matching allow_patterns count. The repos carry multi-GB
-    single-file checkpoints the bake deliberately does not fetch, so
-    summing every sibling would overstate the image by more than the
-    runner's whole disk.
+    'HTTPError' does not distinguish 404 (the repository is gone) from 401
+    (it is gated and needs a token) from 429 (we asked too fast), and those
+    lead to completely different actions. queue_probe learned this on
+    2026-08-28 and this module repeated the mistake the same day; run 50
+    reported a bare HTTPError for the owner's chosen LTX model and the
+    reason had to be guessed at.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    return type(exc).__name__
+
+
+def survey(repo: str, bake: dict, fetch=_default_fetch) -> dict:
+    """One candidate's verdict, by the same rules the build applies.
+
+    BAKE means the build would download this one. SKIP means the build
+    would reject it and try the next — so its bytes must never be counted.
+    UNREACHABLE means the answer is unknown, which is not the same as SKIP.
     """
     try:
         info = fetch(repo)
     except Exception as exc:
-        return {"repo": repo, "bytes": None, "detail": type(exc).__name__}
+        return {"repo": repo, "verdict": "UNREACHABLE", "bytes": None, "detail": _why(exc)}
+
+    paths = {
+        (s.get("rfilename") or ""): (s.get("size") or 0)
+        for s in info.get("siblings") or []
+    }
+
+    missing = [n for n in bake["needed_files"] if n not in paths]
+    if missing:
+        return {"repo": repo, "verdict": "SKIP", "bytes": None,
+                "detail": f"lacks {missing}"}
+
+    absent = [
+        c for c in bake["components"]
+        if not any(p.startswith(c + "/") for p in paths)
+    ]
+    if absent:
+        return {"repo": repo, "verdict": "SKIP", "bytes": None,
+                "detail": f"lacks component(s) {absent}"}
+
+    guarded = sum(
+        size for p, size in paths.items()
+        if p.startswith(bake["guard_prefix"]) and p.endswith(".safetensors")
+    )
+    if not 0 < guarded <= bake["size_guard_bytes"]:
+        return {
+            "repo": repo,
+            "verdict": "SKIP",
+            "bytes": None,
+            "guarded_bytes": guarded,
+            "detail": (
+                f"{guarded / 1024**3:.2f} GiB under {bake['guard_prefix'] or '(all weights)'} "
+                f"fails the {bake['size_guard_bytes'] / 1024**3:.0f} GiB guard"
+            ),
+        }
+
+    # Only files matching allow_patterns are downloaded. The repos also
+    # carry multi-GB single-file checkpoints the bake never fetches;
+    # summing every sibling would overstate the image by more than the
+    # runner's whole disk.
     total = 0
     files = 0
-    for sibling in info.get("siblings") or []:
-        name = sibling.get("rfilename") or ""
-        if any(fnmatch.fnmatch(name, p) for p in patterns):
-            total += sibling.get("size") or 0
+    for name, size in paths.items():
+        if any(fnmatch.fnmatch(name, p) for p in bake["patterns"]):
+            total += size
             files += 1
-    return {"repo": repo, "bytes": total, "files": files, "detail": "surveyed"}
+    return {"repo": repo, "verdict": "BAKE", "bytes": total, "files": files,
+            "guarded_bytes": guarded, "detail": "passes every gate the build applies"}
 
 
 def _gib(value) -> str:
@@ -214,10 +304,10 @@ def _gib(value) -> str:
 def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default_head):
     """Projected media-image size. Exit 0 only when it plausibly fits.
 
-    The projection is deliberately a FLOOR: model bytes land compressed in
-    the registry and uncompressed on disk, and the build holds both at once.
-    Reporting a floor as if it were the answer is how a build gets started
-    that cannot finish, so the wording says floor everywhere it is one.
+    The projection is deliberately a FLOOR: the build holds the layer cache
+    and the assembled image at once. Reporting a floor as if it were the
+    answer is how a build gets started that cannot finish, so the wording
+    says floor everywhere it is one.
     """
     rows = []
     total = 0
@@ -226,17 +316,13 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
     for bake in parse_bakes(text):
         chosen = None
         for repo in bake["candidates"]:
-            surveyed = download_bytes(repo, bake["patterns"], fetch)
-            if surveyed["bytes"] is None:
-                print(f"  UNREACHABLE {repo}: {surveyed['detail']}")
-                continue
-            if surveyed["bytes"] == 0:
-                print(f"  EMPTY {repo}: no file matches the bake's patterns")
-                continue
-            chosen = surveyed
-            break
+            surveyed = survey(repo, bake, fetch)
+            print(f"  {surveyed['verdict']:11s} {repo}: {surveyed['detail']}")
+            if surveyed["verdict"] == "BAKE":
+                chosen = surveyed
+                break
         if chosen is None:
-            print(f"BAKE {bake['dest']}: NOT MEASURED — no candidate could be surveyed")
+            print(f"BAKE {bake['dest']}: NOT MEASURED — no candidate would bake")
             unknown = True
             rows.append({"dest": bake["dest"], "bytes": None})
             continue
@@ -250,7 +336,7 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
     try:
         piper = head(parse_piper(text))
     except Exception as exc:
-        print(f"BAKE piper: NOT MEASURED — {type(exc).__name__}")
+        print(f"BAKE piper: NOT MEASURED — {_why(exc)}")
         piper = None
         unknown = True
     else:
@@ -258,7 +344,10 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
         total += piper
     rows.append({"dest": "piper", "bytes": piper})
 
-    print(f"MODEL BYTES: {_gib(total)}" + (" (INCOMPLETE — a bake is unmeasured)" if unknown else ""))
+    print(
+        f"MODEL BYTES: {_gib(total)}"
+        + (" (INCOMPLETE — a bake is unmeasured)" if unknown else "")
+    )
     print(f"BASE STAGE: {_gib(base_image_bytes)}")
 
     if base_image_bytes is None or unknown:
@@ -274,9 +363,6 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
         f"RUNNER PLANNING BUDGET: root {_gib(RUNNER_ROOT_FREE_BYTES)}, "
         f"/mnt {_gib(RUNNER_MNT_FREE_BYTES)}"
     )
-    # The build holds the layer cache and the assembled image at once, so
-    # the disk has to carry the floor roughly twice over. One times the
-    # floor fitting is not the question.
     if projected * 2 > RUNNER_MNT_FREE_BYTES:
         print(
             "VERDICT: DOES NOT FIT — twice the floor exceeds even /mnt. A hosted "

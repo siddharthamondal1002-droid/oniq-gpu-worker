@@ -37,7 +37,7 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach]
         default: discover
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
@@ -69,6 +69,14 @@ on:
         description: "Template id to look for in template-probe. Defaults to the id the endpoint references."
         type: string
         default: "hhhdwtjw0y"
+      image_ref:
+        description: "Digest-pinned image for template-attach, e.g. ghcr.io/owner/repo@sha256:... A tag is refused."
+        type: string
+        default: ""
+      attach_token:
+        description: "Type ATTACH-TEMPLATE (exactly) to allow template-attach. Creates ONE template and repoints ONE endpoint."
+        type: string
+        default: ""
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket."
         type: string
@@ -192,6 +200,31 @@ jobs:
           BASE=$(docker image inspect oniq-gpu-worker:size --format '{{.Size}}')
           echo "base stage measured at ${BASE} bytes"
           python -m validation.image_size "${BASE}"
+
+  template_attach:
+    # Creates ONE template naming an already-published image, and points
+    # ONE endpoint at it. The second half of owner directive 2026-08-28.
+    # Refuses a tag (only a digest is an identity), an endpoint RunPod
+    # does not confirm, and an endpoint whose current template still
+    # RESOLVES — the warrant for writing is that the reference is
+    # dangling. Sends templateId and nothing else, so the endpoint's GPU
+    # and worker bounds cannot move. Costs nothing: workersMin stays 0,
+    # so no pod starts until a job arrives.
+    name: "template attach - ONE template, ONE endpoint, $0"
+    if: inputs.mode == 'template-attach' && inputs.attach_token == 'ATTACH-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Create the template, attach it, re-read the endpoint"
+        run: python -m validation.template_attach "${{ inputs.endpoint_id }}" "${{ inputs.image_ref }}" "${{ inputs.attach_token }}"
 
   queue_probe:
     name: "queue probe - read-only, $0"
