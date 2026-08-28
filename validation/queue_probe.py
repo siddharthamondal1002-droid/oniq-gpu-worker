@@ -42,9 +42,29 @@ def _queue_counts(health) -> tuple:
     return (in_queue, in_progress)
 
 
+JOB_KEYS = ("completed", "failed", "inProgress", "inQueue", "retried")
+WORKER_KEYS = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
+
+
+def _facts(health, section: str, keys) -> dict:
+    """Every key the provider reports for one section, fail-closed.
+
+    A key the payload does not carry is None, never 0 — the same rule
+    _queue_counts follows. Read from the health document already fetched
+    for the queue counts, so this costs no extra call and cannot spend.
+    """
+    if not isinstance(health, dict):
+        return {k: None for k in keys}
+    block = health.get(section)
+    if not isinstance(block, dict):
+        return {k: None for k in keys}
+    return {k: (block.get(k) if isinstance(block.get(k), int) else None) for k in keys}
+
+
 def probe_endpoint(client, endpoint_id: str, job_id: str) -> dict:
     row = {"endpoint": endpoint_id}
 
+    health = None
     try:
         _, health = client.endpoint_health(endpoint_id)
         in_queue, in_progress = _queue_counts(health)
@@ -53,6 +73,14 @@ def probe_endpoint(client, endpoint_id: str, job_id: str) -> dict:
         row["health_error"] = type(exc).__name__
     row["in_queue"] = in_queue
     row["in_progress"] = in_progress
+    # WHY THE WHOLE PAYLOAD AND NOT JUST THE TWO COUNTS. Story job
+    # 1481d262 (2026-08-28) died when story-still's image_generate returned
+    # FAILED twice on shot 1, and "in_queue 0, in_progress 0" cannot tell a
+    # healthy idle endpoint from one whose workers are unhealthy or
+    # throttled. failed/retried and the worker states are the difference
+    # between "cold start" and "the endpoint is broken", so they get read.
+    row["jobs"] = _facts(health, "jobs", JOB_KEYS)
+    row["workers"] = _facts(health, "workers", WORKER_KEYS)
 
     try:
         _, doc = client.job_status(endpoint_id, job_id)
