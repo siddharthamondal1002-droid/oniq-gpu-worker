@@ -286,3 +286,76 @@ def test_the_budget_accounts_for_the_build_holding_two_copies():
     """One times the floor fitting is not the question: docker keeps the
     layer cache and the assembled image at the same time."""
     assert isz.RUNNER_MNT_FREE_BYTES > isz.RUNNER_ROOT_FREE_BYTES
+
+
+# ------------------------------------- the substitution the build refuses
+
+def _refuses(code):
+    def fetch(_):
+        raise urllib.error.HTTPError("u", code, "Unauthorized", {}, None)
+
+    return fetch
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_an_auth_refusal_stops_rather_than_falling_through(code, capsys):
+    """Measured in run 51: the owner's chosen LTX candidate answers HTTP
+    401 — gated, not gone. Falling through turns an INFRASTRUCTURE failure
+    into a MODEL SUBSTITUTION, shipping a checkpoint nobody chose under
+    the same image name."""
+    bake = isz.parse_bakes(DOCKERFILE)[LTX]
+    out = isz.survey("r", bake, _refuses(code))
+    assert out["verdict"] == "AUTH-REFUSED"
+    assert out["bytes"] is None
+
+
+def test_a_blocked_bake_never_reaches_a_later_candidate():
+    seen = []
+
+    def fetch(repo):
+        seen.append(repo)
+        if repo == "Vendor/ltx-2b":
+            raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        return _ltx(4)
+
+    isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
+    assert "Vendor/ltx-13b" not in seen
+    assert "Vendor/ltx" not in seen
+
+
+def test_a_blocked_bake_refuses_to_produce_a_total(capsys):
+    def fetch(repo):
+        if repo == "Vendor/ltx-2b":
+            raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        return _ltx(4)
+
+    code, _ = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "BLOCKED" in out
+    assert "PROJECTED MEDIA IMAGE: NOT MEASURED" in out
+    assert "VERDICT" not in out
+
+
+def test_a_404_still_falls_through_because_that_is_a_judgement(capsys):
+    """A repository that does not exist is a fact about the model. Only a
+    refusal to authenticate is the ambiguous case."""
+    def fetch(repo):
+        if repo == "Vendor/ltx-2b":
+            raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        if repo == "Vendor/ltx-13b":
+            return _ltx(26)
+        return _ltx(4)
+
+    code, rows = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
+    assert rows[LTX]["repo"] == "Vendor/ltx"
+
+
+def test_the_dockerfile_bakes_refuse_an_auth_error_in_both_blocks():
+    """The projection and the build must agree, so the guard is asserted
+    in the Dockerfile itself rather than only in this module."""
+    with open("Dockerfile", encoding="utf-8") as fh:
+        text = fh.read()
+    assert text.count("def auth_refused(exc):") == 2
+    assert text.count("AUTH REFUSED for") == 2
+    assert text.count("status in (401, 403)") == 2

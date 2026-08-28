@@ -247,6 +247,13 @@ def survey(repo: str, bake: dict, fetch=_default_fetch) -> dict:
     try:
         info = fetch(repo)
     except Exception as exc:
+        code = getattr(exc, "code", None)
+        if code in (401, 403):
+            # The build STOPS here (Dockerfile, auth_refused), so the
+            # projection must too. Reporting a fall-through image would
+            # describe a build that will never happen.
+            return {"repo": repo, "verdict": "AUTH-REFUSED", "bytes": None,
+                    "detail": _why(exc) + " — the build refuses to fall through"}
         return {"repo": repo, "verdict": "UNREACHABLE", "bytes": None, "detail": _why(exc)}
 
     paths = {
@@ -315,12 +322,25 @@ def report(text: str, base_image_bytes=None, fetch=_default_fetch, head=_default
 
     for bake in parse_bakes(text):
         chosen = None
+        blocked = False
         for repo in bake["candidates"]:
             surveyed = survey(repo, bake, fetch)
-            print(f"  {surveyed['verdict']:11s} {repo}: {surveyed['detail']}")
+            print(f"  {surveyed['verdict']:12s} {repo}: {surveyed['detail']}")
+            if surveyed["verdict"] == "AUTH-REFUSED":
+                blocked = True
+                break
             if surveyed["verdict"] == "BAKE":
                 chosen = surveyed
                 break
+        if blocked:
+            print(
+                f"BAKE {bake['dest']}: BLOCKED — the first reachable answer was a "
+                "refusal to authenticate, and the build stops rather than "
+                "substituting a checkpoint nobody chose"
+            )
+            unknown = True
+            rows.append({"dest": bake["dest"], "bytes": None, "blocked": True})
+            continue
         if chosen is None:
             print(f"BAKE {bake['dest']}: NOT MEASURED — no candidate would bake")
             unknown = True

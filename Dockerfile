@@ -94,6 +94,26 @@ import inspect, json, os, shutil
 
 from huggingface_hub import HfApi, snapshot_download
 
+
+def auth_refused(exc):
+    """Was this a refusal to AUTHENTICATE, rather than a judgement?
+
+    Measured 2026-08-28 (validation run 51): the first candidate answers
+    HTTP 401 — gated, not gone. The loop below caught that with every
+    other failure and moved on, so an INFRASTRUCTURE problem silently
+    became a MODEL SUBSTITUTION: a build today would ship a different
+    checkpoint than the owner chose, under the same image name, and
+    nothing in the log would read as an error.
+
+    Falling through because a candidate fails the size or licence gate is
+    a judgement about the model and is exactly what the list is for.
+    Falling through because we could not log in is not a judgement at
+    all. UNKNOWN never becomes success anywhere else in this repo, and it
+    does not become a model choice here.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in (401, 403)
+
 CANDIDATES = [
     ("Lightricks/LTX-Video-0.9.8-2B-distilled", "#distilled"),
     ("Lightricks/LTX-Video-0.9.7-distilled", "#distilled"),
@@ -160,6 +180,13 @@ for repo, tag in CANDIDATES:
         print(f"BAKED {resolved} ({on_disk} transformer bytes on disk)")
         break
     except Exception as exc:
+        if auth_refused(exc):
+            raise SystemExit(
+                f"AUTH REFUSED for {repo}: the registry will not serve it without "
+                "credentials. Refusing to fall through to another checkpoint — "
+                "that would ship a model nobody chose. Either supply a token or "
+                "change the candidate list deliberately."
+            )
         print(f"SKIP {repo}: {type(exc).__name__}: {exc}")
         shutil.rmtree(DEST, ignore_errors=True)
         shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
@@ -196,6 +223,20 @@ RUN python3 - <<'EOF'
 import json, os, shutil
 
 from huggingface_hub import HfApi, snapshot_download
+
+
+def auth_refused(exc):
+    """A refusal to authenticate is not a judgement about the model.
+
+    Same rule as the LTX bake above, and here it also protects the
+    LICENCE GATE: a 401 caught as an ordinary skip would let the build
+    move to the next candidate without ever having read the licence it
+    was supposed to check. A gate that cannot run must stop the build,
+    not wave it through.
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status in (401, 403)
+
 
 # Quantised first (a smaller image pulls faster on a cold worker), then
 # the base weights, which always exist. A candidate that does not exist
@@ -267,6 +308,12 @@ for repo in CANDIDATES:
         print(f"BAKED {resolved} ({on_disk} weight bytes on disk, licence {licence})")
         break
     except Exception as exc:
+        if auth_refused(exc):
+            raise SystemExit(
+                f"AUTH REFUSED for {repo}: the registry will not serve it without "
+                "credentials, so the licence gate never ran. Refusing to fall "
+                "through — a gate that cannot run must stop the build."
+            )
         print(f"SKIP {repo}: {type(exc).__name__}: {exc}")
         shutil.rmtree(DEST, ignore_errors=True)
         shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
