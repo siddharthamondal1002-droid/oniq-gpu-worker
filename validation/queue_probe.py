@@ -59,7 +59,12 @@ def probe_endpoint(client, endpoint_id: str, job_id: str) -> dict:
         row["job_status"] = (doc or {}).get("status") if isinstance(doc, dict) else None
     except Exception as exc:
         row["job_status"] = None
-        row["status_error"] = type(exc).__name__
+        # The exception NAME is not the answer. RunPodApiError carries the
+        # HTTP code in its message ("GET <url> -> 404"), and 404-the-record-
+        # is-gone reads very differently from 401-we-cannot-look. The URL
+        # holds the endpoint and job id only; the credential travels in a
+        # header, so this is safe to print.
+        row["status_error"] = f"{type(exc).__name__}: {exc}"
 
     return row
 
