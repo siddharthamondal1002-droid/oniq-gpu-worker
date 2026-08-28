@@ -356,11 +356,32 @@ def rest_template_surface():
 
         create = _props((paths.get("/templates") or {}).get("post") or {})
         patch_ep = _props((paths.get("/endpoints/{endpointId}") or {}).get("patch") or {})
+
+        # EVERY path, not just the ones named "template". A create body that
+        # only takes an imageName means a template cannot be built from a
+        # repository AT THAT PATH; it does not yet mean the API has no build
+        # route at all. Reporting "impossible" off a keyword-filtered scan
+        # would be enumerating failures rather than searching, so dump the
+        # whole surface and let the absence be measured.
+        every = {}
+        for path, spec in paths.items():
+            if not isinstance(spec, dict):
+                continue
+            every[path] = sorted(
+                v.upper() for v in spec
+                if v.lower() in ("get", "post", "patch", "put", "delete")
+            )
+        wanted = ("build", "github", "git", "repo", "registry", "source", "image")
+        build_like = sorted(
+            path for path in every if any(w in path.lower() for w in wanted)
+        )
         return {
             "template_paths": found,
             "endpoint_verbs": endpoint_patch,
             "template_create_body": create,
             "endpoint_patch_body": patch_ep,
+            "all_paths": every,
+            "build_like_paths": build_like,
         }
     return None
 

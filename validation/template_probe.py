@@ -35,6 +35,31 @@ def report(client, expected_template_id: str) -> tuple:
     surface = client.rest_template_surface()
     print("=== REST surface (from the public OpenAPI document) ===")
     print(json.dumps(surface, indent=1, sort_keys=True))
+
+    # A template can only point at an image that already exists. If the create
+    # body takes an imageName and the API exposes no route that turns a
+    # repository into an image, then creating a template here would produce a
+    # SECOND dangling reference - the same broken state under a new id - and
+    # the console's build integration is the only way to get an image at all.
+    if surface:
+        create = surface.get("template_create_body") or {}
+        props = create.get("properties") or []
+        required = create.get("required") or []
+        print(f"CREATE REQUIRES: {required}")
+        print(f"CREATE ACCEPTS: {props}")
+        source_fields = [
+            k for k in props
+            if any(w in k.lower() for w in ("repo", "github", "git", "build", "source"))
+        ]
+        if source_fields:
+            print(f"BUILD FIELD PRESENT: {source_fields}")
+        else:
+            print(
+                "NO BUILD FIELD: the create body names an image, never a "
+                "repository - a template cannot build one"
+            )
+        build_like = surface.get("build_like_paths")
+        print(f"BUILD-LIKE PATHS ANYWHERE IN THE API: {build_like}")
     if not surface or not surface.get("template_paths"):
         print(
             "NO TEMPLATE API: the spec exposes no template path, so creating one "
