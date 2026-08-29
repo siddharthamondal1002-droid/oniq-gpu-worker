@@ -365,7 +365,11 @@ def test_keys_become_clips_named_after_the_object():
         "validation/out/ltx-001.mp4",
         "validation/video-test/ltx-001.mp4",
     ]
-    assert clips[0]["scene"] == "ltx-001"
+    # The WHOLE key, because two keys sharing a file name must not share a
+    # scene — the second's frames overwrote the first's when they did.
+    assert clips[0]["scene"] == "validation-out-ltx-001"
+    assert clips[1]["scene"] == "validation-video-test-ltx-001"
+    assert clips[0]["scene"] != clips[1]["scene"]
     # No worker report stands behind a hand-named key, so no size claim
     # is invented for it — the mp4 magic is still checked.
     assert "output_bytes" not in clips[0]
@@ -505,7 +509,7 @@ def test_a_signed_url_is_never_sent_in_the_clear():
 
 
 def test_only_the_object_name_survives_into_anything_visible():
-    assert frame_pull.safe_label(SIGNED) == "ltx-001"
+    assert frame_pull.safe_label(SIGNED) == "validation-out-ltx-001"
     for secret in SECRETS:
         assert secret not in frame_pull.safe_label(SIGNED)
 
@@ -518,7 +522,7 @@ def test_the_credential_never_reaches_the_report(tmp_path):
         fetch=lambda url: _mp4(256),
         run=lambda args, **kw: _Result(0, "4.04\n"),
     )
-    assert report["scene"] == "ltx-001"
+    assert report["scene"] == "validation-out-ltx-001"
     assert report["source"] == "signed"
     blob = json.dumps(report)
     for secret in SECRETS:
@@ -581,7 +585,10 @@ def test_a_403_on_the_signed_path_reports_the_status_without_the_url(tmp_path):
 
 def test_several_signed_urls_may_be_given_at_once():
     clips = frame_pull.clips_from_signed(SIGNED + "\n" + SIGNED.replace("ltx-001", "ltx-002"))
-    assert [c["scene"] for c in clips] == ["ltx-001", "ltx-002"]
+    assert [c["scene"] for c in clips] == [
+        "validation-out-ltx-001",
+        "validation-out-ltx-002",
+    ]
 
 
 def test_no_signed_urls_is_a_quiet_success(tmp_path, monkeypatch, capsys):

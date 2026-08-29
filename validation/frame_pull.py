@@ -476,9 +476,9 @@ def safe_label(url: str) -> str:
     it never reaches a log, a report or an exception message — only this,
     the last path segment with the query stripped.
     """
-    path = urllib.parse.urlsplit(url).path
-    tail = urllib.parse.unquote(path.rsplit("/", 1)[-1]) or "clip"
-    return tail.rsplit(".", 1)[0][:80] or "clip"
+    path = urllib.parse.unquote(urllib.parse.urlsplit(url).path).strip("/")
+    stem = path.rsplit(".", 1)[0].replace("/", "-") or "clip"
+    return stem[-80:] or "clip"
 
 
 def clips_from_signed(raw: str) -> list:
@@ -537,9 +537,16 @@ def clips_from_keys(raw: str) -> list:
     magic still is not) and the duration is MEASURED with ffprobe rather
     than assumed.
     """
+    # THE WHOLE KEY NAMES THE SCENE, not just the file name. MEASURED
+    # 2026-08-29: validation/out/ltx-001.mp4 and
+    # validation/video-test/ltx-001.mp4 both collapsed to the stem
+    # `ltx-001`, so the second clip's mp4, six frames and sheet silently
+    # OVERWROTE the first's, and half the evidence of the run was gone
+    # before the upload step ever saw it.
     clips = []
     for key in [k.strip() for k in (raw or "").split(",") if k.strip()]:
-        clips.append({"scene": key.rsplit("/", 1)[-1].rsplit(".", 1)[0], "output_key": key})
+        scene = key.rsplit(".", 1)[0].replace("/", "-")[-80:]
+        clips.append({"scene": scene, "output_key": key})
     return clips
 
 
