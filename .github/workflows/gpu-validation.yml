@@ -176,6 +176,15 @@ jobs:
           print("Job cap     : $", admission.JOB_CAP_USD, "-> ADMITTED")
           EOF
 
+      - name: "Live prices for every card in the benchmark's hardware matrix"
+        # Read-only, $0. The catalogue this reads is the one the financial gate
+        # above already pulls; this just prints the owner's candidate cards with
+        # their live quotes so the hardware matrix has a real COST column. It
+        # lives here rather than in model-bench because model-bench holds no
+        # RunPod credential at all, and that fence is worth more than the
+        # convenience of one combined table.
+        run: python -m validation.gpu_matrix
+
       - name: Keep the raw payloads
         if: always()
         uses: actions/upload-artifact@v4
