@@ -582,7 +582,13 @@ def test_submit_deadline_cancels_and_stops():
     with pytest.raises(spend_run.SpendStop) as exc:
         spend_run.submit_and_wait(client, "ep-123", {"op": "image_preprocess"},
                                   sleep=ft.sleep, clock=ft.clock)
-    assert exc.value.code == "job-deadline"
+    # The code and the message say WHAT expired: the harness's watch, not
+    # any billed ceiling — the mislabel cost a diagnosis on 2026-08-29 when
+    # a canary cancelled mid-cold-pull read as a job failure. The last
+    # polled state travels in the message so the stop says whether money
+    # was moving.
+    assert exc.value.code == "watch-deadline"
+    assert "IN_PROGRESS" in str(exc.value)
     assert client.cancelled == ["job-1"]
 
 

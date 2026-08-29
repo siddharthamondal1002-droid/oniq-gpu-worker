@@ -495,14 +495,37 @@ def submit_and_wait(
     if watch_s is None:
         watch_s = admission.RUNTIME_CEILING_SECONDS
     deadline = clock() + watch_s
+    last_seen = "never polled"
     while clock() < deadline:
         _, status = client.job_status(endpoint_id, job_id)
         if status.get("status") in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
             status["_job_id"] = job_id
             return status
+        last_seen = status.get("status") or "unknown"
         sleep(poll_s)
     client.cancel_job(endpoint_id, job_id)
-    raise SpendStop("job-deadline", f"job {job_id} exceeded the ceiling; cancelled")
+    # THE WATCH EXPIRED — that is not the job exceeding any billed ceiling,
+    # and saying so cost a diagnosis once: a canary cancelled mid-pull read
+    # as a job failure. The last polled state says whether money was moving
+    # (IN_PROGRESS) or the worker was still fetching bytes (IN_QUEUE).
+    raise SpendStop(
+        "watch-deadline",
+        f"job {job_id} outlived the {watch_s}s watch (last status "
+        f"{last_seen}); cancelled — execution stays bounded by the "
+        "endpoint's executionTimeout, so an IN_QUEUE cancel billed nothing",
+    )
+
+
+# WALL-CLOCK SLACK FOR A COLD IMAGE PULL, on top of an op's execution
+# ceiling. Measured, twice, on the first job after a template retarget:
+# 1,059,077 ms of delayTime on 2026-08-29 (the 200 GB disk image), and
+# MORE THAN 1,800 s later the same day (the diffusers 0.38 rebuild),
+# where the previous +900 s allowance cancelled a healthy canary at
+# exactly its 30-minute watch — the job was still pulling, nothing had
+# billed, and the stop wore the costume of a job failure. Delay time is
+# not billed; the money bound stays the endpoint's executionTimeout and
+# the contract ceiling, so patience here risks minutes, not dollars.
+COLD_PULL_ALLOWANCE_S = 2700
 
 
 # The one motion prompt of the first media experiment — a server
@@ -1211,18 +1234,19 @@ def one_job(
         # worker, so the harness must not send one either.
         payload.pop("input_key")
         payload["params"] = {"prompt": prompt or IMAGE_PROMPT}
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     if op == "video_generate":
         payload["params"] = {"prompt": prompt or VIDEO_PROMPT}
         # queue + first pull of the model-baked image can be many minutes
-        # of delayTime before bounded execution even starts.
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        # of delayTime before bounded execution even starts — and after a
+        # retarget it measured over thirty (see COLD_PULL_ALLOWANCE_S).
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     if op == "audio_mux":
         # The canary narration is a module constant, same discipline as
         # VIDEO_PROMPT: the dispatch never chooses the text. The input is
         # an EXISTING video artifact — nothing is generated to test audio.
         payload["params"] = {"narration": AUDIO_NARRATION}
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     status = submit_and_wait(
         client,
         facts["endpoint_id"],
