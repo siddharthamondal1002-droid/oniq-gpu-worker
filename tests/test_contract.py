@@ -42,6 +42,27 @@ def test_no_model_field_exists_in_contract():
     assert "model" in exc.value.message
 
 
+def test_no_production_op_accepts_a_model_field():
+    """model_probe admits `model`; nothing a user can reach does.
+
+    Widened 2026-08-29 when the benchmark op arrived. The original guard used
+    one production op, and adding "model" to the shared field set would have
+    retired it for every op at once — so the guard now walks them all, and the
+    exception is one op that no user request can produce."""
+    for op, params in (
+        ("image_preprocess", {"target_max_dim": 512, "format": "png"}),
+        ("image_generate", {"prompt": "x"}),
+        ("video_generate", {"prompt": "x"}),
+        ("audio_mux", {"narration": "x"}),
+    ):
+        with pytest.raises(contract.ContractError) as exc:
+            contract.validate_job({
+                "op": op, "input_key": "a.png", "output_key": "b.mp4",
+                "params": params, "model": "wan21-i2v-480p",
+            })
+        assert "model" in exc.value.message, op
+
+
 def test_no_gpu_field_exists_in_contract():
     with pytest.raises(contract.ContractError) as exc:
         contract.validate_job(_job(gpu="H100"))

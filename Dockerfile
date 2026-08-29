@@ -70,6 +70,7 @@ COPY contract.py /app/contract.py
 COPY preprocess.py /app/preprocess.py
 COPY storage.py /app/storage.py
 COPY videogen.py /app/videogen.py
+COPY modelprobe.py /app/modelprobe.py
 COPY storygen.py /app/storygen.py
 COPY audio.py /app/audio.py
 COPY handler.py /app/handler.py

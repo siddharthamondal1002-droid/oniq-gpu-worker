@@ -73,7 +73,7 @@ def handle(event) -> dict:
             _check_deadline(started)
             return contract.filter_output({**metrics, "cleanup_ok": True})
 
-        if job["op"] in ("video_generate", "audio_mux", "video_concat"):
+        if job["op"] in ("video_generate", "audio_mux", "video_concat", "model_probe"):
             output_path = f"{workdir}/output.mp4"
         elif job["op"] == "image_generate":
             output_path = f"{workdir}/output.{contract.IMAGE_GEN_FORMAT}"
@@ -101,6 +101,15 @@ def handle(event) -> dict:
 
             if job["op"] == "video_generate":
                 metrics = videogen.run(job, input_path, output_path)
+            elif job["op"] == "model_probe":
+                # The benchmark path. It downloads a candidate checkpoint at
+                # job time, which production never does — and it times that
+                # download as its own phase, because on a 14B candidate the
+                # fetch is expected to cost more than the inference and
+                # folding it into "model load" would misreport every row.
+                import modelprobe
+
+                metrics = modelprobe.run(job, input_path, output_path)
             elif job["op"] == "audio_mux":
                 metrics = audio.run(job, input_path, output_path)
             else:

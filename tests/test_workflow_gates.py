@@ -158,6 +158,8 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         "preprocess.py",
         "storage.py",
         "videogen.py",
+        # modelprobe joined 2026-08-29 with the benchmark op.
+        "modelprobe.py",
         "storygen.py",
         "audio.py",
         "handler.py",
@@ -181,6 +183,7 @@ def test_dockerignore_denies_by_default():
         "!preprocess.py",
         "!storage.py",
         "!videogen.py",
+        "!modelprobe.py",
         "!storygen.py",
         "!audio.py",
         "!handler.py",
@@ -275,6 +278,11 @@ def test_the_closure_actually_reaches_the_engines():
         "videogen",
         "storygen",
         "audio",
+        # modelprobe joined 2026-08-29 with the benchmark op. It is imported
+        # inside a handler branch rather than at module top, and the closure
+        # walk finds it anyway — which is the point: storygen once reached CI
+        # missing from both locks and the image died on import at start-up.
+        "modelprobe",
     }
     # runpod_client is the CI harness's, not the worker's. It must NOT be
     # in the image: it is the only module that talks to the RunPod API.

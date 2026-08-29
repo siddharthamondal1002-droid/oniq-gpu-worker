@@ -10,5 +10,6 @@
 !storage.py
 !handler.py
 !videogen.py
+!modelprobe.py
 !storygen.py
 !audio.py

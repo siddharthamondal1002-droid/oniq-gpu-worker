@@ -26,6 +26,11 @@ ALLOWED_OPS = (
     "audio_mux",
     "video_concat",
     "story_generate",
+    # model_probe joined 2026-08-29 (owner: five-model A5000 probe). A MODEL
+    # EVALUATION op, not a production one: it fetches a candidate checkpoint at
+    # job time and measures it. Production ops are untouched and still run the
+    # baked model with local_files_only, so nothing a user can reach changes.
+    "model_probe",
 )
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
@@ -101,6 +106,17 @@ MAX_CONCAT_SEGMENTS = 16
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,511}$")
 
 _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
+# `model` is legal on model_probe AND NOWHERE ELSE.
+#
+# The standing fence is that a caller cannot choose the model a production job
+# runs, and test_no_model_field_exists_in_contract has held that line since the
+# contract was written. Adding "model" to the set above would have quietly
+# retired that guard for every op at once — the test caught it, which is what
+# it is for. So the field is admitted per-op instead, and even on model_probe
+# it is a KEY into the worker's own benchmark table, never a repository, path
+# or revision: a caller may say which row of an authorised benchmark to run,
+# never what to download or how to run it.
+_PROBE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"model"}
 _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # watermark is a SERVER-derived entitlement relayed by the application —
 # absent means TRUE (marked), the fail-safe: an old or malformed caller
@@ -204,7 +220,12 @@ def validate_job(raw) -> dict:
     if not isinstance(raw, dict):
         raise ContractError("invalid-input", "job input must be an object")
 
-    unknown = set(raw) - _TOP_LEVEL_FIELDS
+    allowed = (
+        _PROBE_TOP_LEVEL_FIELDS
+        if raw.get("op") == "model_probe"
+        else _TOP_LEVEL_FIELDS
+    )
+    unknown = set(raw) - allowed
     if unknown:
         raise ContractError(
             "invalid-input",
@@ -298,6 +319,50 @@ def validate_job(raw) -> dict:
         return {
             "op": op,
             "input_key": None,
+            "output_key": output_key,
+            "params": {"prompt": prompt.strip()},
+        }
+
+    if op == "model_probe":
+        import modelprobe
+
+        model = raw.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ContractError("invalid-input", "model must be a non-empty string")
+        model = model.strip()
+        if model in modelprobe.NOT_EVALUATED:
+            raise ContractError(
+                "invalid-input",
+                f"{model} is NOT_EVALUATED: {modelprobe.NOT_EVALUATED[model]}",
+            )
+        if model not in modelprobe.PROBE_MODELS:
+            # Named, not guessed at. An unknown key is a harness bug and the
+            # job costs nothing to refuse; silently falling back to some
+            # default would spend a GPU measuring the wrong model.
+            raise ContractError(
+                "invalid-input",
+                "model must be one of: " + ", ".join(sorted(modelprobe.PROBE_MODELS)),
+            )
+        unknown_params = set(params_raw) - _VIDEO_PARAM_FIELDS
+        if unknown_params:
+            raise ContractError(
+                "invalid-input",
+                "unknown params field(s): " + ", ".join(sorted(unknown_params)),
+            )
+        prompt = params_raw.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ContractError(
+                "invalid-input", "params.prompt must be a non-empty string"
+            )
+        if len(prompt) > MAX_PROMPT_CHARS:
+            raise ContractError(
+                "invalid-input",
+                f"params.prompt may not exceed {MAX_PROMPT_CHARS} characters",
+            )
+        return {
+            "op": op,
+            "model": model,
+            "input_key": input_key,
             "output_key": output_key,
             "params": {"prompt": prompt.strip()},
         }
