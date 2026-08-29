@@ -266,17 +266,22 @@ PROBE_MODELS: dict[str, dict] = {
         # from_pretrained path does not reproduce — the whole pipeline runs
         # bf16 here, the same single-dtype convention as every other row.
         "dtype": "bfloat16",
-        # 8.3B bf16 transformer is ~15.5 GiB resident under model-level
-        # offload — before activations over ~12k-token variable-length
-        # attention that this card would run on plain SDPA (the docs
-        # recommend flash/sage for exactly that path). The margin is real on
-        # paper and unmeasured in practice, and an OOM caused by that gamble
-        # would be my configuration wearing the costume of a fact about the
-        # model. Sequential offload is also the closest diffusers equivalent
-        # of the path Tencent itself auto-enables on cards under 60 GB
-        # (group offload, one block per group), and it is the mode three of
-        # the four measured candidates already ran under.
-        "offload": "sequential",
+        # MODEL offload, and not by preference — by measurement, twice over.
+        # Sequential offload was tried first for fit-safety and is BROKEN
+        # for this pipeline in diffusers 0.38.0: job b91215e5…-u2
+        # (2026-08-29, $0.01) died 658 ms into the first denoise with
+        # "Tensor on device meta is not on the expected device cuda:0!",
+        # peak allocated 34 MB — a hook-wiring failure at zero residency,
+        # a fact about the offload mode, never about the model. Model
+        # offload is the path this pipeline's own documentation runs
+        # (enable_model_cpu_offload + vae tiling). The arithmetic that made
+        # it a gamble stands and is now the thing being measured: the 8.3B
+        # bf16 transformer is ~15.5 GiB resident before activations over
+        # ~12k-token variable-length attention on plain SDPA, against
+        # 23.55 GiB measured on the card. If THIS mode OOMs, both official
+        # offload configurations are exhausted on the A5000 and that is a
+        # decisive finding, not a retry prompt.
+        "offload": "model",
         # NO width/height ON PURPOSE, and the loader passes neither: this
         # pipeline accepts no such kwargs. It derives the canvas from the
         # reference image's aspect ratio against its trained 480p bucket
@@ -338,17 +343,22 @@ PROBE_MODELS: dict[str, dict] = {
         # from_pretrained path does not reproduce — the whole pipeline runs
         # bf16 here, the same single-dtype convention as every other row.
         "dtype": "bfloat16",
-        # 8.3B bf16 transformer is ~15.5 GiB resident under model-level
-        # offload — before activations over ~12k-token variable-length
-        # attention that this card would run on plain SDPA (the docs
-        # recommend flash/sage for exactly that path). The margin is real on
-        # paper and unmeasured in practice, and an OOM caused by that gamble
-        # would be my configuration wearing the costume of a fact about the
-        # model. Sequential offload is also the closest diffusers equivalent
-        # of the path Tencent itself auto-enables on cards under 60 GB
-        # (group offload, one block per group), and it is the mode three of
-        # the four measured candidates already ran under.
-        "offload": "sequential",
+        # MODEL offload, and not by preference — by measurement, twice over.
+        # Sequential offload was tried first for fit-safety and is BROKEN
+        # for this pipeline in diffusers 0.38.0: job b91215e5…-u2
+        # (2026-08-29, $0.01) died 658 ms into the first denoise with
+        # "Tensor on device meta is not on the expected device cuda:0!",
+        # peak allocated 34 MB — a hook-wiring failure at zero residency,
+        # a fact about the offload mode, never about the model. Model
+        # offload is the path this pipeline's own documentation runs
+        # (enable_model_cpu_offload + vae tiling). The arithmetic that made
+        # it a gamble stands and is now the thing being measured: the 8.3B
+        # bf16 transformer is ~15.5 GiB resident before activations over
+        # ~12k-token variable-length attention on plain SDPA, against
+        # 23.55 GiB measured on the card. If THIS mode OOMs, both official
+        # offload configurations are exhausted on the A5000 and that is a
+        # decisive finding, not a retry prompt.
+        "offload": "model",
         # NO width/height ON PURPOSE, and the loader passes neither: this
         # pipeline accepts no such kwargs. It derives the canvas from the
         # reference image's aspect ratio against its trained 480p bucket

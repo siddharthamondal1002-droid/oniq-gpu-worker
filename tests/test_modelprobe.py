@@ -115,7 +115,11 @@ def test_hunyuan_rows_carry_no_canvas_and_the_territory_restriction():
     for key in ("hunyuanvideo-1.5-i2v", "hunyuanvideo-1.5-i2v-12step"):
         row = modelprobe.PROBE_MODELS[key]
         assert "width" not in row and "height" not in row, key
-        assert row["offload"] == "sequential", key
+        # "model" by measurement as well as arithmetic: sequential offload
+        # is broken for this pipeline in diffusers 0.38.0 (meta-device
+        # error 658 ms into the first denoise, job b91215e5…-u2, $0.01),
+        # and model offload is the path its own documentation runs.
+        assert row["offload"] == "model", key
         assert (row["frames"], row["fps"]) == (121, 24), key
         assert "EU" in row["licence"], key
         assert "guidance" not in row, key
@@ -674,6 +678,12 @@ def test_a_candidate_whose_transformer_exceeds_the_card_gets_sequential_offload(
         "ltx-13b": 13e9,
         "wan21-i2v-480p": 14e9,
         "wan22-i2v-a14b": 14e9,
+        # 8.3B bf16 = 16.6 GB resident — inside the card with room for
+        # activations, same side of the line as cogvideox. (Sequential was
+        # still tried first for extra margin, and is broken upstream for
+        # this pipeline; the arithmetic and the measurement now agree.)
+        "hunyuanvideo-1.5-i2v": 8.3e9,
+        "hunyuanvideo-1.5-i2v-12step": 8.3e9,
     }
     for key, params in approx_params.items():
         resident = params * 2  # bf16
