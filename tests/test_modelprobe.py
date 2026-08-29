@@ -585,3 +585,43 @@ def test_a_pipeline_that_returned_nothing_is_a_generation_failure(rig):
                        load_pipeline=lambda local: fake_pipe(frames=[]),
                        torch=FakeTorch())
     assert stop.value.failure == "GENERATION_FAILURE"
+
+
+# ----------------------------- offload, decided by arithmetic not by taste
+
+
+def test_a_candidate_whose_transformer_exceeds_the_card_gets_sequential_offload():
+    """enable_model_cpu_offload() keeps ONE pipeline component resident, so
+    the peak is the transformer: params x 2 bytes in bf16. An OOM caused by
+    choosing model-level offload for a 26 GiB transformer would be a fact
+    about the configuration wearing the costume of a fact about the model."""
+    A5000_BYTES = 24 * 1000 ** 3  # the card's marketed 24GB
+    approx_params = {
+        "cogvideox-i2v": 5e9,
+        "ltx-13b": 13e9,
+        "wan21-i2v-480p": 14e9,
+        "wan22-i2v-a14b": 14e9,
+    }
+    for key, params in approx_params.items():
+        resident = params * 2  # bf16
+        row = modelprobe.PROBE_MODELS[key]
+        if resident >= A5000_BYTES * 0.85:
+            assert row["offload"] == "sequential", key
+        else:
+            assert row["offload"] == "model", key
+
+
+def test_no_candidate_runs_without_an_offload_strategy():
+    for key, row in modelprobe.PROBE_MODELS.items():
+        assert row["offload"] in {"model", "sequential", "none"}, key
+
+
+def test_the_offload_choice_is_the_servers_and_no_caller_can_change_it():
+    """A caller names a benchmark ROW; every knob behind it is fixed here."""
+    import contract
+
+    job = {"op": "model_probe", "model": "wan21-i2v-480p",
+           "input_key": "out/ref.png", "output_key": "out/x.mp4",
+           "offload": "model", "params": {"prompt": "turn"}}
+    with pytest.raises(contract.ContractError):
+        contract.validate_job(job)

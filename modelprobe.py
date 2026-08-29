@@ -56,6 +56,7 @@ DOWNLOAD_BUDGET_SECONDS = int(contract.PROBE_RUNTIME_CEILING_SECONDS * 0.55)
 # `dtype` is the precision to LOAD at, which is not the precision on disk.
 # Wan ships fp32; loading bf16 halves it, and that is the difference between
 # fitting this card and not.
+#
 # SAMPLING SETTINGS ARE CITED, NEVER CHOSEN HERE.
 #
 # Read from each publisher's own model card at the PINNED revision on
@@ -65,6 +66,27 @@ DOWNLOAD_BUDGET_SECONDS = int(contract.PROBE_RUNTIME_CEILING_SECONDS * 0.55)
 # the report says explicitly. A 13B distilled checkpoint sampled at an
 # invented step count is not that model performing badly, it is the wrong
 # experiment — so nothing here is a preference.
+#
+# WHICH OFFLOAD, AND WHY IT IS NOT A PREFERENCE EITHER.
+#
+# enable_model_cpu_offload() keeps ONE pipeline component on the card at a
+# time, so the peak is the largest component — the transformer. In bf16 that
+# is params x 2 bytes, and against a 24 GB A5000 the arithmetic decides:
+#
+#   cogvideox-5b        9.31 GiB   fits, with room for activations
+#   ltx-13b            24.21 GiB   does not fit
+#   wan21-i2v-14b      26.08 GiB   does not fit
+#   wan22 (per expert) 26.08 GiB   does not fit
+#
+# So the three large candidates get SEQUENTIAL offload, which moves
+# submodules rather than whole components and therefore fits. That choice is
+# made here, before any money moves, because an OOM caused by my picking
+# model-level offload for a 26 GiB transformer would be a fact about my
+# configuration wearing the costume of a fact about the model — exactly the
+# "do not turn a technical failure into a quality judgment" the owner ruled
+# out. Sequential offload is much slower, and that slowness is a REAL and
+# reportable cost of running a 14B model on this card; it is not a reason to
+# rent a bigger one.
 PROBE_MODELS: dict[str, dict] = {
     "ltx-13b": {
         "label": "LTX-Video 13B (distilled)",
@@ -79,7 +101,7 @@ PROBE_MODELS: dict[str, dict] = {
         "pipeline": "LTXImageToVideoPipeline",
         "licence": "other (LTX Open Weights)",
         "dtype": "bfloat16",
-        "offload": "model",
+        "offload": "sequential",
         "width": 704,
         "height": 480,
         "frames": 97,
@@ -115,7 +137,7 @@ PROBE_MODELS: dict[str, dict] = {
         "pipeline": "WanImageToVideoPipeline",
         "licence": "apache-2.0",
         "dtype": "bfloat16",
-        "offload": "model",
+        "offload": "sequential",
         # 832x480 is this checkpoint's own landscape shape; 704x480 is not one
         # it was trained at, and forcing ONIQ's canvas onto it would measure
         # the mismatch rather than the model.
@@ -141,7 +163,7 @@ PROBE_MODELS: dict[str, dict] = {
         "pipeline": "WanImageToVideoPipeline",
         "licence": "apache-2.0",
         "dtype": "bfloat16",
-        "offload": "model",
+        "offload": "sequential",
         "width": 832,
         "height": 480,
         "frames": 81,
