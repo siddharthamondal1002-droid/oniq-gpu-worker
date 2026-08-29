@@ -245,6 +245,41 @@ jobs:
         env:
           SIGNED_URLS: ${{ inputs.signed_urls }}
         run: python -m validation.frame_pull signed
+      # THE FRAMES, IN THE LOG AS WELL AS THE ARTIFACT. The artifact zip
+      # lives on a blob store some review environments cannot reach; the
+      # log they can always read. Each PNG under frames/ is base64'd
+      # between marker lines, bounded per file and in total, so a remote
+      # reviewer can decode and LOOK at the actual frames. Images only —
+      # no URL, no credential, nothing but pixels this run produced.
+      - name: "Frames inline in the log, for remote inspection"
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os
+          root = "frames"
+          if not os.path.isdir(root):
+              print("no frames directory - nothing to inline")
+              raise SystemExit(0)
+          total = 0
+          for name in sorted(os.listdir(root)):
+              if not name.endswith(".png"):
+                  continue
+              path = os.path.join(root, name)
+              size = os.path.getsize(path)
+              if size > 2_000_000:
+                  print(f"=== FRAME SKIPPED {name} ({size} bytes over the 2MB cap) ===")
+                  continue
+              if total + size > 8_000_000:
+                  print("=== FRAME BUDGET EXHAUSTED - download the ltx-frames artifact for the rest ===")
+                  break
+              total += size
+              data = base64.b64encode(open(path, "rb").read()).decode()
+              print(f"=== FRAME b64 {name} {size} ===")
+              for i in range(0, len(data), 3800):
+                  print(data[i : i + 3800])
+              print(f"=== END {name} ===")
+          PYEOF
+
       - name: "The frames, for inspection"
         if: always()
         uses: actions/upload-artifact@v4
@@ -537,6 +572,41 @@ jobs:
           # be corrected without an owner visiting the settings page.
           R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
         run: python -m validation.frame_pull
+
+      # THE FRAMES, IN THE LOG AS WELL AS THE ARTIFACT. The artifact zip
+      # lives on a blob store some review environments cannot reach; the
+      # log they can always read. Each PNG under frames/ is base64'd
+      # between marker lines, bounded per file and in total, so a remote
+      # reviewer can decode and LOOK at the actual frames. Images only —
+      # no URL, no credential, nothing but pixels this run produced.
+      - name: "Frames inline in the log, for remote inspection"
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os
+          root = "frames"
+          if not os.path.isdir(root):
+              print("no frames directory - nothing to inline")
+              raise SystemExit(0)
+          total = 0
+          for name in sorted(os.listdir(root)):
+              if not name.endswith(".png"):
+                  continue
+              path = os.path.join(root, name)
+              size = os.path.getsize(path)
+              if size > 2_000_000:
+                  print(f"=== FRAME SKIPPED {name} ({size} bytes over the 2MB cap) ===")
+                  continue
+              if total + size > 8_000_000:
+                  print("=== FRAME BUDGET EXHAUSTED - download the ltx-frames artifact for the rest ===")
+                  break
+              total += size
+              data = base64.b64encode(open(path, "rb").read()).decode()
+              print(f"=== FRAME b64 {name} {size} ===")
+              for i in range(0, len(data), 3800):
+                  print(data[i : i + 3800])
+              print(f"=== END {name} ===")
+          PYEOF
 
       - name: "The frames, for inspection"
         if: always()

@@ -585,7 +585,7 @@ def test_gate7_no_frame_step_can_fail_a_paid_generation():
     # verified, paid generation into a red run.
     for step in _spend_steps():
         name = step.get("name") or step.get("uses") or ""
-        if any(k in name for k in ("ffmpeg", "Frames from", "The frames")):
+        if any(k in name for k in ("ffmpeg", "Frames from", "Frames inline", "The frames")):
             assert step.get("if") == "always()", f"{name} is not if: always()"
 
 

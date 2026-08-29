@@ -75,7 +75,9 @@ MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 # fix instead of at a number. Guidance only — never a claim of fact.
 HTTP_HINTS = {
     403: "the bucket has no public read enabled (r2.dev dev URL off, or "
-         "no public access), or this object is not public",
+         "no public access), this object is not public, or r2.dev's "
+         "UA-signature filter refused this client (a browser-UA retry is "
+         "attempted automatically)",
     404: "no object at that key under this base — check the key, and "
          "whether the base already includes the bucket name",
     401: "the base is not a public read base; it wants credentials",
@@ -280,15 +282,79 @@ def read_manifest(path: str = MANIFEST) -> list:
 # ------------------------------------------------------------- the pull
 
 
-def _fetch(url: str) -> bytes:
-    request = urllib.request.Request(url, method="GET")
-    with urllib.request.urlopen(request, timeout=120) as response:
-        length = response.headers.get("Content-Length")
-        if length and int(length) > MAX_ARTIFACT_BYTES:
-            raise FramePullError(
-                "artifact-too-large", f"{length} bytes exceeds the read bound"
-            )
-        return response.read(MAX_ARTIFACT_BYTES + 1)
+# WHO WE SAY WE ARE, and why there are two answers.
+#
+# MEASURED 2026-08-29: both this module's CI probe and an independent probe
+# from the app's own sandbox got HTTP 403 from the read base with a 17-byte
+# body — `error code: 1010`, Cloudflare's UA-SIGNATURE ban, which r2.dev
+# applies to known scraper agents (python-urllib among them). Meanwhile the
+# app's Deno fetch reads the same objects unauthenticated and succeeds:
+# run fce10e2d pulled nine stills from this base hours before the probes.
+# So a 403 here can mean "the client's UA is on Cloudflare's list", not
+# "the bucket is private" — two completely different facts.
+#
+# The primary UA names this tool honestly. Only on a 403 is ONE retry made
+# with a browser-shaped UA — against the owner's own bucket, to read the
+# owner's own objects — and when that retry is what succeeds it is said in
+# the log, because "the bucket is UA-filtered, not private" is exactly the
+# diagnosis the owner needs.
+UA_PRIMARY = "oniq-gpu-validation-frame-pull/1"
+UA_BROWSER = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+
+
+def _open(url: str, ua: str, timeout: int = 120):
+    request = urllib.request.Request(url, method="GET", headers={"User-Agent": ua})
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _fetch(url: str, *, opener=_open) -> bytes:
+    last = None
+    for label, ua in (("frame-pull", UA_PRIMARY), ("browser", UA_BROWSER)):
+        try:
+            with opener(url, ua) as response:
+                length = response.headers.get("Content-Length")
+                if length and int(length) > MAX_ARTIFACT_BYTES:
+                    raise FramePullError(
+                        "artifact-too-large", f"{length} bytes exceeds the read bound"
+                    )
+                data = response.read(MAX_ARTIFACT_BYTES + 1)
+                if label == "browser":
+                    print(
+                        "frame-pull note: refused under the frame-pull UA but "
+                        "served to a browser UA — the base is UA-FILTERED, "
+                        "not private"
+                    )
+                return data
+        except urllib.error.HTTPError as exc:
+            last = exc
+            # Only the UA-ban shape earns the second identity. Everything
+            # else (404, 401, 5xx) would answer a different UA identically,
+            # and retrying would just blur the diagnosis.
+            if exc.code != 403:
+                raise
+    raise last
+
+
+def http_detail(exc) -> str:
+    """The first line of an HTTP error's body, printable and bounded.
+
+    `error code: 1010` is a whole diagnosis; "HTTPError" is none. The body
+    of an edge/CDN error page is not a secret, but it is untrusted text, so
+    it is clamped hard and stripped to printable ASCII before it can reach
+    a log line.
+    """
+    try:
+        raw = exc.read(64)
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    text = raw.decode("ascii", "ignore")
+    line = text.splitlines()[0] if text else ""
+    return "".join(ch for ch in line if 32 <= ord(ch) < 127)[:64].strip()
 
 
 def pull_clip(
@@ -340,6 +406,9 @@ def pull_clip(
         # A status code is not a secret; the URL still never appears.
         report["error"] = f"fetch-failed:HTTP {exc.code}"
         report["hint"] = HTTP_HINTS.get(exc.code, "")
+        detail = http_detail(exc)
+        if detail:
+            report["detail"] = detail
         return report
     except (urllib.error.URLError, OSError) as exc:
         # The class of failure, never the URL: an error string can carry

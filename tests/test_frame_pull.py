@@ -589,3 +589,105 @@ def test_no_signed_urls_is_a_quiet_success(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SIGNED_URLS", "")
     assert frame_pull.main(["signed"]) == 0
     assert "names no object" in capsys.readouterr().out
+
+
+# --------------------------------------------- the UA and the 403 retry
+#
+# MEASURED 2026-08-29: both CI's probe and an independent probe from the
+# app's sandbox got HTTP 403 with the 17-byte body `error code: 1010` —
+# Cloudflare's UA-signature ban on r2.dev — while the app's Deno fetch
+# reads the same objects successfully. A 403 can mean "your client's UA
+# is on a scraper list", not "the bucket is private", and the retry
+# exists to tell those apart in one run.
+
+import io as _io
+import urllib.error as _ue
+
+
+class _Resp:
+    def __init__(self, data: bytes):
+        self._data = data
+        self.headers = {"Content-Length": str(len(data))}
+
+    def read(self, n=-1):
+        return self._data
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    class headers:  # overwritten in __init__
+        pass
+
+
+def _http_error(code: int, body: bytes = b"") -> _ue.HTTPError:
+    return _ue.HTTPError("https://x", code, "err", {}, _io.BytesIO(body))
+
+
+def test_the_primary_ua_names_the_tool_honestly():
+    assert "frame-pull" in frame_pull.UA_PRIMARY
+    assert "Mozilla" not in frame_pull.UA_PRIMARY
+
+
+def test_a_403_earns_one_browser_ua_retry_and_says_so(capsys):
+    seen = []
+
+    def opener(url, ua, timeout=120):
+        seen.append(ua)
+        if ua == frame_pull.UA_PRIMARY:
+            raise _http_error(403, b"error code: 1010")
+        return _Resp(_mp4(64))
+
+    data = frame_pull._fetch("https://x/clip.mp4", opener=opener)
+    assert data == _mp4(64)
+    assert seen == [frame_pull.UA_PRIMARY, frame_pull.UA_BROWSER]
+    assert "UA-FILTERED, not private" in capsys.readouterr().out
+
+
+def test_a_404_is_answered_once_because_a_different_ua_changes_nothing():
+    seen = []
+
+    def opener(url, ua, timeout=120):
+        seen.append(ua)
+        raise _http_error(404)
+
+    with pytest.raises(_ue.HTTPError):
+        frame_pull._fetch("https://x/clip.mp4", opener=opener)
+    assert seen == [frame_pull.UA_PRIMARY]
+
+
+def test_a_403_under_both_identities_raises_the_403():
+    with pytest.raises(_ue.HTTPError) as exc:
+        frame_pull._fetch(
+            "https://x/clip.mp4",
+            opener=lambda url, ua, timeout=120: (_ for _ in ()).throw(
+                _http_error(403, b"error code: 1010")
+            ),
+        )
+    assert exc.value.code == 403
+
+
+def test_the_error_body_becomes_a_bounded_printable_detail():
+    assert frame_pull.http_detail(_http_error(403, b"error code: 1010\n")) == (
+        "error code: 1010"
+    )
+    # Binary junk and control characters never reach a log line.
+    # read(64) takes the first 64 raw bytes (5 junk + 59 A's); the filter
+    # then drops the 3 non-printables.
+    noisy = frame_pull.http_detail(_http_error(403, b"\x00\x01ok\x7f" + b"A" * 500))
+    assert noisy == "ok" + "A" * 59
+    assert frame_pull.http_detail(_ue.HTTPError("https://x", 403, "e", {}, None)) == ""
+
+
+def test_the_detail_rides_in_the_report_beside_the_status(tmp_path):
+    report = frame_pull.pull_clip(
+        {"scene": "s", "output_key": "validation/out/ltx-001.mp4"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(_http_error(403, b"error code: 1010")),
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "fetch-failed:HTTP 403"
+    assert report["detail"] == "error code: 1010"
