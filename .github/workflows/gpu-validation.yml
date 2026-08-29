@@ -411,6 +411,53 @@ jobs:
       - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
         run: python -m validation.spend_run run
 
+      # ----------------------------------------------------------------
+      # FRAMES, NOT METADATA (owner directive 2026-08-29).
+      #
+      #   LTX generation -> R2 -> frame extraction -> CI artifact -> eye
+      #
+      # Every LTX judgement before this was made from a COMPLETED status,
+      # a frame count and a byte count. None of those can tell you
+      # whether the character turned their head or whether the model
+      # smeared the plate for four seconds, and a route to the frames
+      # that needs a human to remember it is a route nobody takes.
+      #
+      # EVERY STEP HERE IS AFTER THE SPEND, AND if: always(). The GPU
+      # work is finished and paid for by the time any of this runs, so a
+      # missing ffmpeg, an unset variable or a 404 on the bucket can
+      # never fail a generation that already succeeded and was already
+      # verified. The artifacts stay in R2 either way; what is lost is
+      # only the seeing, and the log says so plainly.
+      #
+      # NOTHING HERE HOLDS A CREDENTIAL. R2_PUBLIC_BASE_URL is a
+      # repository VARIABLE, not a secret, because it is the same public
+      # read base the application already fetches artifacts from with no
+      # Authorization header — gate 6 still stands, and R2's write
+      # credentials remain in the RunPod endpoint's environment alone.
+      # frame_pull REFUSES a base carrying a query, fragment or userinfo,
+      # so a presigned URL pasted in by mistake is rejected as the
+      # credential it is rather than used as a base.
+      - name: ffmpeg (after the spend, so apt can never block a paid run)
+        if: always()
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: "Frames from the clips this run actually produced"
+        if: always()
+        env:
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        run: python -m validation.frame_pull
+
+      - name: "The frames, for inspection"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ltx-frames
+          path: |
+            frames/
+            artifact-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
   standby_probe:
     # READ-ONLY twin of the standby job. Owner directive 2026-08-27: run
     # the standby diagnostic, and stop re-attempting a mutation already

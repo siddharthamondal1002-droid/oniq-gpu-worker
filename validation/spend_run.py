@@ -33,7 +33,7 @@ import time
 import urllib.request
 from decimal import ROUND_UP, Decimal
 
-from validation import admission
+from validation import admission, frame_pull
 
 R2_ENV_REQUIRED = ("R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
 _REDACT_MARKERS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTHORIZATION")
@@ -1197,6 +1197,19 @@ def main(argv) -> int:
                 rows += battery(rp, facts, 20)
                 print("PHASE 19 PASS — twenty-job battery")
         _show("economics (real rows only)", economics(rows))
+        # WHAT THIS RUN GENERATED, named for the frame pull that follows.
+        #
+        # Owner directive 2026-08-29: LTX quality is judged from actual
+        # frames, so a run has to say which objects it wrote. Purely
+        # additive — nothing below reads this, no gate consults it, and a
+        # filesystem error here cannot refuse work that already
+        # succeeded. It carries keys and sizes, never a price and never a
+        # credential.
+        try:
+            manifest = frame_pull.write_manifest(rows)
+            print(f"artifact manifest: {len(manifest['clips'])} clip(s) named")
+        except OSError as exc:
+            print(f"artifact manifest not written ({type(exc).__name__})")
         sweep = rp.sweep_orphans()
         if sweep is None or sweep.get("pods") != 0 or sweep.get("endpoint_min_workers") != 0:
             raise SpendStop("orphan-alarm", f"final sweep not clean: {sweep}")

@@ -547,3 +547,62 @@ def test_the_proofs_all_run_before_the_push():
     for needle in ("The image starts", "uid 10001", "LTX 2B", "credential did NOT"):
         at = next(i for i, n in enumerate(names) if n and needle in n)
         assert at < push_at, needle
+
+
+# ------------------------------------------- gate 7: frames, never metadata
+#
+# Owner directive 2026-08-29: LTX quality is judged from actual frames.
+# The route generation -> R2 -> extraction -> artifact must be automatic,
+# and it must be incapable of costing money or holding a credential.
+
+
+def _spend_steps():
+    doc, _ = _load("gpu-validation.yml")
+    return doc["jobs"]["spend"]["steps"]
+
+
+def test_gate7_frames_are_pulled_only_after_the_spend_has_finished():
+    steps = _spend_steps()
+    names = [s.get("name") or s.get("uses") or "" for s in steps]
+    spend = next(i for i, n in enumerate(names) if "Phases 12-19" in n)
+    pull = next(i for i, n in enumerate(names) if "Frames from the clips" in n)
+    upload = next(i for i, n in enumerate(names) if "The frames, for inspection" in n)
+    assert spend < pull < upload, (
+        "a frame step before the spend could delay or block an authorized run"
+    )
+
+
+def test_gate7_no_frame_step_can_fail_a_paid_generation():
+    # The GPU work is finished and billed by the time these run. A
+    # missing ffmpeg, an unset variable or a 404 must never turn a
+    # verified, paid generation into a red run.
+    for step in _spend_steps():
+        name = step.get("name") or step.get("uses") or ""
+        if any(k in name for k in ("ffmpeg", "Frames from", "The frames")):
+            assert step.get("if") == "always()", f"{name} is not if: always()"
+
+
+def test_gate7_the_read_base_is_a_variable_and_never_a_secret():
+    _, raw = _load("gpu-validation.yml")
+    assert "vars.R2_PUBLIC_BASE_URL" in raw
+    assert "secrets.R2_PUBLIC_BASE_URL" not in raw, (
+        "a public read base carried as a secret invites a presigned URL"
+    )
+    # And no R2 WRITE credential ever reaches CI (gate 6, restated here
+    # because this is the change that made CI touch the bucket at all).
+    for forbidden in (
+        "secrets.R2_ACCESS_KEY_ID",
+        "secrets.R2_SECRET_ACCESS_KEY",
+        "secrets.R2_S3_ENDPOINT",
+    ):
+        assert forbidden not in raw
+
+
+def test_gate7_the_frame_puller_never_submits_a_job():
+    # It reads objects that already exist. If it could reach RunPod it
+    # could spend, and "do not launch a GPU job to test plumbing" would
+    # depend on nobody making a mistake.
+    path = os.path.join(ROOT, "validation", "frame_pull.py")
+    src = open(path, encoding="utf-8").read()
+    for forbidden in ("runpod", "RUNPOD_API_KEY", "/run", "submit"):
+        assert forbidden not in src, f"frame_pull references {forbidden!r}"
