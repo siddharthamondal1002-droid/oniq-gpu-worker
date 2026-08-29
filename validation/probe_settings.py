@@ -91,6 +91,41 @@ def scheduler_defaults(text: str) -> dict:
     return {k: doc[k] for k in keys if k in doc}
 
 
+def declared_components(text: str) -> dict:
+    """The components a repo's model_index.json says its pipeline needs.
+
+    Keys whose value is a [library, class] pair are subfolders that must be
+    on disk; everything else (_class_name, _diffusers_version, scalars) is
+    configuration.
+    """
+    try:
+        doc = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {
+        key: value[1]
+        for key, value in doc.items()
+        if isinstance(value, list) and len(value) == 2 and value[0]
+    }
+
+
+def covered_by(patterns, folder: str) -> bool:
+    """Would the allow list fetch anything from this subfolder?
+
+    fnmatch-style, and deliberately simple: a pattern either names the
+    folder's prefix or names a file inside it. Getting this wrong the other
+    way is what the LTX vae case was about — this asks the narrower question,
+    "is the folder reachable at all".
+    """
+    for pattern in patterns:
+        head = pattern.split("/", 1)[0]
+        if head in (folder, "*", "**"):
+            return True
+    return False
+
+
 def report(fetcher=fetch) -> int:
     print("=== PUBLISHER-STATED SAMPLING SETTINGS, read at $0 ===")
     print("Nothing here is applied automatically. A row gets a step count only")
@@ -116,6 +151,27 @@ def report(fetcher=fetch) -> int:
             print("    scheduler/scheduler_config.json: absent or unreadable")
         else:
             print(f"    scheduler | {scheduler_defaults(sched)}")
+        # DOES THE ALLOW LIST COVER WHAT THE PIPELINE NEEDS. A missing
+        # subfolder is not discovered until from_pretrained runs, which is
+        # after the whole download has been paid for on a rented GPU.
+        index = fetcher(card_url(row["repo"], row["revision"], "model_index.json"))
+        if index is None:
+            print("    model_index.json: UNREADABLE — coverage NOT checked")
+        else:
+            declared = declared_components(index)
+            # A body that is not an index is a real outcome (a 404 page, a
+            # redirect) and must read as "unknown", never crash the reader.
+            try:
+                klass = json.loads(index).get("_class_name")
+            except Exception:  # noqa: BLE001
+                klass = "UNREADABLE"
+            print(f"    model_index | _class_name={klass}  probing with {row['pipeline']}")
+            missing = [f for f in declared if not covered_by(row["allow"], f)]
+            print(f"    components  | {', '.join(sorted(declared)) or '(none declared)'}")
+            if missing:
+                print(f"    COVERAGE    | *** MISSING FROM allow: {', '.join(sorted(missing))} ***")
+            else:
+                print("    COVERAGE    | every declared component is inside the allow list")
         print()
     for key, reason in sorted(modelprobe.NOT_EVALUATED.items()):
         print(f"--- {key}: NOT_EVALUATED ({reason}) — not read, not probed")
