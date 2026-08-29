@@ -3,6 +3,7 @@ them. A gate that only exists in prose is not a gate."""
 
 import json
 import os
+import pathlib
 
 import yaml
 
@@ -389,6 +390,11 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # no RunPod credential at all, so it is a $0 mode that cannot
         # become a paid one by mistake.
         "frames-pull",
+        # model-bench joined 2026-08-29 with the owner's expanded benchmark
+        # brief. It reads the HuggingFace registry and does arithmetic on
+        # file sizes; it submits no job and holds no RunPod credential, so
+        # like frames-pull it is a $0 mode that cannot turn into a paid one.
+        "model-bench",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -703,3 +709,26 @@ def test_gate9_the_plate_input_is_a_closed_choice():
     assert plate["options"] == ["a", "b"]
     assert plate["default"] == "a"
     assert "PLATE: ${{ inputs.plate }}" in raw
+
+
+def test_the_model_bench_job_cannot_spend():
+    """The expanded benchmark's free half. Measuring which models MIGHT be
+    worth paying for must never itself become a way to pay for one, so the
+    job holds no RunPod credential and submits nothing."""
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["model_bench"]
+    assert job["if"].strip() == "inputs.mode == 'model-bench'"
+    assert "RUNPOD_API_KEY" not in json.dumps(job)
+    runs = " ".join(s.get("run", "") for s in job["steps"])
+    assert "validation.model_bench" in runs
+    for forbidden in ("runpod", "/run", "submit"):
+        assert forbidden not in runs.lower()
+
+
+def test_the_model_bench_module_never_reaches_runpod():
+    """Belt and braces: the job is fenced above, and the module it runs has
+    no way to reach the provider even if the workflow changed."""
+    source = pathlib.Path("validation/model_bench.py").read_text(encoding="utf-8")
+    source += pathlib.Path("validation/model_registry.py").read_text(encoding="utf-8")
+    for forbidden in ("runpod", "RUNPOD_API_KEY", "api.runpod.ai"):
+        assert forbidden not in source.lower()
