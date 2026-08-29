@@ -185,6 +185,21 @@ def verify_artifact(data: bytes, expected_bytes) -> None:
         raise FramePullError("artifact-not-mp4", "no ftyp box at offset 4")
 
 
+def verify_png(data: bytes, expected_bytes=None) -> None:
+    """A plate's own magic — the same eight bytes oniqImage checks before
+    trusting a still — plus the worker's byte count when one is known: an
+    image is no more exempt from the size cross-check than a clip is."""
+    if not data:
+        raise FramePullError("artifact-empty", "the download was empty")
+    if isinstance(expected_bytes, int) and 0 < expected_bytes != len(data):
+        raise FramePullError(
+            "artifact-size-mismatch",
+            f"downloaded {len(data)} bytes, worker reported {expected_bytes}",
+        )
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise FramePullError("artifact-not-png", "no PNG signature")
+
+
 def frame_times(video_seconds, count: int = FRAMES_PER_CLIP) -> list:
     """When to sample, in seconds.
 
@@ -389,9 +404,17 @@ def pull_clip(
         url = public_url(base, key)
         report = {"scene": clip.get("scene"), "output_key": key, "artifacts": []}
     stem = (clip.get("scene") or key or "clip").replace("/", "-")
+    # WHICH VERIFIER RUNS is an EXPECTATION the clip carries (derived from
+    # its key or signed URL's path at parse time), not a guess from the
+    # bytes: a server error page must fail the expected check, never get
+    # reclassified into whatever it happens to resemble.
+    is_png = clip.get("kind") == "png" or str(key or "").lower().endswith(".png")
     try:
         data = fetch(url)
-        verify_artifact(data, clip.get("output_bytes"))
+        if is_png:
+            verify_png(data, clip.get("output_bytes"))
+        else:
+            verify_artifact(data, clip.get("output_bytes"))
     except FramePullError as exc:
         report["error"] = exc.code
         return report
@@ -417,11 +440,22 @@ def pull_clip(
         return report
 
     makedirs(out_dir, exist_ok=True)
-    local = os.path.join(out_dir, f"{stem}.mp4")
+    # A PLATE IS AN IMAGE, NOT A CLIP. The five-shot battery's conditioning
+    # plate is a PNG the image engine drew; inspecting it matters as much as
+    # inspecting the clips that animate it, and handing a still to the frame
+    # cutter would only produce confusing ffmpeg errors. It is fetched,
+    # proved by its own magic, and shipped as-is.
+    # `.src.png`, not `.png`: a plate whose stem ended in "-sheet" would
+    # otherwise share a local name with another clip's contact sheet (the
+    # a7a27d0 collapse across a type boundary), and the log-inline step
+    # would ship it in the sheets-first slot it did not earn.
+    local = os.path.join(out_dir, f"{stem}.src.png" if is_png else f"{stem}.mp4")
     writer = write or _write_file
     writer(local, data)
     report["bytes"] = len(data)
     report["artifacts"].append(os.path.basename(local))
+    if is_png:
+        return report
 
     # The worker's reported duration when there is one; otherwise measure
     # it. A key named by hand carries no report, and guessing a duration
@@ -518,7 +552,8 @@ def clips_from_signed(raw: str) -> list:
             )
         if not parts.netloc:
             raise FramePullError("signed-no-host", "signed URL has no host")
-        clips.append({"scene": safe_label(url), "_signed": url})
+        kind = "png" if parts.path.lower().endswith(".png") else "mp4"
+        clips.append({"scene": safe_label(url), "_signed": url, "kind": kind})
     return clips
 
 
@@ -546,7 +581,8 @@ def clips_from_keys(raw: str) -> list:
     clips = []
     for key in [k.strip() for k in (raw or "").split(",") if k.strip()]:
         scene = key.rsplit(".", 1)[0].replace("/", "-")[-80:]
-        clips.append({"scene": scene, "output_key": key})
+        kind = "png" if key.lower().endswith(".png") else "mp4"
+        clips.append({"scene": scene, "output_key": key, "kind": kind})
     return clips
 
 
@@ -579,6 +615,7 @@ def main(argv=None) -> int:
                     f"  {report['scene']}: {report['bytes']} bytes, "
                     f"{len(report['artifacts'])} artifact(s)"
                 )
+        attach_quality(reports)
         with open(
             os.path.join(FRAME_DIR, "frames.json"), "w", encoding="utf-8"
         ) as handle:
@@ -623,12 +660,48 @@ def main(argv=None) -> int:
                 f"  {report['scene']}: {report['bytes']} bytes, "
                 f"{len(report['artifacts'])} artifact(s)"
             )
+    attach_quality(reports)
     with open(os.path.join(FRAME_DIR, "frames.json"), "w", encoding="utf-8") as handle:
         json.dump(reports, handle, indent=2, sort_keys=True)
     got = sum(1 for r in reports if not r.get("error"))
     print(f"frame-pull: {got}/{len(reports)} clip(s) retrieved and cut")
     write_summary(clips, reports)
     return 0
+
+
+def attach_quality(reports, out_dir: str = FRAME_DIR, *, run=subprocess.run) -> None:
+    """The first real quality verdicts, attached to every retrieved clip.
+
+    Owner directive 2026-08-29: a valid MP4 is never called a quality pass.
+    Each clip that arrived intact gets the two calibrated validators —
+    temporal aliveness (a frozen clip is a failure) and plate-anchor
+    distance (a clip that abandons its conditioning frame is a worse one) —
+    and the verdict rides in the report and the log. Uncalibrated or
+    unmeasurable clips answer QUALITY_REVIEW_REQUIRED, never PASS:
+    uncertainty does not convert into approval.
+
+    Best-effort by design: a metrics failure must not lose the frames that
+    were already cut, so a raise here becomes QUALITY_REVIEW_REQUIRED.
+    """
+    from validation import clip_quality
+
+    for report in reports:
+        if report.get("error") or not report.get("artifacts"):
+            continue
+        first = report["artifacts"][0]
+        if not first.endswith(".mp4"):
+            continue
+        try:
+            quality = clip_quality.assess(os.path.join(out_dir, first), run=run)
+        except Exception as exc:  # noqa: BLE001 — frames beat metrics
+            quality = {"verdict": clip_quality.QUALITY_REVIEW_REQUIRED,
+                       "error": type(exc).__name__}
+        report["quality"] = quality
+        print(
+            f"  {report.get('scene')}: quality {quality.get('verdict')} "
+            f"aliveness={quality.get('aliveness')} "
+            f"anchor={quality.get('anchor')}"
+        )
 
 
 def summary_markdown(clips, reports) -> str:

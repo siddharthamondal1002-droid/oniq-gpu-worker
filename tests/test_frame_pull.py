@@ -698,3 +698,106 @@ def test_the_detail_rides_in_the_report_beside_the_status(tmp_path):
     )
     assert report["error"] == "fetch-failed:HTTP 403"
     assert report["detail"] == "error code: 1010"
+
+
+# ---------------------------------------------- the plate, and quality
+
+
+def test_a_png_key_is_fetched_proved_and_shipped_without_ffmpeg(tmp_path):
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    ran = []
+    report = frame_pull.pull_clip(
+        {"scene": "validation-out-plate-001", "output_key": "validation/out/plate-001.png"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: png,
+        run=lambda args, **kw: (ran.append(args), _Result(0))[1],
+    )
+    assert "error" not in report
+    assert report["artifacts"] == ["validation-out-plate-001.src.png"]
+    assert ran == [], "a still is never handed to the frame cutter"
+    assert (tmp_path / "validation-out-plate-001.src.png").read_bytes() == png
+
+
+def test_a_png_that_is_not_a_png_is_refused(tmp_path):
+    report = frame_pull.pull_clip(
+        {"scene": "p", "output_key": "validation/out/plate-001.png"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: b"<!DOCTYPE html>nope",
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "artifact-not-png"
+
+
+def test_quality_rides_on_every_intact_clip_and_never_loses_frames(monkeypatch, capsys):
+    from validation import clip_quality
+
+    monkeypatch.setattr(
+        clip_quality, "assess",
+        lambda path, run=None: {"verdict": "GOOD_MOTION", "aliveness": 0.05,
+                                "anchor": [0.0, 0.1], "anchor_late": 0.1, "frames": 97},
+    )
+    reports = [
+        {"scene": "a", "artifacts": ["a.mp4", "a-sheet.png"]},
+        {"scene": "b", "error": "fetch-failed:HTTP 404", "artifacts": []},
+        {"scene": "p", "artifacts": ["p.png"]},
+    ]
+    frame_pull.attach_quality(reports, out_dir="frames")
+    assert reports[0]["quality"]["verdict"] == "GOOD_MOTION"
+    assert "quality" not in reports[1], "a failed fetch has nothing to measure"
+    assert "quality" not in reports[2], "a plate is an image, not a clip"
+    assert "GOOD_MOTION" in capsys.readouterr().out
+
+
+def test_a_metrics_crash_becomes_review_required_not_a_lost_run(monkeypatch):
+    from validation import clip_quality
+
+    def boom(path, run=None):
+        raise OSError("ffmpeg vanished")
+
+    monkeypatch.setattr(clip_quality, "assess", boom)
+    reports = [{"scene": "a", "artifacts": ["a.mp4"]}]
+    frame_pull.attach_quality(reports, out_dir="frames")
+    assert reports[0]["quality"]["verdict"] == clip_quality.QUALITY_REVIEW_REQUIRED
+
+
+def test_a_signed_png_plate_is_recognized_by_its_url_path(tmp_path):
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    signed_png = SIGNED.replace("ltx-001.mp4", "plate-001.png")
+    clip = frame_pull.clips_from_signed(signed_png)[0]
+    assert clip["kind"] == "png", "the extension is read before safe_label strips it"
+    report = frame_pull.pull_clip(
+        clip, "", out_dir=str(tmp_path),
+        fetch=lambda url: png,
+        run=lambda args, **kw: _Result(0),
+    )
+    assert "error" not in report
+    assert report["artifacts"] == ["validation-out-plate-001.src.png"]
+
+
+def test_a_png_with_the_wrong_size_is_refused_like_any_artifact(tmp_path):
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    report = frame_pull.pull_clip(
+        {"scene": "p", "output_key": "validation/out/plate-001.png",
+         "kind": "png", "output_bytes": 999},
+        BASE, out_dir=str(tmp_path),
+        fetch=lambda url: png,
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "artifact-size-mismatch"
+
+
+def test_a_plate_local_name_can_never_collide_with_a_contact_sheet(tmp_path):
+    # A scene deliberately ending in "-sheet": the plate must not land on
+    # the name another clip's sheet would use, nor ride in the sheets-first
+    # inline slot.
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+    report = frame_pull.pull_clip(
+        {"scene": "clip-sheet", "output_key": "validation/out/clip-sheet.png", "kind": "png"},
+        BASE, out_dir=str(tmp_path),
+        fetch=lambda url: png,
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["artifacts"] == ["clip-sheet.src.png"]
+    assert not report["artifacts"][0].endswith("-sheet.png")

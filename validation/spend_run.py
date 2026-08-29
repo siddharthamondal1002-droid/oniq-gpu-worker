@@ -500,46 +500,105 @@ VIDEO_PROMPT = (
 # 4.04s video so the canary measures the happy path, not the gate.
 AUDIO_NARRATION = "The character turns to face the light."
 
-# The five-scene battery — owner directive 2026-08-26 (Phase 6 of the
-# five-video superloop), verbatim and server-side like VIDEO_PROMPT:
-# the dispatch chooses only through_phase=18, never the text. Order and
-# wording are frozen; prompts are NOT optimized after seeing results,
-# because the purpose is measurement.
-VIDEO_BATTERY = (
-    (
-        "intro",
-        "A cinematic medium shot. The character slowly turns toward the "
-        "camera, blinks naturally and gives a subtle confident smile. "
-        "Gentle camera push forward, realistic movement, stable identity, "
-        "natural lighting.",
-    ),
-    (
-        "walk",
-        "The character slowly walks forward through the scene while the "
-        "camera tracks backward smoothly. Natural body movement, realistic "
-        "footsteps, stable appearance, cinematic lighting.",
-    ),
-    (
-        "react",
-        "The character looks toward something off camera, pauses, and "
-        "gradually shows surprise and concern. Subtle facial movement, "
-        "natural blinking, stable identity, cinematic close-up.",
-    ),
-    (
-        "environment",
-        "The character stands still while the surrounding environment "
-        "moves naturally: subtle wind, moving background elements and "
-        "changing light. The camera slowly pans sideways. Cinematic "
-        "realism.",
-    ),
-    (
-        "hero",
-        "The character looks directly toward the camera and slowly moves "
-        "forward. The camera gently pushes in while the character "
-        "maintains consistent appearance and natural expression. Cinematic "
-        "final-shot composition.",
-    ),
+# The five-shot ACTION BATTERY — owner directive 2026-08-29, replacing
+# the 2026-08-26 five-scene battery outright. Each shot is an ACTION
+# CONTRACT: a structured statement of who moves, from what state to what
+# state, what the camera does and what the environment does. The
+# contract is the SOURCE OF TRUTH and stays separate from the LTX
+# prompt — the prompt is DERIVED by compile_motion_prompt() and never
+# hand-edited per shot, so a quality verdict on a clip always traces
+# back to a named field rather than to prompt wording nobody recorded.
+# Server-side like VIDEO_PROMPT: the dispatch chooses only
+# through_phase=18, never the text. Every output name is unique per
+# shot, and none is a calibration fixture basename (measured 2026-08-29
+# — see the rename notes at the canary output keys in main()).
+ACTION_BATTERY = (
+    {
+        "slug": "maya-turns",
+        "output": "shot-001-maya-turns.mp4",
+        "contract": {
+            "subject": "Maya",
+            "start_state": "standing beside the tracks facing the girl",
+            "action": "slowly turns toward the approaching train",
+            "end_state": "facing the train",
+            "camera_action": "slow push-in",
+            "environment_action": "the girl's balloon sways gently",
+            "required_motion": "head_and_body_rotation",
+        },
+    },
+    {
+        "slug": "maya-walks",
+        "output": "shot-002-maya-walks.mp4",
+        "contract": {
+            "subject": "Maya",
+            "start_state": "standing on the platform a few steps from the girl",
+            "action": "walks forward along the platform toward the girl",
+            "end_state": "beside the girl",
+            "camera_action": "tracks alongside",
+            "environment_action": "light flickers along the platform",
+            "required_motion": "walking_legs_and_body",
+        },
+    },
+    {
+        "slug": "train-approaches",
+        "output": "shot-003-train-approaches.mp4",
+        "contract": {
+            "subject": "the distant train",
+            "start_state": "far down the track",
+            "action": "approaches and grows larger while Maya and the girl "
+                      "hold still",
+            "end_state": "noticeably closer and larger in frame",
+            "camera_action": "static",
+            "environment_action": "wind stirs clothing",
+            "required_motion": "train_translation",
+        },
+    },
+    {
+        "slug": "train-door-opens",
+        "output": "shot-004-train-door-opens.mp4",
+        "contract": {
+            "subject": "the train",
+            "start_state": "standing at the platform",
+            "action": "its door slides open",
+            "end_state": "with the door fully open",
+            "camera_action": "static",
+            "environment_action": "interior light spills onto the platform",
+            "required_motion": "door_slide",
+        },
+    },
+    {
+        "slug": "maya-interacts",
+        "output": "shot-005-maya-interacts.mp4",
+        "contract": {
+            "subject": "Maya and the girl",
+            "start_state": "standing near each other on the platform",
+            "action": "Maya crouches toward the girl and the girl raises "
+                      "her hand toward Maya",
+            "end_state": "with Maya crouched at the girl's eye level and "
+                         "the girl's hand raised",
+            "camera_action": "slow push-in",
+            "environment_action": "the balloon bobs",
+            "required_motion": "arm_raise_and_crouch",
+        },
+    },
 )
+
+
+def compile_motion_prompt(shot_contract: dict) -> str:
+    """One LTX motion prompt, DERIVED from an action contract.
+
+    Pure text assembly — no I/O, no state, no defaults. The contract
+    stays the source of truth: change a field and the prompt, the log
+    line and the recorded row all change together, which is the whole
+    reason the prompt is compiled rather than written five times by
+    hand and drifted five separate ways."""
+    return (
+        f"{shot_contract['subject']}, {shot_contract['start_state']}, "
+        f"{shot_contract['action']}; ends {shot_contract['end_state']}. "
+        f"Camera: {shot_contract['camera_action']}. "
+        f"Environment: {shot_contract['environment_action']}. "
+        "Stable identity, consistent scene, realistic motion."
+    )
 
 
 # ONIQ's own image engine (fully in-house directive, 2026-08-27). Same
@@ -547,6 +606,22 @@ VIDEO_BATTERY = (
 IMAGE_PROMPT = (
     "A quiet street at night after rain, a single lamp overhead, wet "
     "asphalt reflecting the light. Cinematic, photographic, no text."
+)
+
+# The conditioning plate for the action battery — owner directive
+# 2026-08-29, same "the dispatch never chooses the text" discipline as
+# IMAGE_PROMPT. Every element a later shot needs MUST already be in
+# frame: a train cannot approach in a frame with no train, a balloon
+# cannot sway in a frame with no balloon, and Maya cannot walk toward a
+# girl who is not there. Both characters are full-body with space
+# around them because every required motion needs somewhere to go.
+PLATE_PROMPT = (
+    "Cinematic realistic scene: a young woman named Maya standing on a "
+    "railway platform beside the tracks at golden hour. A small girl "
+    "stands a few steps away holding a red balloon. An approaching "
+    "train is visible far down the track. Both characters clearly "
+    "visible full-body, with space around them to move. Photographic, "
+    "natural light, no text."
 )
 
 
@@ -781,9 +856,10 @@ def one_job(
 ) -> dict:
     """Phases 12-16 for a single job. Fail-closed at every boundary.
 
-    `prompt` may only ever be one of this module's own constants
-    (VIDEO_PROMPT or a VIDEO_BATTERY scene) — no caller input reaches it,
-    because the workflow exposes no prompt field at all."""
+    `prompt` may only ever come from this module's own constants
+    (VIDEO_PROMPT, PLATE_PROMPT, or a prompt compiled from an
+    ACTION_BATTERY contract) — no caller input reaches it, because the
+    workflow exposes no prompt field at all."""
     quote = requote(client)
     payload = {
         "op": op,
@@ -896,7 +972,7 @@ def one_job(
     return row
 
 
-# ----------------------------------------------------- five-scene battery
+# ----------------------------------------------- five-shot action battery
 
 
 def record_standby_state(client) -> None:
@@ -944,27 +1020,36 @@ def record_standby_state(client) -> None:
 
 
 def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic) -> list:
-    """The owner's five-scene battery: exactly five video jobs, strictly
-    sequential, each with its own requote/admission, verification,
-    billing reconciliation and termination confirmation — one_job raises
-    on ANY failure or UNKNOWN termination, which stops the battery cold
-    with no retry and no next submission (Phase 7)."""
+    """The owner's five-shot ACTION BATTERY (directive 2026-08-29):
+    exactly five video jobs, strictly sequential, each with its own
+    requote/admission, verification, billing reconciliation and
+    termination confirmation — one_job raises on ANY failure or UNKNOWN
+    termination, which stops the battery cold with no retry and no next
+    submission (Phase 7). The intent is printed BEFORE each submission
+    so the log carries what the shot was supposed to do next to what it
+    measurably did — that adjacency is what makes a frame-pull verdict
+    arguable from the log alone."""
     record_standby_state(client)
     rows = []
-    for index, (slug, prompt) in enumerate(VIDEO_BATTERY, start=1):
-        print(f"--- scene {index}/5 [{slug}] ---")
+    for index, shot in enumerate(ACTION_BATTERY, start=1):
+        slug = shot["slug"]
+        shot_contract = shot["contract"]
+        print(f"--- shot {index}/5 [{slug}] ---")
+        print(f"    action: {shot_contract['action']}")
+        print(f"    required_motion: {shot_contract['required_motion']}")
         row = one_job(
             client,
             facts,
-            output_key=f"{facts['output_prefix']}/battery-{index}-{slug}.mp4",
+            output_key=f"{facts['output_prefix']}/{shot['output']}",
             op="video_generate",
-            prompt=prompt,
+            prompt=compile_motion_prompt(shot_contract),
             sleep=sleep,
             clock=clock,
         )
         row["scene"] = slug
+        row["contract"] = shot_contract
         rows.append(row)
-        print(f"scene {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
+        print(f"shot {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
     return rows
 
 
@@ -1128,14 +1213,17 @@ def main(argv) -> int:
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/final-001.mp4",
+                    # never final-001: a calibration fixture's basename — a rerun would overwrite it (measured 2026-08-29)
+                    output_key=f"{facts['output_prefix']}/audio-final-001.mp4",
                     op=op,
                 )
             ]
             print("PHASE 13-16 PASS — one real audio job, verified and terminated")
         elif op == "image_generate":
-            # ONE still from ONIQ's own image engine. Like the audio
-            # canary this has exactly one shape: no battery exists for it.
+            # ONE still from ONIQ's own image engine: the conditioning
+            # PLATE the action battery animates (owner directive
+            # 2026-08-29). Like the audio canary this has exactly one
+            # shape: no battery exists for it.
             if through != 16:
                 raise SpendStop(
                     "image-through-phase",
@@ -1145,22 +1233,25 @@ def main(argv) -> int:
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/still-001."
+                    output_key=f"{facts['output_prefix']}/plate-001."
                     + contract_image_format(),
                     op=op,
+                    prompt=PLATE_PROMPT,
                 )
             ]
             print("PHASE 13-16 PASS — one real in-house still, verified and terminated")
         elif op == "video_generate":
-            # Video knows exactly two shapes (owner directives 2026-08-26):
-            # 16 = the single job; 18 = the five-scene battery — EXACTLY
-            # five, never 1+5, never twenty. Anything else refuses.
+            # Video knows exactly two shapes (owner directives 2026-08-26
+            # and 2026-08-29): 16 = the single canary; 18 = the five-shot
+            # action battery — EXACTLY five, never 1+5, never twenty.
+            # Anything else refuses.
             if through == 16:
                 rows = [
                     one_job(
                         rp,
                         facts,
-                        output_key=f"{facts['output_prefix']}/ltx-001.mp4",
+                        # never ltx-001: a calibration fixture's basename — a rerun would overwrite it (measured 2026-08-29)
+                        output_key=f"{facts['output_prefix']}/ltx-canary-001.mp4",
                         op=op,
                     )
                 ]
@@ -1168,14 +1259,14 @@ def main(argv) -> int:
             elif through == 18:
                 rows = video_battery(rp, facts)
                 print(
-                    "PHASE 18 PASS — five-scene battery, each job verified "
-                    "and terminated"
+                    "PHASE 18 PASS — five-shot action battery, each job "
+                    "verified and terminated"
                 )
             else:
                 raise SpendStop(
                     "video-through-phase",
                     "video_generate supports through_phase 16 (one job) or "
-                    "18 (the five-scene battery) — nothing else",
+                    "18 (the five-shot action battery) — nothing else",
                 )
         else:
             rows = [

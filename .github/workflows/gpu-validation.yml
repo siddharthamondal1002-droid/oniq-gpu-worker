@@ -261,7 +261,13 @@ jobs:
               print("no frames directory - nothing to inline")
               raise SystemExit(0)
           total = 0
-          for name in sorted(os.listdir(root)):
+          # Contact sheets first: one sheet shows a whole clip, so a budget
+          # cut loses the least informative files, not the most.
+          ordered = sorted(
+              os.listdir(root),
+              key=lambda n: (0 if n.endswith("-sheet.png") else 1, n),
+          )
+          for name in ordered:
               if not name.endswith(".png"):
                   continue
               path = os.path.join(root, name)
@@ -589,7 +595,13 @@ jobs:
               print("no frames directory - nothing to inline")
               raise SystemExit(0)
           total = 0
-          for name in sorted(os.listdir(root)):
+          # Contact sheets first: one sheet shows a whole clip, so a budget
+          # cut loses the least informative files, not the most.
+          ordered = sorted(
+              os.listdir(root),
+              key=lambda n: (0 if n.endswith("-sheet.png") else 1, n),
+          )
+          for name in ordered:
               if not name.endswith(".png"):
                   continue
               path = os.path.join(root, name)

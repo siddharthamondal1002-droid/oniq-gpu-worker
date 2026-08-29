@@ -593,7 +593,7 @@ def _good_video_status(execution_ms=180_000):
         "output": {
             "ok": True,
             "op": "video_generate",
-            "output_key": "out/validation/ltx-001.mp4",
+            "output_key": "out/validation/ltx-canary-001.mp4",
             "device": "cuda",
             "gpu_name": "NVIDIA RTX A5000",
             "vram_total_mb": 24576,
@@ -619,7 +619,7 @@ def _run_one_video(client):
     ft = FakeTime()
     facts = _preflight(client)
     return spend_run.one_job(
-        client, facts, output_key="out/validation/ltx-001.mp4",
+        client, facts, output_key="out/validation/ltx-canary-001.mp4",
         op="video_generate", sleep=ft.sleep, clock=ft.clock,
     )
 
@@ -698,10 +698,79 @@ def test_one_video_job_stops_when_the_worker_proves_no_model():
     assert exc.value.code == "model-unproven"
 
 
-# ----------------------------------------------------- five-scene battery
+# ----------------------------------------------- five-shot action battery
+# Owner directive 2026-08-29: the ACTION BATTERY replaces the five-scene
+# VIDEO_BATTERY. Each shot is an action CONTRACT — the source of truth,
+# kept separate from the LTX prompt, which is DERIVED — and every output
+# name is unique so no two shots (and no shot and any fixture) can
+# collide in the bucket.
 
 
-def test_video_battery_runs_exactly_five_scenes_in_order():
+def test_action_battery_holds_five_complete_unique_shots():
+    assert not hasattr(spend_run, "VIDEO_BATTERY")  # replaced, not aliased
+    assert len(spend_run.ACTION_BATTERY) == 5
+    slugs = [shot["slug"] for shot in spend_run.ACTION_BATTERY]
+    outputs = [shot["output"] for shot in spend_run.ACTION_BATTERY]
+    assert len(set(slugs)) == 5, slugs
+    assert len(set(outputs)) == 5, outputs
+    required = {
+        "subject", "start_state", "action", "end_state",
+        "camera_action", "environment_action", "required_motion",
+    }
+    for shot in spend_run.ACTION_BATTERY:
+        assert set(shot["contract"]) == required, shot["slug"]
+        for field, value in shot["contract"].items():
+            assert isinstance(value, str) and value.strip(), (
+                f"{shot['slug']}.{field} is empty"
+            )
+
+
+def test_compiled_prompts_are_bounded_and_carry_the_contract():
+    import contract
+
+    for shot in spend_run.ACTION_BATTERY:
+        prompt = spend_run.compile_motion_prompt(shot["contract"])
+        # Under the worker contract's ceiling, with room to spare — a
+        # contract edit must not silently push a prompt over the wall.
+        assert 0 < len(prompt) < contract.MAX_PROMPT_CHARS
+        # The prompt is DERIVED: the subject and the action must survive
+        # compilation verbatim, or the clip cannot be judged against the
+        # contract that requested it.
+        assert shot["contract"]["subject"] in prompt
+        assert shot["contract"]["action"] in prompt
+        contract.validate_job(
+            {
+                "op": "video_generate",
+                "input_key": "in/a.jpg",
+                "output_key": f"out/{shot['output']}",
+                "params": {"prompt": prompt},
+            }
+        )
+
+
+def test_no_spend_run_output_can_hit_a_calibration_fixture_basename():
+    # MEASURED 2026-08-29: the three immutable calibration fixtures live
+    # at validation/out/ltx-001.mp4, validation/audio-canary/final-001.mp4
+    # and validation/video-test/ltx-001.mp4 — EXACTLY the keys the old
+    # canaries wrote, so one ordinary re-run would have silently
+    # overwritten the only real calibration data ONIQ has. Every output
+    # key in spend_run is born as an f-string over output_prefix, so a
+    # forbidden basename would have to appear in the module source as
+    # '/<name>' — assert it never does.
+    with open(spend_run.__file__, encoding="utf-8") as handle:
+        source = handle.read()
+    assert "/ltx-001.mp4" not in source
+    assert "/final-001.mp4" not in source
+    # And the battery's names, built exactly as video_battery builds them.
+    forbidden = {"ltx-001.mp4", "final-001.mp4"}
+    built = {
+        f"out/validation/{shot['output']}".rsplit("/", 1)[1]
+        for shot in spend_run.ACTION_BATTERY
+    }
+    assert not (built & forbidden), built & forbidden
+
+
+def test_video_battery_runs_exactly_five_shots_in_order(capsys):
     client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
     ft = FakeTime()
     facts = _preflight(client)
@@ -709,36 +778,36 @@ def test_video_battery_runs_exactly_five_scenes_in_order():
     assert len(rows) == 5
     assert len(client.submitted) == 5
     sent_prompts = [payload["params"]["prompt"] for _, payload in client.submitted]
-    assert sent_prompts == [p for _, p in spend_run.VIDEO_BATTERY]
+    assert sent_prompts == [
+        spend_run.compile_motion_prompt(shot["contract"])
+        for shot in spend_run.ACTION_BATTERY
+    ]
     keys = [payload["output_key"] for _, payload in client.submitted]
     assert keys == [
-        "out/validation/battery-1-intro.mp4",
-        "out/validation/battery-2-walk.mp4",
-        "out/validation/battery-3-react.mp4",
-        "out/validation/battery-4-environment.mp4",
-        "out/validation/battery-5-hero.mp4",
+        "out/validation/shot-001-maya-turns.mp4",
+        "out/validation/shot-002-maya-walks.mp4",
+        "out/validation/shot-003-train-approaches.mp4",
+        "out/validation/shot-004-train-door-opens.mp4",
+        "out/validation/shot-005-maya-interacts.mp4",
     ]
     assert [r["scene"] for r in rows] == [
-        "intro", "walk", "react", "environment", "hero",
+        "maya-turns", "maya-walks", "train-approaches",
+        "train-door-opens", "maya-interacts",
+    ]
+    # The contract rides in the row, so the report can put the verdict
+    # next to the intent without a second lookup.
+    assert [r["contract"] for r in rows] == [
+        shot["contract"] for shot in spend_run.ACTION_BATTERY
     ]
     assert all(r["termination"] == spend_run.TERMINATION_CONFIRMED for r in rows)
     assert all(r["vram_total_mb"] == 24576 for r in rows)
-
-
-def test_video_battery_prompts_are_bounded_and_frozen():
-    import contract
-
-    assert len(spend_run.VIDEO_BATTERY) == 5
-    for slug, prompt in spend_run.VIDEO_BATTERY:
-        assert 0 < len(prompt) <= contract.MAX_PROMPT_CHARS
-        contract.validate_job(
-            {
-                "op": "video_generate",
-                "input_key": "in/a.jpg",
-                "output_key": f"out/{slug}.mp4",
-                "params": {"prompt": prompt},
-            }
-        )
+    # The log carries the intent next to the result: slug, action and
+    # required_motion are printed BEFORE each submission.
+    out = capsys.readouterr().out
+    for shot in spend_run.ACTION_BATTERY:
+        assert shot["slug"] in out
+        assert shot["contract"]["action"] in out
+        assert shot["contract"]["required_motion"] in out
 
 
 def test_video_battery_records_provider_managed_standby_and_proceeds(capsys):
@@ -783,16 +852,18 @@ def test_video_battery_stops_on_unknown_termination_midway():
     assert len(client.submitted) == 1
 
 
-def test_one_job_uses_the_scene_prompt_when_given():
+def test_one_job_uses_the_compiled_shot_prompt_when_given():
     client = FakeClient(job_statuses=[_good_video_status()])
     ft = FakeTime()
     facts = _preflight(client)
+    shot = spend_run.ACTION_BATTERY[1]
+    prompt = spend_run.compile_motion_prompt(shot["contract"])
     spend_run.one_job(
-        client, facts, output_key="out/validation/battery-2-walk.mp4",
-        op="video_generate", prompt=spend_run.VIDEO_BATTERY[1][1],
+        client, facts, output_key=f"out/validation/{shot['output']}",
+        op="video_generate", prompt=prompt,
         sleep=ft.sleep, clock=ft.clock,
     )
-    assert client.submitted[0][1]["params"]["prompt"] == spend_run.VIDEO_BATTERY[1][1]
+    assert client.submitted[0][1]["params"]["prompt"] == prompt
 
 
 # ------------------------------------------------------------- termination
@@ -1005,7 +1076,7 @@ def _good_audio_status(execution_ms=9000):
         "output": {
             "ok": True,
             "op": "audio_mux",
-            "output_key": "out/validation/final-001.mp4",
+            "output_key": "out/validation/audio-final-001.mp4",
             "has_audio": True,
             "narration_seconds": 1.71,
             "audio_seconds": 4.042,
@@ -1027,7 +1098,7 @@ def _run_one_audio(client):
     ft = FakeTime()
     facts = _preflight(client)
     return spend_run.one_job(
-        client, facts, output_key="out/validation/final-001.mp4",
+        client, facts, output_key="out/validation/audio-final-001.mp4",
         op="audio_mux", sleep=ft.sleep, clock=ft.clock,
     )
 
@@ -1116,7 +1187,7 @@ def _good_image_status(execution_ms=30_000):
         "output": {
             "ok": True,
             "op": "image_generate",
-            "output_key": "out/validation/still-001.png",
+            "output_key": "out/validation/plate-001.png",
             "device": "cuda",
             "gpu_name": "NVIDIA RTX A5000",
             "vram_total_mb": 24576,
@@ -1139,7 +1210,7 @@ def _run_one_image(client):
     ft = FakeTime()
     facts = _preflight(client)
     return spend_run.one_job(
-        client, facts, output_key="out/validation/still-001.png",
+        client, facts, output_key="out/validation/plate-001.png",
         op="image_generate", sleep=ft.sleep, clock=ft.clock,
     )
 
@@ -1228,7 +1299,14 @@ def test_image_canary_runs_one_still_at_phase_16(monkeypatch):
     spend_run.main(["spend_run", "run"])
     assert len(calls) == 1
     assert calls[0]["op"] == "image_generate"
-    assert calls[0]["output_key"].endswith(".png")
+    # The still IS the action battery's conditioning plate (owner
+    # directive 2026-08-29): main must dispatch PLATE_PROMPT — never
+    # IMAGE_PROMPT — and name the object plate-001, off every fixture
+    # basename.
+    assert calls[0]["prompt"] == spend_run.PLATE_PROMPT
+    assert calls[0]["output_key"] == (
+        "out/validation/plate-001." + spend_run.contract_image_format()
+    )
 
 
 # ============================================ the no-idle-worker invariant
