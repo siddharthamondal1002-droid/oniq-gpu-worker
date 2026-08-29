@@ -63,8 +63,17 @@ REPLACE_TOKEN = "REPLACE-TEMPLATE"
 # image@sha256:<64 hex>. Anchored at both ends so a tag cannot ride along
 # after the digest, and the registry host is required so a bare name
 # cannot resolve against an unintended default registry.
+# The host requirement was WRITTEN here from the start and not enforced:
+# `[a-z0-9.\-]+` matches a bare namespace like `owner`, so
+# `owner/repo@sha256:...` passed. That is a valid reference — to Docker Hub,
+# which is not where this image lives. Found 2026-08-29 by a test written
+# for template_retarget's copy of the same pattern.
+#
+# Docker's own rule is the fix: a first path component is a registry only if
+# it contains a dot or a colon, or is `localhost`.
 DIGEST_REF = re.compile(
-    r"^[a-z0-9.\-]+(?::\d+)?/[a-z0-9._\-/]+@sha256:[0-9a-f]{64}$"
+    r"^(?:localhost(?::\d+)?|[a-z0-9\-]+(?:\.[a-z0-9\-]+)+(?::\d+)?)"
+    r"/[a-z0-9._\-/]+@sha256:[0-9a-f]{64}$"
 )
 
 TEMPLATE_NAME = "oniq-gpu-worker"

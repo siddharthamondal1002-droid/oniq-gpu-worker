@@ -403,6 +403,12 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # naming an already-published image, ONE endpoint repointed. It
         # sends templateId alone, so no spend bound can move.
         "template-attach",
+        # template-retarget joined 2026-08-29. It exists because RunPod
+        # refuses a second template with the same name (500, measured), and
+        # because updating in place keeps the env holding the R2 secret
+        # references — a fresh template starts with none, so the endpoint
+        # would run a worker that could not upload its output.
+        "template-retarget",
         # template-env joined 2026-08-28 too, and is the third job-level
         # mutation: it writes the env field of ONE template with RunPod
         # secret REFERENCES, never a credential, and sends env alone so

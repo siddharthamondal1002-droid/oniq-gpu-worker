@@ -665,6 +665,33 @@ def attach_template(endpoint_id: str, template_id: str):
     return raw, json.loads(raw) if raw.strip().startswith("{") else {}
 
 
+def retarget_template(template_id: str, image_name: str, container_disk_gb: int):
+    """Point an EXISTING template at a new image and disk. Two fields, named.
+
+    The one-field rule that governs set_template_env and attach_template is
+    about a stale read silently rewriting something nobody meant to touch.
+    Here the image and the disk are exactly what is meant to change — owner
+    directive 2026-08-29, 80 GB to 200 GB — and nothing else is sent, so
+    `name`, `env` and `dockerStartCmd` cannot move.
+
+    This exists because creating a second template is not possible: RunPod
+    answers 500 "Template name must be unique", measured on 2026-08-29. It is
+    also the better shape. Updating in place keeps the template id the
+    endpoint already points at, and keeps the env holding the R2 secret
+    REFERENCES — so the worker does not lose its storage configuration on the
+    way to a bigger disk, and there is no window in which the endpoint runs a
+    template that cannot write its output.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/templates/{template_id}",
+        method="PATCH",
+        body={"imageName": image_name, "containerDiskInGb": container_disk_gb},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /templates/{template_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
+
+
 def set_template_env(template_id: str, env: dict):
     """Set a template's env. `env` is the ONLY field sent.
 

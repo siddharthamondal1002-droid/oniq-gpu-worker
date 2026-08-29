@@ -37,7 +37,7 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-env, ltx-discover, frames-pull, model-bench]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -95,6 +95,14 @@ on:
         default: ""
       replace_token:
         description: "Type REPLACE-TEMPLATE (exactly) to allow replacing a template that RESOLVES (owner directive 2026-08-29, the 80 -> 200 GB disk). A separate token from attach_token on purpose: repairing a dangling reference and knowingly replacing a working configuration are different acts."
+        type: string
+        default: ""
+      disk_gb:
+        description: "template-retarget: container disk to request, in GB. Nominal only - the worker reports the disk it actually has before any download and refuses on that. Never smaller than the template already has."
+        type: string
+        default: "200"
+      retarget_token:
+        description: "Type RETARGET-TEMPLATE (exactly) to point the endpoint's EXISTING template at a new image and disk. Used instead of template-attach because RunPod refuses a second template with the same name (500, measured 2026-08-29) - and because updating in place keeps the env holding the R2 secret references, so the worker never loses its storage configuration on the way to a bigger disk."
         type: string
         default: ""
       secret_names:
@@ -394,6 +402,37 @@ jobs:
             "${{ inputs.attach_token }}" \
             "${{ inputs.replaces_template }}" \
             "${{ inputs.replace_token }}"
+
+  template_retarget:
+    # Repoints the endpoint's EXISTING template at a new image and a bigger
+    # disk. Two fields, named: imageName and containerDiskInGb. The env is
+    # not sent, so the RunPod secret references for R2 survive the write —
+    # which is the reason this exists rather than a second template.
+    #
+    # Verified by RE-READING the template, never by the write's own echo,
+    # and it prints the outgoing image and disk so the previous
+    # configuration can be restored exactly. Costs nothing: no pod starts.
+    name: "template retarget - ONE template, in place, $0"
+    if: inputs.mode == 'template-retarget' && inputs.retarget_token == 'RETARGET-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Retarget the template, then re-read it"
+        run: |
+          python -m validation.template_retarget \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.template_id }}" \
+            "${{ inputs.image_ref }}" \
+            "${{ inputs.disk_gb }}" \
+            "${{ inputs.retarget_token }}"
 
   template_env:
     # Puts the three storage variables on the template BY REFERENCE, so

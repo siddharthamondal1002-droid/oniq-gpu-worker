@@ -317,3 +317,25 @@ def test_a_refusal_reports_that_nothing_was_written(capsys):
     out = capsys.readouterr().out
     assert code == 1
     assert "NOTHING WAS WRITTEN" in out
+
+
+def test_a_bare_namespace_is_not_a_registry_host():
+    """`owner/repo@sha256:...` is a valid reference — to Docker Hub, which is
+    not where this image lives. The host requirement was written into the
+    docstring from the start and the pattern did not enforce it; found
+    2026-08-29 by a test written for template_retarget's copy."""
+    client = Client()
+    bare = "owner/oniq-gpu-worker@sha256:" + "a" * 64
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, bare, ta.AUTHORIZED_TOKEN)
+    assert exc.value.code == "image-not-pinned"
+    assert client.writes == []
+
+
+def test_a_real_registry_host_is_still_accepted():
+    for image in (
+        "ghcr.io/owner/oniq-gpu-worker@sha256:" + "a" * 64,
+        "registry.example.com:443/a/b/c@sha256:" + "f" * 64,
+        "localhost:5000/o/r@sha256:" + "b" * 64,
+    ):
+        ta.check_image(image)
