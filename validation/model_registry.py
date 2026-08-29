@@ -272,6 +272,20 @@ def measure(repo: str, token, get=_get) -> dict:
         if total:
             roles[role] = total
     row["roles"] = roles
+    # The raw per-file listing behind each role total. Printed so a wrong
+    # sum is visible as a wrong sum rather than arriving as a confident GiB
+    # figure nobody can check.
+    row["role_files"] = {
+        role: sorted(
+            (
+                (path, size)
+                for path, size in sizes.items()
+                if path.startswith(role + "/") and path.endswith(WEIGHT_SUFFIXES)
+            ),
+            key=lambda f: -f[1],
+        )
+        for role in roles
+    }
 
     # Root-level checkpoints. This is where LTX keeps its fp8 and distilled
     # variants: they are FILES inside the same repository, not repositories,

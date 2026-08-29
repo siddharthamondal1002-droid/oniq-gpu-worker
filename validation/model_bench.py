@@ -265,6 +265,11 @@ def _print_row(row: mr.Row) -> None:
         print("    NOTE      two experts present — this is a mixture, and only "
               "one expert is resident per denoising stage. The label 'A14B' "
               "does not describe these bytes.")
+    for role, files in sorted((m.get("role_files") or {}).items()):
+        for name, size in files[:6]:
+            print(f"    {role:14s} {name}  {vram.gib(size)}GiB")
+        if len(files) > 6:
+            print(f"    {role:14s} ... and {len(files) - 6} more")
     for f in (m.get("single_files") or [])[:8]:
         print(f"    file      {f['name']}  {vram.gib(f['bytes'])}GiB  "
               f"[{mr.variant_of(f['name'])}]")
