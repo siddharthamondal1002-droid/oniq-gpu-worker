@@ -49,18 +49,33 @@ def card_url(repo: str, revision: str, path: str) -> str:
     return f"{HOST}/{repo}/raw/{revision}/{path}"
 
 
-def interesting_lines(text: str, limit: int = 40) -> list[str]:
-    """Lines a human should read, in file order, deduplicated."""
-    out: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or not INTERESTING.search(line):
+def interesting_lines(text: str, limit: int = 40, context: int = 6) -> list[str]:
+    """Lines a human should read, in file order, with their surroundings.
+
+    CONTEXT IS THE POINT. LTX's card carries two different step counts, and
+    which one applies depends on which pipeline call it sits inside — a bare
+    grep would have offered a choice between two numbers with nothing to
+    decide it by, which is how a guess gets made while looking like a
+    citation. The lines around the hit are what make it a citation.
+    """
+    lines = text.splitlines()
+    keep: set[int] = set()
+    hits = 0
+    for i, raw in enumerate(lines):
+        if not raw.strip() or not INTERESTING.search(raw):
             continue
-        if line in out:
-            continue
-        out.append(line)
-        if len(out) >= limit:
+        hits += 1
+        keep.update(range(max(0, i - context), min(len(lines), i + context + 1)))
+        if hits >= limit:
             break
+    out: list[str] = []
+    previous = None
+    for i in sorted(keep):
+        if previous is not None and i != previous + 1:
+            out.append("...")
+        text_line = lines[i].rstrip()
+        out.append(text_line if text_line.strip() else "")
+        previous = i
     return out
 
 
