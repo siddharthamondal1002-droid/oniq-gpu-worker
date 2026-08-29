@@ -15,7 +15,21 @@
       "reference": "conditioning plate validation/input.jpg (cartoon bank office, since deleted from the bucket)",
       "verdict": "PASS",
       "observed": "Real character motion across the full span - the boss's gesturing arm and the officer's pointing arm change pose tile to tile - with identity, cartoon style, composition and the in-frame BANK BOSS text all stable end to end.",
-      "immutable": true
+      "immutable": true,
+      "measured_metrics": {
+        "aliveness": 0.003,
+        "anchor": [
+          0.0,
+          0.0037,
+          0.0042,
+          0.0044,
+          0.2221
+        ],
+        "anchor_p75": 0.0044,
+        "anchor_late": 0.1132,
+        "measured_on": "2026-08-29",
+        "source": "gpu-validation run 79"
+      }
     },
     {
       "role": "IDENTITY_DRIFT",
@@ -31,7 +45,21 @@
       "reference": "conditioning plate validation/input.jpg (cartoon bank office, since deleted from the bucket)",
       "verdict": "PARTIAL",
       "observed": "Strongest motion of the three early on - the officer's pointing arm fully lowers and posture shifts - then identity drift: by the back half the officer's face reads as a different man and in-frame text deforms (BANK BOSS corrupts). Carries a narration audio track (audio_mux output).",
-      "immutable": true
+      "immutable": true,
+      "measured_metrics": {
+        "aliveness": 0.0046,
+        "anchor": [
+          0.0,
+          0.0916,
+          0.1402,
+          0.1567,
+          0.1629
+        ],
+        "anchor_p75": 0.1567,
+        "anchor_late": 0.1598,
+        "measured_on": "2026-08-29",
+        "source": "gpu-validation run 79"
+      }
     },
     {
       "role": "CONTENT_COLLAPSE",
@@ -47,7 +75,21 @@
       "reference": "conditioning plate validation/input.jpg (cartoon bank office, since deleted from the bucket)",
       "verdict": "FAIL",
       "observed": "Holds the cartoon plate about 1.5 seconds, then the entire scene is replaced by an unrelated photorealistic woman's face in a dark room - full content collapse, not weak motion.",
-      "immutable": true
+      "immutable": true,
+      "measured_metrics": {
+        "aliveness": 0.0106,
+        "anchor": [
+          0.0,
+          0.0048,
+          0.2614,
+          0.2618,
+          0.2631
+        ],
+        "anchor_p75": 0.2618,
+        "anchor_late": 0.2625,
+        "measured_on": "2026-08-29",
+        "source": "gpu-validation run 79"
+      }
     }
   ]
 }

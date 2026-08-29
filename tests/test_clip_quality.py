@@ -121,37 +121,73 @@ def test_metrics_rounds_to_four_places_for_stable_logs():
 
 
 def test_uncalibrated_never_converts_to_a_pass():
-    # Perfect metrics, shipped CALIBRATION (all None): still review.
-    perfect = {"frames": 97, "aliveness": 0.02, "anchor": [0.0] * 5, "anchor_late": 0.01}
+    # Perfect metrics under an ALL-None calibration: still review. The
+    # shipped CALIBRATION is no longer None — it carries the 2026-08-29
+    # fixture-derived numbers, pinned below — but the property must hold
+    # for any future uncalibrated metric added the same way.
+    perfect = {"frames": 97, "aliveness": 0.02, "anchor": [0.0] * 5,
+               "anchor_late": 0.01, "anchor_p75": 0.01}
+    uncal = {"static_below": None, "collapse_above": None, "drift_above": None}
+    assert clip_quality.classify(perfect, uncal) == clip_quality.QUALITY_REVIEW_REQUIRED
+
+
+def test_shipped_calibration_is_the_measured_one():
+    # CALIBRATED 2026-08-29 from gpu-validation run 79 over the three
+    # immutable fixtures. Anyone moving these numbers must bring new
+    # measured fixtures with them.
     assert clip_quality.CALIBRATION == {
-        "static_below": None, "collapse_above": None, "drift_above": None,
+        "static_below": 0.0015, "collapse_above": 0.21, "drift_above": 0.08,
     }
-    assert clip_quality.classify(perfect) == clip_quality.QUALITY_REVIEW_REQUIRED
+
+
+def test_the_three_fixtures_classify_as_their_recorded_verdicts():
+    # THE REGRESSION FIXTURES (owner directive 2026-08-29, Phase 0/3):
+    # the exact metrics measured on run 79, frozen as literals. If a
+    # metric or threshold change ever reclassifies one of these, that is
+    # a recalibration someone must justify against new evidence.
+    good = {"aliveness": 0.003, "anchor_late": 0.1132, "anchor_p75": 0.0044}
+    drift = {"aliveness": 0.0046, "anchor_late": 0.1598, "anchor_p75": 0.1567}
+    collapse = {"aliveness": 0.0106, "anchor_late": 0.2625, "anchor_p75": 0.2618}
+    assert clip_quality.classify(good) == clip_quality.GOOD_MOTION
+    assert clip_quality.classify(drift) == clip_quality.PLATE_DRIFT
+    assert clip_quality.classify(collapse) == clip_quality.CONTENT_COLLAPSE
+
+
+def test_the_good_fixtures_tail_anomaly_is_why_p75_classifies():
+    # The GOOD fixture's final frame jumps to 0.2221 after 0.0044 at 75%
+    # (measured, run 79) — an end-of-clip anomaly. Classifying on
+    # anchor_late would put the PASS clip 0.03 from the drift line;
+    # anchor_p75 keeps a 18x margin. This test records WHY.
+    good_curve = [0.0, 0.0037, 0.0042, 0.0044, 0.2221]
+    late = round(sum(good_curve[-2:]) / 2, 4)
+    assert late == 0.1133 or late == 0.1132  # rounding of the measured pair
+    assert good_curve[-2] < clip_quality.CALIBRATION["drift_above"] / 10
 
 
 @pytest.mark.parametrize("missing", ["static_below", "collapse_above", "drift_above"])
 def test_one_missing_threshold_is_enough_to_refuse(missing):
     cal = dict(CAL)
     cal[missing] = None
-    good = {"aliveness": 0.02, "anchor_late": 0.01}
+    good = {"aliveness": 0.02, "anchor_late": 0.01, "anchor_p75": 0.01}
     assert clip_quality.classify(good, cal) == clip_quality.QUALITY_REVIEW_REQUIRED
 
 
 def test_every_verdict_is_reachable_once_calibrated():
     review = clip_quality.QUALITY_REVIEW_REQUIRED
     cases = [
-        ({"aliveness": 0.001, "anchor_late": 0.01}, clip_quality.STATIC_MOTION_FAILED),
-        ({"aliveness": 0.02, "anchor_late": 0.6}, clip_quality.CONTENT_COLLAPSE),
-        ({"aliveness": 0.02, "anchor_late": 0.3}, clip_quality.PLATE_DRIFT),
-        ({"aliveness": 0.02, "anchor_late": 0.01}, clip_quality.GOOD_MOTION),
+        ({"aliveness": 0.001, "anchor_p75": 0.01}, clip_quality.STATIC_MOTION_FAILED),
+        ({"aliveness": 0.02, "anchor_p75": 0.6}, clip_quality.CONTENT_COLLAPSE),
+        ({"aliveness": 0.02, "anchor_p75": 0.3}, clip_quality.PLATE_DRIFT),
+        ({"aliveness": 0.02, "anchor_p75": 0.01}, clip_quality.GOOD_MOTION),
     ]
     for m, verdict in cases:
         assert clip_quality.classify(m, CAL) == verdict
         assert verdict != review
 
 
-@pytest.mark.parametrize("m", [None, {}, {"aliveness": None, "anchor_late": 0.1},
-                               {"aliveness": 0.02, "anchor_late": None}])
+@pytest.mark.parametrize("m", [None, {}, {"aliveness": None, "anchor_p75": 0.1},
+                               {"aliveness": 0.02, "anchor_p75": None},
+                               {"aliveness": 0.02, "anchor_late": 0.1}])
 def test_missing_metrics_answer_review_even_when_calibrated(m):
     assert clip_quality.classify(m, CAL) == clip_quality.QUALITY_REVIEW_REQUIRED
 
@@ -160,18 +196,18 @@ def test_a_value_exactly_on_a_boundary_lands_on_the_failure_side():
     # The comparisons are inclusive (<= / >=): a clip AT the threshold
     # is treated as the failure, never as the pass — the boundary case
     # is the case the calibration is least sure about.
-    on_static = {"aliveness": CAL["static_below"], "anchor_late": 0.01}
+    on_static = {"aliveness": CAL["static_below"], "anchor_p75": 0.01}
     assert clip_quality.classify(on_static, CAL) == clip_quality.STATIC_MOTION_FAILED
-    on_collapse = {"aliveness": 0.02, "anchor_late": CAL["collapse_above"]}
+    on_collapse = {"aliveness": 0.02, "anchor_p75": CAL["collapse_above"]}
     assert clip_quality.classify(on_collapse, CAL) == clip_quality.CONTENT_COLLAPSE
-    on_drift = {"aliveness": 0.02, "anchor_late": CAL["drift_above"]}
+    on_drift = {"aliveness": 0.02, "anchor_p75": CAL["drift_above"]}
     assert clip_quality.classify(on_drift, CAL) == clip_quality.PLATE_DRIFT
 
 
 def test_a_worse_failure_outranks_a_lesser_one():
     # Frozen AND far from the plate is named by the frozen check first;
     # collapse outranks drift on the same number.
-    both = {"aliveness": 0.0, "anchor_late": 0.9}
+    both = {"aliveness": 0.0, "anchor_p75": 0.9}
     assert clip_quality.classify(both, CAL) == clip_quality.STATIC_MOTION_FAILED
 
 
@@ -228,12 +264,15 @@ def test_gray_args_respect_a_custom_plane_size():
 def test_assess_returns_verdict_beside_every_metric():
     stdout = b"".join(_frame(100 + i) for i in range(6))
     report = clip_quality.assess("clip.mp4", run=_runner(stdout))
-    # Shipped CALIBRATION is all None, so even a moving clip is review.
-    assert report["verdict"] == clip_quality.QUALITY_REVIEW_REQUIRED
+    # A gently moving synthetic clip under the SHIPPED (measured)
+    # calibration: alive (0.0039 > 0.0015) and near its plate
+    # (anchor_p75 well under 0.08), so GOOD_MOTION.
+    assert report["verdict"] == clip_quality.GOOD_MOTION
     assert report["frames"] == 6
     assert report["aliveness"] == round(1 / 255, 4)
     assert len(report["anchor"]) == 5
     assert report["anchor_late"] is not None
+    assert report["anchor_p75"] is not None
 
 
 def test_assess_with_no_decodable_frames_is_review_not_a_raise():
