@@ -1971,3 +1971,48 @@ def test_a_usable_base_verifies_a_real_png(monkeypatch, capsys):
     spend_run.require_reference({}, "probe-reference.png",
                                 fetch=lambda url: b"\x89PNG\r\n\x1a\n" + b"0" * 64)
     assert "reference verified" in capsys.readouterr().out
+
+
+# ------------- every dispatched payload must satisfy the worker's contract
+
+
+def _dispatched_payload(op, **kw):
+    """What actually goes on the wire for one op."""
+    client = FakeClient(job_statuses=[{"status": "FAILED", "output": {}}])
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop):
+        spend_run.one_job(client, facts, sleep=lambda s: None,
+                          clock=FakeTime().clock, op=op, **kw)
+    return client.submitted[0][1]
+
+
+def test_every_dispatched_payload_passes_the_workers_own_contract():
+    """The harness builds the body; the worker validates it. Anything the
+    harness can send that the worker refuses is a paid job that dies on
+    arrival — model_probe did exactly that, refused in 67ms for a missing
+    params.prompt because one_job set params for three ops and not the
+    fourth. Checked against the REAL validator, not a copy of its rules."""
+    import contract
+
+    cases = [
+        ("image_generate", {"output_key": "out/ref.png"}),
+        ("video_generate", {"output_key": "out/v.mp4"}),
+        ("audio_mux", {"output_key": "out/a.mp4"}),
+        ("model_probe", {"output_key": "out/p.mp4", "input_key": "out/ref.png",
+                         "model": "cogvideox-i2v", "preview": True}),
+    ]
+    for op, kw in cases:
+        payload = _dispatched_payload(op, **kw)
+        # Raises ContractError if the worker would have refused it.
+        validated = contract.validate_job(payload)
+        assert validated["op"] == op
+
+
+def test_the_probe_payload_carries_the_common_action_prompt():
+    payload = _dispatched_payload(
+        "model_probe", output_key="out/p.mp4", input_key="out/ref.png",
+        model="wan22-i2v-a14b", preview=True,
+    )
+    assert payload["params"]["prompt"] == spend_run.PROBE_ACTION_PROMPT
+    assert payload["model"] == "wan22-i2v-a14b"
+    assert payload["preview"] is True

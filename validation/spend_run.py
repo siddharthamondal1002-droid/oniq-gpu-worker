@@ -1166,6 +1166,13 @@ def one_job(
         # A full probe ceiling of slack instead: 30 minutes of delay against
         # a measured 17.6, so a slower pull still lands inside it.
         watch_s = 2 * (contract_probe_ceiling_ms() // 1000)
+        # THE PROMPT HAS TO BE IN THE PAYLOAD, not merely in a parameter.
+        # `prompt` was accepted by this function and never written into the
+        # body for this op, so the worker's contract refused the job with
+        # "params.prompt must be a non-empty string" — 67ms of billed
+        # execution, and a probe that never got as far as naming a model.
+        # Every op that carries a prompt now sets it in the SAME place.
+        payload["params"] = {"prompt": prompt or PROBE_ACTION_PROMPT}
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
         # worker, so the harness must not send one either.
