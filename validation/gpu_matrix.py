@@ -35,23 +35,49 @@ from validation import vram
 # exact-match miss would silently drop a card from the matrix — reading as
 # "unavailable" when it is merely spelled differently.
 CARDS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
-    ("RTX A5000 24GB", 24, ("rtx a5000",)),
-    ("RTX 4090 24GB", 24, ("rtx 4090",)),
-    ("RTX 5090 32GB", 32, ("rtx 5090",)),
-    ("A6000 48GB", 48, ("rtx a6000", "a6000")),
-    ("A100 40GB", 40, ("a100 40",  "a100-40", "a100 pcie")),
-    ("A100 80GB", 80, ("a100 80", "a100-80", "a100 sxm")),
+    ("RTX A5000 24GB", 24, ("a5000",)),
+    ("RTX 4090 24GB", 24, ("4090",)),
+    ("RTX 5090 32GB", 32, ("5090",)),
+    ("A6000 48GB", 48, ("a6000",)),
+    ("A100 40GB", 40, ("a100",)),
+    ("A100 80GB", 80, ("a100",)),
     ("H100 80GB", 80, ("h100",)),
 )
 
+# How far a listing's reported memory may sit from the row's nominal capacity
+# and still be that card. Vendors report 40960 MiB as 40 and 81920 as 80, and
+# occasionally shade by a gigabyte; anything further apart is a different card.
+MEMORY_TOLERANCE_GIB = 4
 
-def match(catalogue, needles: tuple[str, ...]):
-    """Every live entry whose id or display name carries one of these."""
+
+def match(catalogue, needles: tuple[str, ...], memory_gib: int | None = None):
+    """Live entries of this family AND this capacity.
+
+    THE NAME IS NOT THE CARD. The first live pull matched "A100 40GB" to an
+    "NVIDIA A100 80GB PCIe" listing and "A100 80GB" to an "A100-SXM4-40GB" one,
+    because both display names carry the family string — so each A100 row was
+    priced from the other one's hardware. On a page whose entire purpose is
+    choosing what to rent, that is the worst error available: it reports 80 GB
+    at $1/h when the quote belongs to a 40 GB card.
+
+    So the family string only narrows the search and the capacity the provider
+    REPORTS decides. Same discipline as the model side: measure the bytes, never
+    read them off the label.
+    """
     out = []
     for entry in catalogue or []:
         haystack = f"{entry.get('id') or ''} {entry.get('display_name') or ''}".lower()
-        if any(n in haystack for n in needles):
-            out.append(entry)
+        if not any(n in haystack for n in needles):
+            continue
+        if memory_gib is not None:
+            reported = entry.get("memory_gb")
+            if not isinstance(reported, (int, float)):
+                # No reported capacity means the card cannot be confirmed as
+                # this row's, and an unconfirmed card is not a price.
+                continue
+            if abs(reported - memory_gib) > MEMORY_TOLERANCE_GIB:
+                continue
+        out.append(entry)
     return out
 
 
@@ -87,7 +113,7 @@ def live_cards(catalogue) -> list[dict]:
     """The owner's card list, priced from the live catalogue."""
     rows = []
     for name, gib, needles in CARDS:
-        entries = match(catalogue, needles)
+        entries = match(catalogue, needles, gib)
         price, source = cheapest_hourly(entries)
         rows.append({
             "card": name,
@@ -194,6 +220,14 @@ def main(argv) -> int:
     _raw, parsed = runpod_client.gpu_catalogue()
     rows = live_cards(parsed)
     print_cards(rows)
+    print("")
+    print("THESE ARE POD-MARKET QUOTES, not ONIQ's serverless rate. The same "
+          "card that lists here bills the production endpoint at a different, "
+          "separately quoted figure — read that one from the preflight facts "
+          "above, never from this table. A pod price is a signal about capacity "
+          "and relative cost, not the number that lands on the invoice, and no "
+          "rate is written into this file: the historical-price guard in "
+          "test_admission forbids it, for exactly this reason.")
     print("")
     print("A card priced here is a card that could be rented NOW. Pair it with "
           "the VRAM peaks from `model-bench` to read the hardware matrix: the "

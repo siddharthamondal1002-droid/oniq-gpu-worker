@@ -6,13 +6,19 @@ from validation import vram
 
 
 CATALOGUE = [
-    {"id": "NVIDIA RTX A5000", "display_name": "RTX A5000",
+    {"id": "NVIDIA RTX A5000", "display_name": "RTX A5000", "memory_gb": 24,
      "secure_price": 0.27, "community_price": None, "on_demand_price": 0.29},
-    {"id": "NVIDIA GeForce RTX 4090", "display_name": "RTX 4090",
+    {"id": "NVIDIA GeForce RTX 4090", "display_name": "RTX 4090", "memory_gb": 24,
      "secure_price": 0.69, "community_price": 0.34, "on_demand_price": 0.44},
-    {"id": "NVIDIA A100 80GB PCIe", "display_name": "A100 80GB",
+    {"id": "NVIDIA A100 80GB PCIe", "display_name": "A100 PCIe", "memory_gb": 80,
      "secure_price": 1.64, "community_price": None, "on_demand_price": None},
-    {"id": "NVIDIA H100 PCIe", "display_name": "H100",
+    # The listing that caused the cross-match: an SXM4 card whose display name
+    # carries the family string but which is HALF the capacity of the row it
+    # was priced into.
+    {"id": "NVIDIA A100-SXM4-40GB", "display_name": "A100 SXM4 40GB",
+     "memory_gb": 40, "secure_price": 1.19, "community_price": None,
+     "on_demand_price": None},
+    {"id": "NVIDIA H100 PCIe", "display_name": "H100", "memory_gb": 80,
      "secure_price": None, "community_price": None, "on_demand_price": None},
 ]
 
@@ -23,9 +29,28 @@ CATALOGUE = [
 def test_cards_match_by_substring_because_providers_rename_them():
     """An exact-name miss would silently drop a card from the matrix and read
     as 'unavailable' when it is merely spelled differently."""
-    assert gm.match(CATALOGUE, ("rtx a5000",))[0]["id"] == "NVIDIA RTX A5000"
-    assert gm.match(CATALOGUE, ("rtx 4090",))[0]["display_name"] == "RTX 4090"
-    assert gm.match(CATALOGUE, ("rtx 5090",)) == []
+    assert gm.match(CATALOGUE, ("a5000",))[0]["id"] == "NVIDIA RTX A5000"
+    assert gm.match(CATALOGUE, ("4090",))[0]["display_name"] == "RTX 4090"
+    assert gm.match(CATALOGUE, ("5090",)) == []
+
+
+def test_the_two_a100_rows_are_never_priced_from_each_other():
+    """The bug the first live pull exposed: both A100 display names carry the
+    family string, so "A100 40GB" took an 80GB listing's price and "A100 80GB"
+    took an SXM4-40GB one's. On a page whose whole purpose is choosing what to
+    rent, that is the worst error available."""
+    assert [e["memory_gb"] for e in gm.match(CATALOGUE, ("a100",), 40)] == [40]
+    assert [e["memory_gb"] for e in gm.match(CATALOGUE, ("a100",), 80)] == [80]
+    rows = {r["card"]: r for r in gm.live_cards(CATALOGUE)}
+    assert rows["A100 40GB"]["usd_per_hour"] == Decimal("1.19")
+    assert rows["A100 80GB"]["usd_per_hour"] == Decimal("1.64")
+
+
+def test_a_listing_with_no_reported_capacity_is_not_a_price():
+    """An unconfirmed card cannot be this row's card, and a guess about
+    capacity is a guess about the whole hardware decision."""
+    assert gm.match([{"id": "NVIDIA A100 mystery", "secure_price": 0.1}],
+                    ("a100",), 80) == []
 
 
 def test_every_card_the_owner_listed_has_a_matcher():
@@ -81,6 +106,11 @@ def test_live_cards_reports_every_listed_card_even_when_unpriced():
     assert {r["card"] for r in unpriced} >= {"RTX 5090 32GB", "H100 80GB"}
 
 
+def test_the_a6000_row_is_not_filled_by_an_a5000_listing():
+    """Substring families overlap in both directions; capacity is the arbiter."""
+    assert gm.match(CATALOGUE, ("a6000",), 48) == []
+
+
 # ------------------------------------------------------------ card selection
 
 
@@ -93,9 +123,12 @@ def test_the_cheapest_fitting_card_wins_not_the_smallest():
 
 
 def test_a_peak_over_24gb_skips_the_24gb_cards():
+    """30 GiB clears neither 24GB card (22.32 usable), so the smallest priced
+    card that does wins — and the 40GB at $1.19 beats the 80GB at $1.64.
+    Buying the larger card here would be paying for headroom nothing needs."""
     rows = gm.live_cards(CATALOGUE)
     chosen = gm.cheapest_for(int(30 * vram.GIB), rows)
-    assert chosen["card"] == "A100 80GB"
+    assert chosen["card"] == "A100 40GB"
 
 
 def test_an_unpriced_card_is_not_a_candidate_at_any_size():
