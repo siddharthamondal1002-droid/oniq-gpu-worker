@@ -245,12 +245,12 @@ PROBE_MODELS: dict[str, dict] = {
     "hunyuanvideo-1.5-i2v": {
         "label": "HunyuanVideo-1.5 480p I2V step-distilled (8 steps)",
         "repo": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v_step_distilled",
-        # INTERIM MARKER until the $0 registry read pins the commit. spec()
-        # refuses any revision that is not a 40-hex sha, so this row cannot
-        # fetch moving bytes even if dispatched early; probe_settings reads
-        # the repository at "main" while this marker stands, and the pin it
-        # prints is what replaces it.
-        "revision": "PENDING-REGISTRY-PIN",
+        # Pinned from the $0 model-bench read (gpu-validation run
+        # 33269975707, 2026-08-29): the sha probe_settings resolved from the
+        # live listing, at which COVERAGE reported every declared component
+        # inside the allow list and the shipped configs matched the research
+        # (use_meanflow true, scheduler shift 7.0, target_size 640).
+        "revision": "854c04a4c8a53d990b418c7478f0802c0fc8c726",
         "pipeline": "HunyuanVideo15ImageToVideoPipeline",
         # NOT a permissive licence, and the restriction reaches OUTPUTS:
         # Tencent HunyuanVideo-1.5 Community License, LICENSE at
@@ -284,10 +284,12 @@ PROBE_MODELS: dict[str, dict] = {
         # bucket. The output's real dimensions are read from the frames.
         "frames": 121,
         "fps": 24,
-        # INTERIM estimate (transformer ~33.3 + Qwen2.5-VL text encoder +
-        # byT5 + SigLIP + VAE, search-snippet-derived); pinned from the $0
-        # registry read before any spend, like the revision.
-        "download_gib": 57.0,
+        # MEASURED by the same $0 read, from the listing's own byte counts
+        # over exactly the allow patterns: transformer 15.52 + text_encoder
+        # 13.17 + vae 2.35 + image_encoder 0.80 + text_encoder_2 0.41 +
+        # tokenizers/configs. The community repo ships bf16 shards, which is
+        # why this is half the search-snippet estimate the row landed with.
+        "download_gib": 32.26,
         # Cited: the repo's own optimal-config table says "8 or 12
         # (recommended)" for this checkpoint, and Tencent's code defaults it
         # to 12 (PIPELINE_CONFIGS["480p_i2v_step_distilled"]: guidance 1.0,
@@ -315,12 +317,12 @@ PROBE_MODELS: dict[str, dict] = {
         # server-side constant the caller can pick but never set.
         "label": "HunyuanVideo-1.5 480p I2V step-distilled (12 steps)",
         "repo": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v_step_distilled",
-        # INTERIM MARKER until the $0 registry read pins the commit. spec()
-        # refuses any revision that is not a 40-hex sha, so this row cannot
-        # fetch moving bytes even if dispatched early; probe_settings reads
-        # the repository at "main" while this marker stands, and the pin it
-        # prints is what replaces it.
-        "revision": "PENDING-REGISTRY-PIN",
+        # Pinned from the $0 model-bench read (gpu-validation run
+        # 33269975707, 2026-08-29): the sha probe_settings resolved from the
+        # live listing, at which COVERAGE reported every declared component
+        # inside the allow list and the shipped configs matched the research
+        # (use_meanflow true, scheduler shift 7.0, target_size 640).
+        "revision": "854c04a4c8a53d990b418c7478f0802c0fc8c726",
         "pipeline": "HunyuanVideo15ImageToVideoPipeline",
         # NOT a permissive licence, and the restriction reaches OUTPUTS:
         # Tencent HunyuanVideo-1.5 Community License, LICENSE at
@@ -354,10 +356,12 @@ PROBE_MODELS: dict[str, dict] = {
         # bucket. The output's real dimensions are read from the frames.
         "frames": 121,
         "fps": 24,
-        # INTERIM estimate (transformer ~33.3 + Qwen2.5-VL text encoder +
-        # byT5 + SigLIP + VAE, search-snippet-derived); pinned from the $0
-        # registry read before any spend, like the revision.
-        "download_gib": 57.0,
+        # MEASURED by the same $0 read, from the listing's own byte counts
+        # over exactly the allow patterns: transformer 15.52 + text_encoder
+        # 13.17 + vae 2.35 + image_encoder 0.80 + text_encoder_2 0.41 +
+        # tokenizers/configs. The community repo ships bf16 shards, which is
+        # why this is half the search-snippet estimate the row landed with.
+        "download_gib": 32.26,
         "steps": 12,
         "sampling_source": "official README optimal-config table + Tencent "
                            "PIPELINE_CONFIGS (12 is Tencent's own default "

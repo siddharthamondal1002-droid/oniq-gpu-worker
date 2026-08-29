@@ -143,8 +143,15 @@ jobs:
       # class existing is not the same as the class being able to load the
       # model, so the two-expert attribute is asserted too.
       - name: every benchmark pipeline is importable and Wan2.2-capable
+        # -i IS THE STEP. Without it docker attaches /dev/null as stdin, the
+        # heredoc never reaches python3, an EMPTY script exits 0 and the
+        # "proof" proves nothing — which is exactly what this step had been
+        # doing since it was written (found 2026-08-29, reading the log of a
+        # green run and noticing the step produced no output and took no
+        # time). The grep beneath makes the vacuous form impossible to
+        # reintroduce: no printed token, no green step.
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 - <<'PY'
+          out=$(docker run --rm -i oniq-gpu-worker:ci python3 - <<'PY'
           import inspect
 
           import diffusers
@@ -181,6 +188,9 @@ jobs:
           print("wan/ltx/cogvideox/hunyuan15 importable; "
                 "Wan2.2 two-expert supported; Qwen2_5_VLTextModel present")
           PY
+          )
+          echo "$out"
+          echo "$out" | grep -q "hunyuan15 importable"
 
       # transformers >= 4.51 and LTX runs on diffusers 0.33.1 / torch
       # 2.5.1; the bump had to be PROVEN against those pins rather than
