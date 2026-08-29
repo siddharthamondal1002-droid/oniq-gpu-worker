@@ -20,6 +20,22 @@ What it refuses, and why each refusal is here rather than assumed away:
 - An endpoint whose CURRENT template actually exists. The whole warrant
   for writing is that the reference is dangling; if it resolves, this is
   clobbering a working configuration and stops.
+
+OWNER DIRECTIVE 2026-08-29 adds the one case where replacing a working
+template IS the instruction: "use a new worker image/template with
+approximately 200 GB container disk". A dangling-reference-only guard
+cannot carry that out, so there is a SECOND token — REPLACE-TEMPLATE — and
+it is deliberately harder to fire than the first:
+
+- the caller must NAME the template being replaced, and it must be the one
+  the endpoint currently references. A replace that cannot say what it is
+  replacing is a fumble, and a fumble here repoints paid hardware.
+- the outgoing template is READ and its image and disk recorded BEFORE the
+  swap, so the previous configuration can be restored exactly rather than
+  from memory.
+- ATTACH-TEMPLATE alone still refuses a resolving template. The two tokens
+  are not interchangeable: one repairs a dangling reference, the other
+  knowingly replaces a working one.
 - A create that returns no id, and an attach that does not read back.
 
 What it will not do, at all: set environment variables. The worker's three
@@ -39,6 +55,10 @@ import re
 import storage
 
 AUTHORIZED_TOKEN = "ATTACH-TEMPLATE"
+# A SEPARATE token, not a flag on the first one. Replacing a working
+# template is a different act from repairing a dangling reference, and the
+# thing that makes it safe is that it cannot be reached by accident.
+REPLACE_TOKEN = "REPLACE-TEMPLATE"
 
 # image@sha256:<64 hex>. Anchored at both ends so a tag cannot ride along
 # after the digest, and the registry host is required so a bare name
@@ -134,11 +154,64 @@ def check_reference_is_dangling(client, endpoint: dict) -> None:
     )
 
 
-def attach(client, endpoint_id: str, image: str, token: str) -> dict:
+def check_replacement(client, endpoint: dict, replaces: str) -> dict:
+    """The replace warrant: the caller named the template the endpoint is
+    actually on, and it is read before it is swapped away from."""
+    current = current_template_id(endpoint)
+    if not current:
+        raise Refused(
+            "nothing-to-replace",
+            "the endpoint references no template — that is the plain "
+            "ATTACH-TEMPLATE case, not a replacement",
+        )
+    if replaces != current:
+        raise Refused(
+            "replaces-mismatch",
+            f"asked to replace {replaces!r}, but the endpoint is on "
+            f"{current!r} — a replace that cannot name what it replaces is "
+            "a fumble, and a fumble here repoints paid hardware",
+        )
+    try:
+        _, outgoing = client.get_template(current)
+    except Exception as exc:
+        raise Refused(
+            "outgoing-unreadable",
+            f"the template being replaced could not be read ({type(exc).__name__}); "
+            "without its image and disk the previous configuration cannot be "
+            "restored, so the swap is not safe to make",
+        ) from exc
+    return outgoing or {}
+
+
+def attach(
+    client,
+    endpoint_id: str,
+    image: str,
+    token: str,
+    *,
+    replaces: str = "",
+    replace_token: str = "",
+) -> dict:
     check_token(token)
     check_image(image)
     endpoint = check_endpoint(client, endpoint_id)
-    check_reference_is_dangling(client, endpoint)
+
+    outgoing: dict = {}
+    if replace_token:
+        if replace_token != REPLACE_TOKEN:
+            raise Refused(
+                "replace-token-wrong",
+                "the literal replacement token was not given",
+            )
+        outgoing = check_replacement(client, endpoint, replaces)
+    else:
+        if replaces:
+            raise Refused(
+                "replace-unauthorized",
+                "a template to replace was named without the replacement "
+                "token — naming one is not authorizing it",
+            )
+        check_reference_is_dangling(client, endpoint)
 
     _, created = client.create_template(TEMPLATE_NAME, image, CONTAINER_DISK_GB)
     template_id = (created or {}).get("id")
@@ -161,19 +234,48 @@ def attach(client, endpoint_id: str, image: str, token: str) -> dict:
             "attach-unconfirmed",
             f"the endpoint still reports {current_template_id(after)!r}, not {template_id!r}",
         )
-    return {"template_id": template_id, "image": image, "endpoint": after}
+    result = {"template_id": template_id, "image": image, "endpoint": after}
+    if outgoing:
+        # The restore card. Recorded from the template ITSELF, read before
+        # the swap — not from what anyone remembers it was set to.
+        result["replaced"] = {
+            "template_id": current_template_id(endpoint),
+            "image": outgoing.get("imageName"),
+            "container_disk_gb": outgoing.get("containerDiskInGb"),
+        }
+    return result
 
 
-def report(client, endpoint_id: str, image: str, token: str) -> tuple:
+def report(
+    client,
+    endpoint_id: str,
+    image: str,
+    token: str,
+    *,
+    replaces: str = "",
+    replace_token: str = "",
+) -> tuple:
     try:
-        result = attach(client, endpoint_id, image, token)
+        result = attach(
+            client, endpoint_id, image, token,
+            replaces=replaces, replace_token=replace_token,
+        )
     except Refused as refusal:
         print(f"REFUSED {refusal.code}: {refusal.detail}")
         print("NOTHING WAS WRITTEN")
         return 1, {"refused": refusal.code}
 
+    if result.get("replaced"):
+        was = result["replaced"]
+        print(
+            f"REPLACED template {was['template_id']} "
+            f"(image {was['image']}, containerDiskInGb {was['container_disk_gb']}) "
+            "- recorded so the previous configuration can be restored exactly"
+        )
     print(f"CREATED template {result['template_id']}")
     print(f"IMAGE {result['image']}")
+    print(f"CONTAINER DISK {CONTAINER_DISK_GB} GB requested (nominal; the "
+          "worker reports what it actually has before any download)")
     print(f"ATTACHED to endpoint {endpoint_id}, confirmed by re-reading it")
     print(
         "ENV STILL REQUIRED (names only, values are the owner's and belong in "
@@ -192,7 +294,12 @@ def main(argv) -> int:
     endpoint_id = argv[1] if len(argv) > 1 else ""
     image = argv[2] if len(argv) > 2 else ""
     token = argv[3] if len(argv) > 3 else ""
-    code, _ = report(runpod_client, endpoint_id, image, token)
+    replaces = argv[4] if len(argv) > 4 else ""
+    replace_token = argv[5] if len(argv) > 5 else ""
+    code, _ = report(
+        runpod_client, endpoint_id, image, token,
+        replaces=replaces, replace_token=replace_token,
+    )
     return code
 
 

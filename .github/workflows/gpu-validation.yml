@@ -89,6 +89,14 @@ on:
         description: "Type ATTACH-TEMPLATE (exactly) to allow template-attach. Creates ONE template and repoints ONE endpoint."
         type: string
         default: ""
+      replaces_template:
+        description: "template-attach: the id of the WORKING template being replaced. Must equal the one the endpoint currently references - a replace that cannot name what it replaces is refused. Leave blank unless the reference is dangling."
+        type: string
+        default: ""
+      replace_token:
+        description: "Type REPLACE-TEMPLATE (exactly) to allow replacing a template that RESOLVES (owner directive 2026-08-29, the 80 -> 200 GB disk). A separate token from attach_token on purpose: repairing a dangling reference and knowingly replacing a working configuration are different acts."
+        type: string
+        default: ""
       secret_names:
         description: "template-env: the RunPod SECRET NAMES backing the three storage variables, comma-separated, in storage.REQUIRED_VARS order (endpoint, access key id, secret access key). Names only - never a value. Blank refuses, because a guessed name expands to nothing and looks like success. The variable names themselves are deliberately not spelled in this file: gate 6 forbids them here so they can never be wired to a GitHub secret."
         type: string
@@ -379,7 +387,13 @@ jobs:
         with:
           python-version: "3.11"
       - name: "Create the template, attach it, re-read the endpoint"
-        run: python -m validation.template_attach "${{ inputs.endpoint_id }}" "${{ inputs.image_ref }}" "${{ inputs.attach_token }}"
+        run: |
+          python -m validation.template_attach \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.image_ref }}" \
+            "${{ inputs.attach_token }}" \
+            "${{ inputs.replaces_template }}" \
+            "${{ inputs.replace_token }}"
 
   template_env:
     # Puts the three storage variables on the template BY REFERENCE, so

@@ -120,6 +120,115 @@ def test_a_template_that_still_resolves_is_not_clobbered():
     assert client.writes == []
 
 
+# ------------------------------------------- replacing a WORKING template
+#
+# Owner directive 2026-08-29: the 80 GB template must be replaced by a
+# 200 GB one. That is a different act from repairing a dangling reference
+# and gets its own token, its own warrant, and its own refusals.
+
+WORKING = {"id": "aqa3wkdf8g", "imageName": "ghcr.io/owner/w@sha256:" + "b" * 64,
+           "containerDiskInGb": 80}
+
+
+def _on_working():
+    return {"id": ENDPOINT, "templateId": "aqa3wkdf8g"}
+
+
+def test_the_attach_token_alone_still_refuses_a_working_template():
+    """The two tokens are not interchangeable. Nothing about wanting a
+    bigger disk makes ATTACH-TEMPLATE mean 'replace whatever is there'."""
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN)
+    assert exc.value.code == "template-exists"
+    assert client.writes == []
+
+
+def test_a_replacement_must_carry_the_replacement_token():
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN, replaces="aqa3wkdf8g")
+    assert exc.value.code == "replace-unauthorized"
+    assert client.writes == []
+
+
+def test_a_wrong_replacement_token_refuses():
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                  replaces="aqa3wkdf8g", replace_token="REPLACE")
+    assert exc.value.code == "replace-token-wrong"
+    assert client.writes == []
+
+
+def test_a_replacement_must_name_the_template_the_endpoint_is_actually_on():
+    """A replace that cannot say what it replaces is a fumble, and a fumble
+    here repoints paid hardware."""
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                  replaces="someothertmpl", replace_token=ta.REPLACE_TOKEN)
+    assert exc.value.code == "replaces-mismatch"
+    assert client.writes == []
+
+
+def test_a_replacement_refuses_when_there_is_nothing_to_replace():
+    client = Client(endpoint={"id": ENDPOINT})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                  replaces="aqa3wkdf8g", replace_token=ta.REPLACE_TOKEN)
+    assert exc.value.code == "nothing-to-replace"
+    assert client.writes == []
+
+
+def test_an_outgoing_template_that_cannot_be_read_is_not_swapped_away_from():
+    """Without its image and disk the previous configuration cannot be
+    restored, so the swap is not safe to make."""
+    client = Client(endpoint=_on_working(), templates={})
+    with pytest.raises(ta.Refused) as exc:
+        ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                  replaces="aqa3wkdf8g", replace_token=ta.REPLACE_TOKEN)
+    assert exc.value.code == "outgoing-unreadable"
+    assert client.writes == []
+
+
+def test_an_authorized_replacement_records_what_it_replaced():
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING},
+                    after=_attached())
+    result = ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                       replaces="aqa3wkdf8g", replace_token=ta.REPLACE_TOKEN)
+    assert result["template_id"] == "newtmpl"
+    assert result["replaced"] == {
+        "template_id": "aqa3wkdf8g",
+        "image": WORKING["imageName"],
+        "container_disk_gb": 80,
+    }
+
+
+def test_the_replacement_asks_for_the_bigger_disk():
+    """The whole point of the swap. 80 GB could not hold either Wan
+    candidate; the new template must actually request more."""
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING},
+                    after=_attached())
+    ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+              replaces="aqa3wkdf8g", replace_token=ta.REPLACE_TOKEN)
+    create = [w for w in client.writes if w[0] == "create"][0]
+    assert create[3] == ta.CONTAINER_DISK_GB
+    assert ta.CONTAINER_DISK_GB > WORKING["containerDiskInGb"]
+
+
+def test_the_replacement_report_prints_the_restore_card(capsys):
+    client = Client(endpoint=_on_working(), templates={"aqa3wkdf8g": WORKING},
+                    after=_attached())
+    code, _ = ta.report(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN,
+                        replaces="aqa3wkdf8g", replace_token=ta.REPLACE_TOKEN)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "REPLACED template aqa3wkdf8g" in out
+    assert "containerDiskInGb 80" in out
+    assert str(ta.CONTAINER_DISK_GB) in out
+
+
 def test_an_endpoint_with_no_template_at_all_may_be_attached():
     client = Client(endpoint={"id": ENDPOINT}, after=_attached())
     assert ta.attach(client, ENDPOINT, GOOD, ta.AUTHORIZED_TOKEN)["template_id"] == "newtmpl"
