@@ -19,6 +19,8 @@ The worker must never move into `oniq-sparkle-pay`.
 | `storygen.py`             | `story_generate` — ONIQ's own causal LLM, loaded and UNLOADED before LTX |
 | `storage.py`              | R2 by reference (bucket `oniq-gpu`), fails closed           |
 | `handler.py`              | serverless handler, runtime ceiling, deterministic cleanup  |
+| `modelprobe.py`           | `model_probe` — the open-source video model benchmark, off the production path |
+| `preview.py`              | bounded JPEG thumbnails returned in the reply, for a private bucket |
 | `runpod_client.py`        | CI harness client — never shipped in the image              |
 | `validation/admission.py` | financial admission — pure functions, no network            |
 
@@ -135,6 +137,60 @@ The full evidence chain, the TERMINATION_UNKNOWN honesty note
 financial ledger: `oniq-sparkle-pay/docs/video/ONIQ_AI_FINANCIAL_CONTROL.md`
 §16o. Visual quality is judged by the owner from
 `oniq-gpu/validation/video-test/ltx-001.mp4`, not by this repo.
+
+## Open-source video model probe — measured (2026-08-29)
+
+Owner directive 2026-08-29: benchmark the open-source image-to-video
+candidates on an A5000 and name ONE, or `NO_MODEL_READY`. The probe is a
+FIFTH operation, `model_probe`, added as a strict superset — no production
+model, provider, price or user-visible behaviour was touched, and
+`RUNTIME_CEILING_SECONDS` is still 900 for everything else.
+`PROBE_RUNTIME_CEILING_SECONDS` (1800) applies to `model_probe` alone.
+
+**Verdict: `NO_MODEL_READY`.** Nothing measured here beats the LTX-2B the
+worker already runs, so nothing changes. Full report, with the frames:
+`claude.ai/code/artifact/636d69f5-9b97-4402-8226-5e0f1d7e25f1`.
+
+Infrastructure, measured on the worker rather than from the console:
+container disk 214,748,364,800 B (200.0 GiB) total, 199.98 GiB free before
+any download; VRAM 25,283,526,656 B (23.55 GiB); cold image pull 17.6 min
+on the first job of a release and 8–16 s cached; production LTX-2B re-ran
+at 43.2 s against 42.7 s historical — no regression from the new image.
+
+| Candidate            | Outcome            | Inference    | Peak VRAM  | Cost  |
+| -------------------- | ------------------ | ------------ | ---------- | ----- |
+| `cogvideox-i2v` (5B) | clip returned      | 548,024 ms   | 13.58 GiB  | $0.05 |
+| `ltx-13b`            | clip returned      | 306,653 ms   | 2.27 GiB   | $0.03 |
+| `wan21-i2v-480p`     | executionTimeout   | —            | —          | $0.14 |
+| `wan22-i2v-a14b`     | provider timeout   | —            | —          | $0.02 |
+| `hunyuan-i2v`        | NOT_EVALUATED      | —            | —          | $0.00 |
+
+Human inspection against the shared reference, per axis:
+
+- `cogvideox-i2v` — ACTION/SCENE/CONTENT/TEMPORAL **PASS**, IDENTITY
+  **PARTIAL**. The best of the four and still not good enough to switch to
+  at 9.1 minutes for 49 frames.
+- `ltx-13b` — SCENE **PASS**, ACTION/TEMPORAL/CONTENT **PARTIAL**,
+  IDENTITY **FAIL**.
+- The two Wan candidates produced no clip at all, so they are UNMEASURED,
+  not bad: `wan21` was cut by the 1800 s ceiling and `wan22` by a
+  provider-initiated retry at 157 s. Neither result says anything about
+  the model's quality, and neither is recorded as a failure of it.
+- `hunyuan-i2v` was never probed — ARCHITECTURE_NOT_RESOLVED.
+
+Two things worth keeping. **A prediction of mine that the measurement
+refuted:** I expected sequential CPU offload to be prohibitively slow, and
+LTX-13B (13B params, 97 frames, sequential) finished in 6.0 min using
+2.27 GiB while CogVideoX (5B, 49 frames, model offload) took 9.8 min. Peak
+VRAM under sequential offload is a submodule, not the transformer, so
+parameter count stops predicting either footprint or wall time. **The
+bucket is private and `R2_PUBLIC_BASE_URL` is misconfigured**, so the clips
+could not be fetched for inspection; `preview.py` returns bounded
+thumbnails in the job reply instead, which is why there are frames to look
+at at all. That is a durable fix, not a workaround for one run.
+
+Total spend for the whole benchmark: **$0.30**, zero orphans
+(`in_progress 0, in_queue 0, running 0` at the sweep).
 
 ## Owner actions this repo cannot perform
 
