@@ -2040,3 +2040,18 @@ def test_the_probe_payload_carries_the_common_action_prompt():
     assert payload["params"]["prompt"] == spend_run.PROBE_ACTION_PROMPT
     assert payload["model"] == "wan22-i2v-a14b"
     assert payload["preview"] is True
+
+
+def test_every_probe_row_has_a_sayable_shape_line():
+    """The driver crashed on KeyError('width') for the first canvas-less row
+    (HunyuanVideo-1.5 buckets its canvas from the reference image). Walk the
+    REAL table so the next candidate of either shape keeps working."""
+    import modelprobe
+
+    for key, row in modelprobe.PROBE_MODELS.items():
+        line = spend_run.probe_shape_line(row)
+        assert f"@ {row['fps']}fps" in line, key
+        if row.get("width"):
+            assert f"{row['width']}x{row['height']}" in line, key
+        else:
+            assert "derived from the reference image" in line, key

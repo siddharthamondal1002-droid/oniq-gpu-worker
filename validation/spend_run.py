@@ -791,6 +791,23 @@ PROBE_REFERENCE_KEY = "probe-reference.png"
 # Camera movement alone does not count and the sentence says so: the required
 # motion is the SUBJECT's head and upper body, and the camera is pinned still
 # precisely to remove the cheapest way for a model to look alive.
+def probe_shape_line(row: dict) -> str:
+    """One row's shape, sayable for EVERY row shape the table allows.
+
+    A row without width/height is not missing them: HunyuanVideo-1.5 derives
+    its canvas from the reference image's aspect against its trained buckets,
+    and indexing row['width'] in the driver crashed for exactly that row
+    (found free, by reading, 2026-08-29). Tested over every row in the table
+    so the next canvas-less candidate cannot reintroduce it.
+    """
+    seconds = row["frames"] / row["fps"]
+    if row.get("width"):
+        return (f"{row['width']}x{row['height']}x{row['frames']} "
+                f"@ {row['fps']}fps  ({seconds:.2f}s)")
+    return (f"canvas derived from the reference image (trained buckets), "
+            f"{row['frames']} frames @ {row['fps']}fps  ({seconds:.2f}s)")
+
+
 PROBE_ACTION_PROMPT = (
     "The woman slowly turns her head and upper body toward the camera. "
     "Her face, hair, clothing and body proportions stay the same "
@@ -1795,8 +1812,7 @@ def main(argv) -> int:
             row = modelprobe.PROBE_MODELS[candidate]
             print(f"probing {row['label']} — {row['repo']} @ {row['revision']}")
             print(f"  conditioned on: {reference}")
-            print(f"  shape: {row['width']}x{row['height']}x{row['frames']} "
-                  f"@ {row['fps']}fps  ({row['frames'] / row['fps']:.2f}s)")
+            print(f"  shape: {probe_shape_line(row)}")
             print(f"  published weights: {row['download_gib']:.2f} GiB, "
                   f"loading {row['dtype']} with {row['offload']} offload")
             rows = [
