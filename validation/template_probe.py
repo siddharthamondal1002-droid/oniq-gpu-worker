@@ -129,7 +129,16 @@ def report(client, expected_template_id: str) -> tuple:
     else:
         print(f"TEMPLATES: {len(templates)} on the account")
         for t in templates:
-            print(f"  id={t.get('id')!r} name={t.get('name')!r} image={t.get('imageName')!r}")
+            # containerDiskInGb decides whether a job can download a
+            # checkpoint at all, and it is the number that settles whether a
+            # candidate model is probeable on this endpoint or needs storage
+            # it does not have. Printed because "the model did not fit on
+            # disk" and "the model does not work" are different findings and
+            # only one of them is about the model.
+            print(f"  id={t.get('id')!r} name={t.get('name')!r} image={t.get('imageName')!r}"
+                  f" containerDiskInGb={t.get('containerDiskInGb')!r}"
+                  f" volumeInGb={t.get('volumeInGb')!r}"
+                  f" volumeMountPath={t.get('volumeMountPath')!r}")
         ids = {t.get("id") for t in templates}
         if expected_template_id in ids:
             print(f"FOUND: {expected_template_id} exists after all")

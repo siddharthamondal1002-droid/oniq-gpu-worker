@@ -280,7 +280,14 @@ def list_templates_graphql():
     Returns a list, or None when the answer is unknown — never [] for
     "could not look", which would read as "the account has no templates".
     """
-    query = "query { myself { podTemplates { id name imageName } } }"
+    # containerDiskInGb / volumeInGb joined the selection 2026-08-29: a job
+    # cannot download a checkpoint larger than the disk it has, so these two
+    # numbers decide which candidate models are probeable on this endpoint at
+    # all. Still NAMES ONLY — no env, no secret values.
+    query = (
+        "query { myself { podTemplates { id name imageName "
+        "containerDiskInGb volumeInGb volumeMountPath } } }"
+    )
     try:
         status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
         if status != 200:
@@ -294,6 +301,9 @@ def list_templates_graphql():
                 "id": t.get("id"),
                 "name": t.get("name"),
                 "imageName": t.get("imageName"),
+                "containerDiskInGb": t.get("containerDiskInGb"),
+                "volumeInGb": t.get("volumeInGb"),
+                "volumeMountPath": t.get("volumeMountPath"),
             }
             for t in templates
             if isinstance(t, dict)
