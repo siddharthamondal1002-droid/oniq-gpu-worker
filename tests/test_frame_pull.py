@@ -801,3 +801,55 @@ def test_a_plate_local_name_can_never_collide_with_a_contact_sheet(tmp_path):
     )
     assert report["artifacts"] == ["clip-sheet.src.png"]
     assert not report["artifacts"][0].endswith("-sheet.png")
+
+
+# ---------------------------------------------- the probe's controlled reference
+
+
+def test_a_jpeg_reference_is_verified_by_its_own_magic():
+    """The five-model probe conditions every candidate on one image, and the
+    owner requires that image looked at before any GPU runs — so the retrieval
+    path has to handle a jpg, not only the png plates it was built for."""
+    frame_pull.verify_jpeg(b"\xff\xd8\xff\xe0" + b"0" * 32)
+    with pytest.raises(frame_pull.FramePullError) as wrong:
+        frame_pull.verify_jpeg(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    assert wrong.value.code == "artifact-not-jpeg"
+    with pytest.raises(frame_pull.FramePullError) as empty:
+        frame_pull.verify_jpeg(b"")
+    assert empty.value.code == "artifact-empty"
+
+
+def test_a_jpeg_key_is_classified_as_a_still_not_a_clip():
+    clips = frame_pull.clips_from_keys("validation/input.jpg,validation/out/a.mp4,p.png")
+    assert [c["kind"] for c in clips] == ["jpeg", "mp4", "png"]
+
+
+def test_a_still_is_saved_under_its_own_extension_and_cut_no_frames(tmp_path):
+    """Saving a jpg as .mp4 would hand ffmpeg a file it cannot read and turn a
+    perfectly good reference into a failed retrieval."""
+    calls = []
+
+    def run(args, **kw):
+        calls.append(args)
+        raise AssertionError("ffmpeg must not run on a still")
+
+    report = frame_pull.pull_clip(
+        {"scene": "ref", "output_key": "validation/input.jpg", "kind": "jpeg"},
+        "https://pub-x.r2.dev", str(tmp_path),
+        fetch=lambda url: b"\xff\xd8\xff\xe0" + b"0" * 64,
+        run=run,
+    )
+    assert report["artifacts"] == ["ref.src.jpg"]
+    assert calls == []
+
+
+def test_a_jpeg_that_is_actually_an_error_page_is_refused(tmp_path):
+    """Which verifier runs is an expectation the key carries, so a server
+    error page fails the expected check rather than being reclassified."""
+    report = frame_pull.pull_clip(
+        {"scene": "ref", "output_key": "validation/input.jpg", "kind": "jpeg"},
+        "https://pub-x.r2.dev", str(tmp_path),
+        fetch=lambda url: b"<html>403 Forbidden</html>",
+        run=lambda *a, **k: None,
+    )
+    assert report["error"] == "artifact-not-jpeg"

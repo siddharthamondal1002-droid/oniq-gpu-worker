@@ -200,6 +200,26 @@ def verify_png(data: bytes, expected_bytes=None) -> None:
         raise FramePullError("artifact-not-png", "no PNG signature")
 
 
+def verify_jpeg(data: bytes, expected_bytes=None) -> None:
+    """JPEG's own magic, on the same terms as PNG's.
+
+    Added 2026-08-29 for the probe's CONTROLLED REFERENCE. The five-model
+    benchmark has to condition every candidate on one image, and the owner
+    requires that image looked at before any GPU runs — so the retrieval path
+    has to be able to fetch a jpg, not only the png plates and mp4 clips it
+    was built for.
+    """
+    if not data:
+        raise FramePullError("artifact-empty", "the download was empty")
+    if isinstance(expected_bytes, int) and 0 < expected_bytes != len(data):
+        raise FramePullError(
+            "artifact-size-mismatch",
+            f"downloaded {len(data)} bytes, worker reported {expected_bytes}",
+        )
+    if data[:3] != b"\xff\xd8\xff":
+        raise FramePullError("artifact-not-jpeg", "no JPEG signature")
+
+
 def frame_times(video_seconds, count: int = FRAMES_PER_CLIP) -> list:
     """When to sample, in seconds.
 
@@ -408,11 +428,15 @@ def pull_clip(
     # its key or signed URL's path at parse time), not a guess from the
     # bytes: a server error page must fail the expected check, never get
     # reclassified into whatever it happens to resemble.
-    is_png = clip.get("kind") == "png" or str(key or "").lower().endswith(".png")
+    lowered = str(key or "").lower()
+    is_png = clip.get("kind") == "png" or lowered.endswith(".png")
+    is_jpeg = clip.get("kind") == "jpeg" or lowered.endswith((".jpg", ".jpeg"))
     try:
         data = fetch(url)
         if is_png:
             verify_png(data, clip.get("output_bytes"))
+        elif is_jpeg:
+            verify_jpeg(data, clip.get("output_bytes"))
         else:
             verify_artifact(data, clip.get("output_bytes"))
     except FramePullError as exc:
@@ -449,12 +473,19 @@ def pull_clip(
     # otherwise share a local name with another clip's contact sheet (the
     # a7a27d0 collapse across a type boundary), and the log-inline step
     # would ship it in the sheets-first slot it did not earn.
-    local = os.path.join(out_dir, f"{stem}.src.png" if is_png else f"{stem}.mp4")
+    if is_png:
+        suffix = ".src.png"
+    elif is_jpeg:
+        suffix = ".src.jpg"
+    else:
+        suffix = ".mp4"
+    local = os.path.join(out_dir, stem + suffix)
     writer = write or _write_file
     writer(local, data)
     report["bytes"] = len(data)
     report["artifacts"].append(os.path.basename(local))
-    if is_png:
+    if is_png or is_jpeg:
+        # A still has no frames to cut out of it. It IS the frame.
         return report
 
     # The worker's reported duration when there is one; otherwise measure
@@ -581,7 +612,13 @@ def clips_from_keys(raw: str) -> list:
     clips = []
     for key in [k.strip() for k in (raw or "").split(",") if k.strip()]:
         scene = key.rsplit(".", 1)[0].replace("/", "-")[-80:]
-        kind = "png" if key.lower().endswith(".png") else "mp4"
+        low = key.lower()
+        if low.endswith(".png"):
+            kind = "png"
+        elif low.endswith((".jpg", ".jpeg")):
+            kind = "jpeg"
+        else:
+            kind = "mp4"
         clips.append({"scene": scene, "output_key": key, "kind": kind})
     return clips
 
