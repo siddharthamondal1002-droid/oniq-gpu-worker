@@ -71,6 +71,17 @@ SHEET_NAME = "sheet"
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 
 
+# What a status usually means for THIS bucket, so a refusal points at a
+# fix instead of at a number. Guidance only — never a claim of fact.
+HTTP_HINTS = {
+    403: "the bucket has no public read enabled (r2.dev dev URL off, or "
+         "no public access), or this object is not public",
+    404: "no object at that key under this base — check the key, and "
+         "whether the base already includes the bucket name",
+    401: "the base is not a public read base; it wants credentials",
+}
+
+
 class FramePullError(Exception):
     """A refusal. `code` is stable so tests and logs can name it."""
 
@@ -306,6 +317,18 @@ def pull_clip(
     except FramePullError as exc:
         report["error"] = exc.code
         return report
+    except urllib.error.HTTPError as exc:
+        # THE STATUS, NOT JUST "IT FAILED". Measured 2026-08-29: the first
+        # real pull reported `fetch-failed:HTTPError` and that sentence
+        # contains no diagnosis — 403 (the bucket has no public r2.dev
+        # access enabled) and 404 (the key is not where we think it is)
+        # are completely different problems with completely different
+        # fixes, and this said neither. It is the same mistake
+        # story-still made when its throw discarded the engine's reason.
+        # A status code is not a secret; the URL still never appears.
+        report["error"] = f"fetch-failed:HTTP {exc.code}"
+        report["hint"] = HTTP_HINTS.get(exc.code, "")
+        return report
     except (urllib.error.URLError, OSError) as exc:
         # The class of failure, never the URL: an error string can carry
         # a redirect target nobody meant to publish.
@@ -413,7 +436,11 @@ def main(argv=None) -> int:
     reports = [pull_clip(clip, base) for clip in clips]
     for report in reports:
         if report.get("error"):
-            print(f"  {report['scene']}: NO FRAMES ({report['error']})")
+            hint = report.get("hint")
+            print(
+                f"  {report['scene']}: NO FRAMES ({report['error']})"
+                + (f" — {hint}" if hint else "")
+            )
         else:
             print(
                 f"  {report['scene']}: {report['bytes']} bytes, "

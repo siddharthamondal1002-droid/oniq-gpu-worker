@@ -419,3 +419,53 @@ def test_a_flag_shaped_base_says_so_instead_of_talking_about_schemes():
         frame_pull.normalise_base("on")
     assert exc.value.code == "base-not-a-url"
     assert "not an on/off flag" in exc.value.message
+
+
+def test_a_failed_fetch_reports_the_status_not_just_that_it_failed(tmp_path):
+    # MEASURED 2026-08-29: the first real pull said `fetch-failed:HTTPError`
+    # and that sentence contains no diagnosis. 403 and 404 are different
+    # problems with different fixes. Same mistake story-still made when its
+    # throw discarded the engine's reason.
+    import urllib.error
+
+    def forbidden(url):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    report = frame_pull.pull_clip(
+        {"scene": "s", "output_key": "validation/out/ltx-001.mp4"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=forbidden,
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "fetch-failed:HTTP 403"
+    assert "public read" in report["hint"]
+    # The URL is still never echoed — a status is not a secret, a URL can be.
+    assert BASE not in json.dumps(report)
+
+
+def test_a_404_points_at_the_key_not_at_permissions(tmp_path):
+    import urllib.error
+
+    report = frame_pull.pull_clip(
+        {"scene": "s", "output_key": "validation/out/missing.mp4"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(
+            urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+        ),
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "fetch-failed:HTTP 404"
+    assert "key" in report["hint"]
+
+
+def test_a_network_failure_is_still_named_by_class_only(tmp_path):
+    report = frame_pull.pull_clip(
+        {"scene": "s", "output_key": "validation/out/ltx-001.mp4"},
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(OSError("reset")),
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "fetch-failed:OSError"
