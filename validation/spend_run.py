@@ -1112,6 +1112,43 @@ def one_job(
                 ),
             }
         )
+    if op == "model_probe":
+        # EVERY column the benchmark compares on, surfaced in the run log
+        # rather than left inside a raw payload nobody reads. Cost stays out:
+        # the worker does not know the live rate, and it is attached below
+        # from this run's own quote, labelled as an estimate from measured
+        # runtime unless the provider states billing itself.
+        out = status["output"]
+        row.update(
+            {
+                "label": out.get("label"),
+                "repo": out.get("repo"),
+                "revision": out.get("revision"),
+                "licence": out.get("licence"),
+                "dtype": out.get("dtype"),
+                "offload": out.get("offload"),
+                "failure": out.get("failure"),
+                "resolution": f"{out.get('width')}x{out.get('height')}",
+                "frames": out.get("frames"),
+                "fps": out.get("fps"),
+                "download_ms": out.get("download_ms"),
+                "model_load_ms": out.get("model_load_ms"),
+                "conditioning_load_ms": out.get("conditioning_load_ms"),
+                "inference_ms": out.get("inference_ms"),
+                "encode_ms": out.get("encode_ms"),
+                "total_wall_ms": out.get("total_wall_ms"),
+                "vram_total_bytes": out.get("vram_total_bytes"),
+                "peak_allocated_bytes": out.get("peak_allocated_bytes"),
+                "peak_reserved_bytes": out.get("peak_reserved_bytes"),
+                "disk_total_bytes": out.get("disk_total_bytes"),
+                "disk_free_bytes": out.get("disk_free_bytes"),
+                "output_bytes": out.get("output_bytes"),
+                # The rate is this run's LIVE quote; the product of it and a
+                # measured runtime is an estimate and says so.
+                "cost_basis": "ESTIMATED FROM MEASURED RUNTIME",
+                "live_rate_usd_per_hour": str(quote["price"]),
+            }
+        )
     if op == "audio_mux":
         out = status["output"]
         row.update(

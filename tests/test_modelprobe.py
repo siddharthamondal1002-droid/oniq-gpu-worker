@@ -6,7 +6,7 @@ import contract
 import modelprobe
 
 
-class FakeCuda:
+class FakeCuda:  # noqa: D101
     """A CUDA that reports what we tell it to, so the whole probe runs on CPU."""
 
     def __init__(self, available=True, total=24 * 1024**3, peak=10 * 1024**3):
@@ -35,6 +35,9 @@ class FakeCuda:
 
     def reset_peak_memory_stats(self):
         self.reset_calls += 1
+
+    def get_device_name(self, index):
+        return "NVIDIA RTX A5000"
 
 
 class FakeTorch:
@@ -337,3 +340,23 @@ def test_the_worker_reports_the_disk_it_actually_has(rig, monkeypatch):
                             load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
     assert report["disk_free_bytes"] == 150 * 1024**3
     assert report["disk_total_bytes"] == 200 * 1024**3
+
+
+def test_the_probe_proves_which_card_it_ran_on(rig):
+    """The same proof production demands: a CPU fallback is not success and
+    the wrong card is not the benchmark. A result measured on some other GPU
+    would be worse than none, because it would look like an answer."""
+    report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+    assert report["device"] == "cuda"
+    assert report["gpu_name"] == "NVIDIA RTX A5000"
+    assert report["vram_peak_mb"] > 0
+    assert report["vram_total_mb"] > 0
+
+
+def test_a_cpu_run_reports_cpu_so_the_harness_can_refuse_it(rig):
+    report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                            load_pipeline=lambda: fake_pipe(),
+                            torch=FakeTorch(available=False))
+    assert report["device"] == "cpu"
+    assert "gpu_name" not in report

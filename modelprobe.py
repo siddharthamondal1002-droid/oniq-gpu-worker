@@ -187,6 +187,27 @@ def cuda_snapshot(torch=None) -> dict:
     }
 
 
+def cuda_identity(torch=None) -> dict:
+    """WHICH card, and is this CUDA at all.
+
+    The same proof production demands of every paid job: a CPU fallback is not
+    success and the wrong card is not the benchmark. Reported here so the
+    harness can apply exactly the check it applies to LTX rather than a weaker
+    one — a benchmark measured on some other GPU would be worse than no
+    benchmark, because it would look like an answer.
+    """
+    if torch is None:  # pragma: no cover - exercised through run()
+        import torch
+    if not torch.cuda.is_available():
+        return {"device": "cpu"}
+    free, total = torch.cuda.mem_get_info()
+    return {
+        "device": "cuda",
+        "gpu_name": torch.cuda.get_device_name(0),
+        "vram_total_mb": total // (1024 * 1024),
+    }
+
+
 def cuda_peaks(torch=None) -> dict:
     if torch is None:  # pragma: no cover - exercised through run()
         import torch
@@ -261,7 +282,8 @@ def total_disk_bytes(path: str = "/tmp") -> int:
 
 def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
                  before: dict, peaks: dict, failure: str,
-                 output_bytes: int = 0, detail: str = "") -> dict:
+                 output_bytes: int = 0, detail: str = "",
+                 identity: dict | None = None) -> dict:
     """Everything the owner's table needs from one probe, measured or absent.
 
     Cost is deliberately NOT computed here. The worker does not know the live
@@ -292,6 +314,12 @@ def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
         row["vram_before_reserved_bytes"] = before.get("reserved_bytes")
     if peaks:
         row.update(peaks)
+        # vram_peak_mb alongside the byte-precise figure: the harness's
+        # shared success check reads the megabyte field every paid job
+        # reports, and the benchmark reads the bytes.
+        row["vram_peak_mb"] = peaks["peak_allocated_bytes"] // (1024 * 1024)
+    if identity:
+        row.update(identity)
     if detail:
         row["detail"] = detail
     return row
@@ -366,6 +394,7 @@ def run(job: dict, input_path: str, output_path: str,
         model_key, spec_row, phases,
         before=before, peaks=cuda_peaks(torch),
         failure="SUCCESS", output_bytes=size,
+        identity=cuda_identity(torch),
     )
     report.update(disk)
     return report
