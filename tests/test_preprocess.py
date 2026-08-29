@@ -137,6 +137,12 @@ def test_decode_pixel_bound_enforced(tmp_path, monkeypatch):
     src = tmp_path / "big.png"
     _write_png(src, (200, 200))
     monkeypatch.setattr(contract, "MAX_IMAGE_PIXELS", 100)
+    # _decode copies the bound into PIL's PROCESS-WIDE Image.MAX_IMAGE_PIXELS,
+    # which monkeypatch cannot know about and so cannot restore. Left at 100
+    # it silently turns every later test's ordinary image into a
+    # "decompression bomb" — measured 2026-08-29, when it began failing
+    # tests in an unrelated module that merely open a 64x48 JPEG.
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", Image.MAX_IMAGE_PIXELS)
     with pytest.raises(contract.ContractError) as exc:
         preprocess._decode(str(src))
     assert exc.value.code == "input-too-large"

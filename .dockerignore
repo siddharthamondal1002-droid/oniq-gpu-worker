@@ -9,6 +9,7 @@
 !preprocess.py
 !storage.py
 !handler.py
+!preview.py
 !videogen.py
 !modelprobe.py
 !storygen.py

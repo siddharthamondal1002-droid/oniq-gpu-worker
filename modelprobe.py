@@ -32,6 +32,7 @@ import os
 import time
 
 import contract
+import preview
 
 # Where a probe's weights land. Container disk, wiped with the worker — a
 # probe never writes into /app/models, so it cannot disturb the baked
@@ -570,6 +571,11 @@ def run(job: dict, input_path: str, output_path: str,
         identity=cuda_identity(torch),
     )
     report.update(disk)
+    # The clip goes to R2; a handful of downscaled frames come back here, so
+    # the benchmark can be LOOKED at without a bucket credential. A probe is
+    # only ever run by the harness, so this needs no flag — and a failure to
+    # make a preview is never allowed to fail a probe that produced a video.
+    report["preview_frames"] = preview.encode_frames(frames)
     return report
 
 

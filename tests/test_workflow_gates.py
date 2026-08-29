@@ -157,6 +157,10 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         "contract.py",
         "preprocess.py",
         "storage.py",
+        # preview joined 2026-08-29: the bucket is private, so the only way
+        # to LOOK at what the worker made is for the worker to hand a
+        # thumbnail back with the reply.
+        "preview.py",
         "videogen.py",
         # modelprobe joined 2026-08-29 with the benchmark op.
         "modelprobe.py",
@@ -182,6 +186,7 @@ def test_dockerignore_denies_by_default():
         "!contract.py",
         "!preprocess.py",
         "!storage.py",
+        "!preview.py",
         "!videogen.py",
         "!modelprobe.py",
         "!storygen.py",
@@ -275,6 +280,7 @@ def test_the_closure_actually_reaches_the_engines():
         "contract",
         "preprocess",
         "storage",
+        "preview",
         "videogen",
         "storygen",
         "audio",

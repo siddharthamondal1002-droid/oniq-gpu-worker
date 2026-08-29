@@ -25,6 +25,7 @@ import time
 from PIL import Image
 
 import contract
+import preview
 from preprocess import GpuUnavailable, _decode
 
 MODEL_DIR = "/app/models/ltx"
@@ -339,7 +340,7 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
     encode_ms = int((time.monotonic() - encode_started) * 1000)
 
     width, height = still.size
-    return {
+    result = {
         "ok": True,
         "op": "image_generate",
         "output_key": job["output_key"],
@@ -354,6 +355,12 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
         "duration_ms": int((time.monotonic() - started) * 1000),
         **_gpu_metrics(),
     }
+    # ONLY WHEN ASKED. A production still goes to R2 and its reply says so;
+    # nothing about that changes here. The benchmark harness asks, because the
+    # bucket is private and a reference nobody can look at cannot be approved.
+    if preview.wanted(job):
+        result["preview_frames"] = preview.encode_frames([still], want=1)
+    return result
 
 
 def _gpu_metrics() -> dict:

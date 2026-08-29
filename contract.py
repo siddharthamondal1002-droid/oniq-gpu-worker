@@ -73,6 +73,23 @@ RUNTIME_CEILING_SECONDS = 900
 # large ones are dispatched against a MEASURED rate instead of this guess.
 PROBE_RUNTIME_CEILING_SECONDS = 1800
 
+# THE PREVIEW BUDGET. See preview.py for why a preview exists at all.
+#
+# These numbers are a response-size decision, not a quality one. The reply
+# travels through the provider's job-status payload, and a preview that
+# outgrew it would take every measurement down with it — so the cap is
+# enforced before a frame is added, never after.
+#
+# Five frames at a 640px long edge is enough to judge the things an
+# inspection turns on: whether there is one subject, whether the face and
+# body hold across the clip, and whether the last frame still resembles the
+# first. It is deliberately not enough to be a delivery channel; R2 remains
+# the only place the artifact lives.
+PREVIEW_MAX_FRAMES = 5
+PREVIEW_LONG_EDGE = 640
+PREVIEW_JPEG_QUALITY = 82
+PREVIEW_MAX_BYTES = 900_000
+
 # Video generation: everything below is a SERVER decision. The caller's
 # only degree of freedom is the motion prompt; resolution, frame count,
 # fps and the model are constants here and in videogen.py, so no job can
@@ -135,7 +152,16 @@ _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
 # it is a KEY into the worker's own benchmark table, never a repository, path
 # or revision: a caller may say which row of an authorised benchmark to run,
 # never what to download or how to run it.
-_PROBE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"model"}
+_PROBE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"model", "preview"}
+# `preview` is legal on the two ops an INSPECTION reads, and nowhere else.
+#
+# It changes nothing about what is generated or what it costs: the artifact
+# is produced and uploaded identically either way, and the flag only decides
+# whether the reply also carries a thumbnail of it (see preview.py). It is
+# admitted per-op for the same reason `model` is — a shared field set would
+# put it on every production op at once — and production callers never send
+# it, so their replies stay byte-for-byte what they were.
+_PREVIEWABLE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"preview"}
 _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # watermark is a SERVER-derived entitlement relayed by the application —
 # absent means TRUE (marked), the fail-safe: an old or malformed caller
@@ -221,6 +247,7 @@ OUTPUT_WHITELIST = frozenset(
         "disk_free_bytes",
         "disk_total_bytes",
         "download_bytes",
+        "preview_frames",
         "steps",
         "guidance",
         "sampling_source",
@@ -271,11 +298,12 @@ def validate_job(raw) -> dict:
     if not isinstance(raw, dict):
         raise ContractError("invalid-input", "job input must be an object")
 
-    allowed = (
-        _PROBE_TOP_LEVEL_FIELDS
-        if raw.get("op") == "model_probe"
-        else _TOP_LEVEL_FIELDS
-    )
+    if raw.get("op") == "model_probe":
+        allowed = _PROBE_TOP_LEVEL_FIELDS
+    elif raw.get("op") == "image_generate":
+        allowed = _PREVIEWABLE_TOP_LEVEL_FIELDS
+    else:
+        allowed = _TOP_LEVEL_FIELDS
     unknown = set(raw) - allowed
     if unknown:
         raise ContractError(

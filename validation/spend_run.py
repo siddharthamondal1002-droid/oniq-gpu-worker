@@ -26,6 +26,7 @@ Discipline carried over from the ledger and the superloop, encoded:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import statistics
@@ -78,6 +79,13 @@ def redact(obj):
             upper = str(key).upper()
             if any(marker in upper for marker in _REDACT_MARKERS):
                 out[key] = "<redacted>"
+            elif key == "b64":
+                # NOT a secret — a thumbnail of a picture this run made. It
+                # is elided because the status payload is dumped twice and
+                # nearly a megabyte of base64 through it would bury every
+                # measurement beside it. save_previews prints the same bytes
+                # once, between markers, which is where they are read from.
+                out[key] = f"<{len(str(value))} base64 chars, printed once below>"
             else:
                 out[key] = redact(value)
         return out
@@ -1012,6 +1020,57 @@ def actual_cost_usd(execution_ms, price_per_hour: Decimal) -> Decimal:
     return exact.quantize(Decimal("0.01"), rounding=ROUND_UP)
 
 
+PREVIEW_DIR = "frames"
+
+
+def save_previews(output, output_key: str, out_dir: str = PREVIEW_DIR) -> list:
+    """Write the thumbnails the worker sent back, and print them for reading.
+
+    They land in the SAME directory frame_pull writes to, so the workflow's
+    existing inline-and-upload steps carry them without knowing where they
+    came from — a preview and a pulled frame are both just a JPEG of
+    something the GPU made.
+
+    The base64 also goes to stdout between markers, because the artifact zip
+    lives on a blob store some review environments cannot reach while the log
+    is always readable. That is the whole point of the mechanism: the bucket
+    is private, so this is the only path by which anyone sees the pixels.
+
+    Never fatal. A run that generated a clip and failed to save its thumbnail
+    has still generated the clip, and the measurements are the deliverable.
+    """
+    frames = (output or {}).get("preview_frames") or []
+    if not isinstance(frames, list) or not frames:
+        return []
+    stem = os.path.basename(output_key).rsplit(".", 1)[0]
+    written = []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"preview: cannot write {out_dir} ({type(exc).__name__})")
+        return []
+    for entry in frames:
+        if not isinstance(entry, dict) or not entry.get("b64"):
+            continue
+        name = f"{stem}.preview-{int(entry.get('i', len(written))):04d}.jpg"
+        path = os.path.join(out_dir, name)
+        try:
+            data = base64.b64decode(entry["b64"], validate=True)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except Exception as exc:  # noqa: BLE001
+            print(f"preview: {name} could not be decoded ({type(exc).__name__})")
+            continue
+        written.append(path)
+        print(f"=== PREVIEW b64 {name} {len(data)} ===")
+        text = entry["b64"]
+        for start in range(0, len(text), 3800):
+            print(text[start : start + 3800])
+        print(f"=== END {name} ===")
+    print(f"preview: {len(written)} frame(s) returned by the worker for {stem}")
+    return written
+
+
 def one_job(
     client,
     facts: dict,
@@ -1021,6 +1080,7 @@ def one_job(
     prompt: str | None = None,
     input_key: str | None = None,
     model: str | None = None,
+    preview: bool = False,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
@@ -1044,6 +1104,13 @@ def one_job(
         # Only model_probe carries this, and the worker's contract admits it
         # on no other op — a benchmark ROW id, never a repository or a path.
         payload["model"] = model
+    if preview:
+        # The BENCHMARK asks; production never does. The bucket is private by
+        # owner directive, this harness holds no storage credential, and a
+        # reference nobody can look at cannot be approved — so the worker
+        # hands a thumbnail back beside the numbers. It changes nothing about
+        # what is generated, uploaded, or billed.
+        payload["preview"] = True
     watch_s = None
     policy = None
     if op == "model_probe":
@@ -1166,7 +1233,14 @@ def one_job(
                 "peak_reserved_bytes": out.get("peak_reserved_bytes"),
                 "disk_total_bytes": out.get("disk_total_bytes"),
                 "disk_free_bytes": out.get("disk_free_bytes"),
+                "download_bytes": out.get("download_bytes"),
                 "output_bytes": out.get("output_bytes"),
+                # WHICH sampling this row actually ran at, and where that
+                # came from. Candidates compared at different step counts is
+                # a legitimate benchmark only if every row says so.
+                "steps": out.get("steps"),
+                "guidance": out.get("guidance"),
+                "sampling_source": out.get("sampling_source"),
                 # The rate is this run's LIVE quote; the product of it and a
                 # measured runtime is an estimate and says so.
                 "cost_basis": "ESTIMATED FROM MEASURED RUNTIME",
@@ -1188,6 +1262,7 @@ def one_job(
                 "output_bytes": out.get("output_bytes"),
             }
         )
+    save_previews(status.get("output"), output_key)
     _show("job row", row)
     if termination["status"] != TERMINATION_CONFIRMED:
         raise SpendStop(
@@ -1581,6 +1656,11 @@ def main(argv) -> int:
                     output_key=f"{facts['output_prefix']}/{key}",
                     op=op,
                     prompt=prompt_text,
+                    # The plate is drawn to be LOOKED at — it is a
+                    # conditioning reference, and an unusable one poisons
+                    # every clip built on it. The bucket is private, so the
+                    # worker returns a thumbnail of what it drew.
+                    preview=True,
                 )
             ]
             print(f"PHASE 13-16 PASS — {label} drawn, verified and terminated")
@@ -1630,6 +1710,7 @@ def main(argv) -> int:
                     prompt=PROBE_ACTION_PROMPT,
                     input_key=reference,
                     model=candidate,
+                    preview=True,
                 )
             ]
             print(f"PHASE 13-16 PASS — {row['label']} probed and terminated")

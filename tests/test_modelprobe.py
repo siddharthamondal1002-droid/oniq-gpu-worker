@@ -476,7 +476,7 @@ def test_the_download_is_timed_apart_from_the_model_load_on_a_real_run(rig):
     assert report["download_bytes"] == 7 * 1024**3
 
 
-def test_the_loader_is_handed_the_directory_the_fetch_returned():
+def test_the_loader_is_handed_the_directory_the_fetch_returned(rig):
     """The two phases are separate but not independent: the pipeline must be
     built from the snapshot that was just measured, never re-resolved."""
     seen = {}
@@ -485,18 +485,9 @@ def test_the_loader_is_handed_the_directory_the_fetch_returned():
         seen["local"] = local
         return fake_pipe()
 
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        ref = os.path.join(tmp, "ref.png")
-        open(ref, "wb").write(b"\x89PNG\r\n\x1a\n")
-        out = os.path.join(tmp, "out.mp4")
-        modelprobe._load_reference = lambda p: "IMAGE"
-        modelprobe._encode = lambda f, p, fps: open(p, "wb").write(b"\x00" * 32)
-        modelprobe.free_disk_bytes = lambda p="/tmp": 500 * 1024**3
-        modelprobe.dir_bytes = lambda p: 1
-        modelprobe.run(probe_job(), ref, out,
-                       fetch=lambda: "/snapshot/here",
-                       load_pipeline=loader, torch=FakeTorch())
+    modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                   fetch=lambda: "/snapshot/here",
+                   load_pipeline=loader, torch=FakeTorch())
     assert seen["local"] == "/snapshot/here"
 
 
