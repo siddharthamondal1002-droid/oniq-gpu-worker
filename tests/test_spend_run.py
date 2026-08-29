@@ -1806,7 +1806,7 @@ def test_the_probe_watch_outlasts_the_window_it_authorised():
     import inspect
 
     src = inspect.getsource(spend_run.one_job)
-    assert "watch_s = contract_probe_ceiling_ms() // 1000 + 900" in src
+    assert "watch_s = 2 * (contract_probe_ceiling_ms() // 1000)" in src
 
 
 # ------------------- a named probe failure is a result, not a broken run
@@ -1921,3 +1921,18 @@ def test_production_admission_is_untouched_by_the_probe_parameter():
         runtime_seconds=admission.RUNTIME_CEILING_SECONDS, price_per_hour=0.27,
     )
     assert default.runtime_seconds == admission.RUNTIME_CEILING_SECONDS == 900
+
+
+def test_the_probe_watch_covers_the_cold_pull_as_well_as_the_window():
+    """watch_s is WALL CLOCK: queue and cold boot, not just execution. The
+    first job after a new image was attached measured delayTime 1,059,077 ms
+    — 17.6 minutes pulling ~40 GiB. With only 900s of slack, a probe that
+    legitimately used its full window would have been cancelled after the
+    rental was spent, and the cancellation would have looked like a model
+    failure."""
+    import contract
+
+    measured_cold_pull_s = 1_059_077 / 1000
+    ceiling_s = contract.PROBE_RUNTIME_CEILING_SECONDS
+    watch_s = 2 * ceiling_s
+    assert watch_s - ceiling_s > measured_cold_pull_s

@@ -1153,7 +1153,19 @@ def one_job(
         # contract sets — the same window the worker's own deadline uses, so
         # the two agree instead of one killing the other mid-measurement.
         policy = {"executionTimeout": contract_probe_ceiling_ms()}
-        watch_s = contract_probe_ceiling_ms() // 1000 + 900
+        # THE WATCH MUST OUTLAST THE WINDOW IT AUTHORISED, PLUS THE PULL.
+        #
+        # watch_s is wall clock and covers queue + cold boot as well as
+        # execution. The first job after a new image was attached measured a
+        # delayTime of 1,059,077 ms — 17.6 minutes, pulling ~40 GiB onto the
+        # worker before execution began. Against the old +900s allowance a
+        # probe that legitimately used its full 1800s window would have been
+        # CANCELLED at 45 minutes, after the rental was already spent, and
+        # the cancellation would have looked like a model failure.
+        #
+        # A full probe ceiling of slack instead: 30 minutes of delay against
+        # a measured 17.6, so a slower pull still lands inside it.
+        watch_s = 2 * (contract_probe_ceiling_ms() // 1000)
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
         # worker, so the harness must not send one either.
