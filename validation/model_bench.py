@@ -56,7 +56,17 @@ HEAD_DIM_KEYS = ("attention_head_dim", "head_dim", "attention_head_size")
 LAYER_KEYS = ("num_layers", "num_hidden_layers", "depth", "num_blocks")
 VAE_SPATIAL_KEYS = ("spatial_compression_ratio", "scaling_factor_spatial")
 VAE_TEMPORAL_KEYS = ("temporal_compression_ratio", "scaling_factor_temporal")
-VAE_CHANNEL_KEYS = ("base_channels", "block_out_channels", "z_dim", "base_dim")
+# The width of the decoder's FULL-RESOLUTION feature map. Not the widest map
+# in the network: decoders run narrow at full size and wide at low size, and
+# because channels roughly double each time the area quarters, the full-size
+# map is the one that dominates memory. The first matrix took the maximum and
+# projected 750 GiB of decode for a model that runs on one 24 GB card.
+VAE_WIDTH_KEYS = ("block_out_channels", "base_channels", "dim", "base_dim")
+# How many spatial halvings the decoder performs, where no ratio is published.
+VAE_STAGE_KEYS = ("block_out_channels", "dim_mult", "down_block_types")
+# Which of those halvings are also temporal. Wan spells it `temperal_downsample`
+# — the typo is in the published config, so it is matched as published.
+VAE_TEMPORAL_STAGE_KEYS = ("temperal_downsample", "temporal_downsample")
 
 
 def _first(cfg: dict, keys) -> tuple[object, str | None]:
@@ -122,14 +132,38 @@ def arch_from_configs(transformer: dict, vae: dict) -> tuple[Arch | None, list[s
     notes.append(f"patch={patch_spatial}s/{patch_temporal}t")
 
     vae_spatial = _as_int(_first(vae, VAE_SPATIAL_KEYS)[0])
-    vae_temporal = _as_int(_first(vae, VAE_TEMPORAL_KEYS)[0])
-    vae_channels = _as_int(_first(vae, VAE_CHANNEL_KEYS)[0])
-    if vae_spatial:
+    if not vae_spatial:
+        # Derived: one halving per decoder stage after the first. Every VAE
+        # here publishes its stage list even when it publishes no ratio.
+        stages, sk = _first(vae, VAE_STAGE_KEYS)
+        if isinstance(stages, (list, tuple)) and len(stages) > 1:
+            vae_spatial = 2 ** (len(stages) - 1)
+            notes.append(f"vae_spatial={vae_spatial} derived from {sk!r} "
+                         f"({len(stages)} stages)")
+    elif vae_spatial:
         notes.append(f"vae_spatial={vae_spatial}")
-    if vae_temporal:
+
+    vae_temporal = _as_int(_first(vae, VAE_TEMPORAL_KEYS)[0])
+    if not vae_temporal:
+        flags, fk = _first(vae, VAE_TEMPORAL_STAGE_KEYS)
+        if isinstance(flags, (list, tuple)):
+            vae_temporal = 2 ** sum(1 for f in flags if f)
+            notes.append(f"vae_temporal={vae_temporal} derived from {fk!r}")
+    elif vae_temporal:
         notes.append(f"vae_temporal={vae_temporal}")
+
+    width, wk = _first(vae, VAE_WIDTH_KEYS)
+    vae_channels = None
+    if isinstance(width, (list, tuple)) and width:
+        ints = [v for v in width if isinstance(v, int) and not isinstance(v, bool)]
+        # The FIRST entry is the full-resolution width in diffusers' encoder
+        # ordering, and the decoder mirrors it — so this is the map that sets
+        # the decode high-water mark.
+        vae_channels = ints[0] if ints else None
+    else:
+        vae_channels = _as_int(width)
     if vae_channels:
-        notes.append(f"vae_channels={vae_channels}")
+        notes.append(f"vae_fullres_channels={vae_channels} from {wk!r}")
 
     missing = [
         name
@@ -169,17 +203,72 @@ def pick_config_paths(paths: list[str]) -> tuple[str | None, str | None]:
     return transformer, vae
 
 
+def effective_roles(row: mr.Row) -> tuple[dict, list[str]]:
+    """Which bytes this candidate would ACTUALLY load, and why.
+
+    A repository total is not a configuration. Three corrections happen here,
+    each of them one the first measured matrix got wrong:
+
+      - a named VARIANT is chosen out of a role that ships several complete
+        checkpoints (HunyuanVideo-1.5 keeps eleven under transformer/);
+      - a named FILE replaces the component directory, where the variant is a
+        root-level checkpoint rather than a folder (LTX's 13B dev and fp8);
+      - anything left ambiguous is reported as ambiguous, never summed.
+    """
+    m = row.measurement
+    cand = row.candidate
+    roles = dict(m.get("roles") or {})
+    notes: list[str] = []
+
+    for role, options in sorted((m.get("role_variants") or {}).items()):
+        if cand.variant and cand.variant in options:
+            roles[role] = options[cand.variant]
+            notes.append(
+                f"{role}={cand.variant} ({vram.gib(options[cand.variant])}GiB) "
+                f"chosen from {len(options)} complete checkpoints"
+            )
+        else:
+            notes.append(
+                f"AMBIGUOUS: {role} ships {len(options)} checkpoints "
+                f"({', '.join(sorted(options)[:4])}...) and none is named"
+            )
+            return {}, notes
+
+    if cand.checkpoint_file:
+        match = next(
+            (f for f in m.get("single_files") or []
+             if f["name"] == cand.checkpoint_file), None
+        )
+        if not match:
+            notes.append(f"MISSING: {cand.checkpoint_file} is not in this repo")
+            return {}, notes
+        roles["transformer"] = match["bytes"]
+        notes.append(
+            f"transformer={cand.checkpoint_file} ({vram.gib(match['bytes'])}GiB), "
+            f"a root-level file; text encoder and VAE from the same repo"
+        )
+
+    if m.get("nested_bytes"):
+        notes.append(
+            f"excluded {vram.gib(m['nested_bytes'])}GiB of nested pipeline "
+            f"copies (a component directory containing another component)"
+        )
+    return roles, notes
+
+
 def project(row: mr.Row) -> list[dict]:
     """Every configuration for one measured model. Empty when unmeasurable."""
     arch = row.configs.get("arch")
-    roles = row.measurement.get("roles") or {}
+    roles = row.configs.get("effective_roles") or {}
     if not arch or not roles:
         return []
+    shipped = row.configs.get("dtypes") or {}
     width, height = row.candidate.target_shape or mr.ONIQ_SHAPE
     shape = Shape(width=width, height=height, frames=ONIQ_FRAMES)
     out = []
     for label, config in CONFIGS:
-        plan = vram.plan(roles=roles, arch=arch, shape=shape, config=config)
+        plan = vram.plan(roles=roles, arch=arch, shape=shape, config=config,
+                         shipped=shipped)
         plan["label"] = label
         plan["shape"] = f"{width}x{height}x{ONIQ_FRAMES}"
         plan["fits_a5000"] = vram.fits(plan["peak_bytes"], 24)
@@ -194,39 +283,64 @@ def gather(token, get=mr._get) -> list[mr.Row]:
     rows: list[mr.Row] = []
 
     for candidate in mr.CANDIDATES:
-        if candidate.author not in listings:
-            try:
-                listings[candidate.author] = mr.repo_ids(
-                    mr.catalogue(candidate.author, token, get)
-                )
-            except Exception as exc:  # noqa: BLE001
-                print(f"  ! {candidate.author} listing failed: {mr._why(exc)}")
-                listings[candidate.author] = []
+        ids: list[str] = []
+        for author in candidate.authors:
+            if author not in listings:
+                try:
+                    listings[author] = mr.repo_ids(mr.catalogue(author, token, get))
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  ! {author} listing failed: {mr._why(exc)}")
+                    listings[author] = []
+            ids.extend(listings[author])
 
-        ids = listings[candidate.author]
         matches = mr.resolve(candidate, ids)
         row = mr.Row(candidate=candidate, alternates=matches)
         row.repo = mr.preferred(candidate, matches)
-        if row.repo:
-            row.measurement = mr.measure(row.repo, token, get)
-            paths = row.measurement.get("config_paths") or []
-            tpath, vpath = pick_config_paths(paths)
-            tcfg, vcfg = {}, {}
-            for path, sink in ((tpath, "t"), (vpath, "v")):
-                if not path:
-                    continue
-                try:
-                    cfg = mr.fetch_config(
-                        row.repo, row.measurement.get("revision"), path, token, get
-                    )
-                    if sink == "t":
-                        tcfg = cfg
-                    else:
-                        vcfg = cfg
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  ! {row.repo}:{path} unreadable ({mr._why(exc)})")
-            arch, notes = arch_from_configs(tcfg, vcfg)
-            row.configs = {"arch": arch, "notes": notes}
+        if not row.repo:
+            rows.append(row)
+            continue
+
+        row.measurement = mr.measure(row.repo, token, get)
+        roles, role_notes = effective_roles(row)
+        revision = row.measurement.get("revision")
+
+        # PER-COMPONENT torch_dtype. Not a repository-level fact: Wan2.2
+        # ships an fp32 transformer beside a bf16 text encoder, and assuming
+        # one dtype for the repository misreports both.
+        dtypes: dict[str, str] = {}
+        for role in roles:
+            try:
+                cfg = mr.fetch_config(
+                    row.repo, revision, f"{role}/config.json", token, get
+                )
+            except Exception:  # noqa: BLE001 — absent config is not an error
+                continue
+            named = str(cfg.get("torch_dtype") or "").lower()
+            if named:
+                dtypes[role] = mr.DTYPE_NAMES.get(named, "bf16")
+
+        tcfg, vcfg = {}, {}
+        paths = row.measurement.get("config_paths") or []
+        tpath, vpath = pick_config_paths(paths)
+        for path, sink in ((tpath, "t"), (vpath, "v")):
+            if not path:
+                continue
+            try:
+                cfg = mr.fetch_config(row.repo, revision, path, token, get)
+                if sink == "t":
+                    tcfg = cfg
+                else:
+                    vcfg = cfg
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! {row.repo}:{path} unreadable ({mr._why(exc)})")
+        arch, notes = arch_from_configs(tcfg, vcfg)
+        row.configs = {
+            "arch": arch,
+            "notes": notes,
+            "effective_roles": roles,
+            "role_notes": role_notes,
+            "dtypes": dtypes,
+        }
         rows.append(row)
     return rows
 
@@ -274,6 +388,16 @@ def _print_row(row: mr.Row) -> None:
         print(f"    file      {f['name']}  {vram.gib(f['bytes'])}GiB  "
               f"[{mr.variant_of(f['name'])}]")
 
+    for note in row.configs.get("role_notes") or []:
+        print(f"    resolved  {note}")
+    dtypes = row.configs.get("dtypes") or {}
+    if dtypes:
+        print(f"    shipped   " + ", ".join(f"{k}={v}" for k, v in sorted(dtypes.items()))
+              + "  (from each component's own torch_dtype)")
+    eff = row.configs.get("effective_roles") or {}
+    if eff:
+        parts = ", ".join(f"{k}={vram.gib(v)}GiB" for k, v in sorted(eff.items()))
+        print(f"    loads     {vram.gib(sum(eff.values()))}GiB as shipped  ({parts})")
     notes = row.configs.get("notes") or []
     print(f"    arch      {'; '.join(notes) if notes else 'no config read'}")
 

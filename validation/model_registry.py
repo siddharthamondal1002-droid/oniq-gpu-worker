@@ -59,6 +59,16 @@ ROLE_DIRS = (
 
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pth", ".pt")
 
+# torch_dtype as configs spell it, mapped to vram.py's vocabulary. Read rather
+# than assumed: Wan ships fp32 transformers, so treating every checkpoint as
+# bf16 overstates what a bf16 load actually costs by a factor of two.
+DTYPE_NAMES = {
+    "float32": "fp32", "torch.float32": "fp32", "float": "fp32",
+    "bfloat16": "bf16", "torch.bfloat16": "bf16",
+    "float16": "fp16", "torch.float16": "fp16", "half": "fp16",
+    "float8_e4m3fn": "fp8", "torch.float8_e4m3fn": "fp8",
+}
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -67,16 +77,29 @@ class Candidate:
     key: str  # this benchmark's row id
     decision: str  # the token the final recommendation must return
     label: str  # how the owner wrote it
-    author: str  # HF org to LIST — the search is by publisher, not by name
+    authors: tuple[str, ...]  # HF orgs to LIST — by publisher, never by name
     must: tuple[str, ...] = ()  # every fragment must appear in the repo id
     must_not: tuple[str, ...] = ()
     prefer_diffusers: bool = True
     target_shape: tuple[int, int] | None = None  # closest supported to 704x480
+    # Which sub-checkpoint, where a repository ships several complete ones.
+    # HunyuanVideo-1.5 keeps eleven under transformer/ — one per resolution
+    # and task — and ONIQ needs exactly the 480p I2V one. Summing them
+    # describes a machine nobody will ever build.
+    variant: str | None = None
+    # Which root-level file, where the variant is a FILE rather than a
+    # directory. LTX ships its 13B base, fp8 and distilled weights this way,
+    # so three of the owner's rows live inside one repository.
+    checkpoint_file: str | None = None
     note: str = ""
+
+    @property
+    def author(self) -> str:
+        return self.authors[0]
 
     def matches(self, repo_id: str) -> bool:
         low = repo_id.lower()
-        if not low.startswith(self.author.lower() + "/"):
+        if not any(low.startswith(a.lower() + "/") for a in self.authors):
             return False
         if any(frag.lower() not in low for frag in self.must):
             return False
@@ -94,48 +117,56 @@ CANDIDATES: tuple[Candidate, ...] = (
         key="ltx-2b",
         decision="LTX_2B",
         label="LTX-Video 2B",
-        author="Lightricks",
+        authors=("Lightricks",),
         must=("ltx-video",),
-        must_not=("13b", "gguf", "ic-lora", "control"),
+        must_not=("13b", "gguf", "ic-lora", "control", "lora"),
         target_shape=ONIQ_SHAPE,
-        note="the incumbent — every number here is the bar to beat",
+        note="the incumbent — every number here is the bar to beat, and the "
+        "one row with a REAL measured VRAM peak to check the maths against",
     ),
+    # THE THREE 13B ROWS SHARE ONE REPOSITORY AND DIFFER BY FILE. Lightricks
+    # publishes no `LTX-Video-13B` repo at all: the 13B dev and fp8 weights are
+    # root-level files inside Lightricks/LTX-Video (26.62 and 14.62 GiB), and
+    # only the distilled build has a repository of its own. Measured, not
+    # assumed — the first run collapsed all three onto one repo and reported
+    # the same numbers three times.
     Candidate(
         key="ltx-13b",
         decision="LTX_13B",
         label="LTX-Video 13B",
-        author="Lightricks",
-        must=("ltx-video", "13b"),
-        must_not=("gguf",),
+        authors=("Lightricks",),
+        must=("ltx-video",),
+        must_not=("13b", "gguf", "ic-lora", "control", "lora"),
+        checkpoint_file="ltxv-13b-0.9.8-dev.safetensors",
         target_shape=ONIQ_SHAPE,
-        note="bf16 13B; single-file checkpoints live at the repo root",
+        note="bf16 13B — a FILE in Lightricks/LTX-Video, not a repository",
     ),
     Candidate(
         key="ltx-13b-fp8",
         decision="LTX_13B",
         label="LTX-Video 13B FP8",
-        author="Lightricks",
-        must=("ltx-video", "13b"),
-        must_not=("gguf",),
+        authors=("Lightricks",),
+        must=("ltx-video",),
+        must_not=("13b", "gguf", "ic-lora", "control", "lora"),
+        checkpoint_file="ltxv-13b-0.9.8-dev-fp8.safetensors",
         target_shape=ONIQ_SHAPE,
-        note="same repo as 13B — fp8 is a FILE, not a repository; "
-        "resolved from the single-file listing",
+        note="the publisher's own fp8 build of the same weights",
     ),
     Candidate(
         key="ltx-13b-distilled",
         decision="LTX_13B",
         label="LTX-Video 13B distilled",
-        author="Lightricks",
-        must=("ltx-video", "13b"),
-        must_not=("gguf",),
+        authors=("Lightricks",),
+        must=("ltx-video", "13b", "distilled"),
+        must_not=("gguf", "ic-lora"),
         target_shape=ONIQ_SHAPE,
-        note="distilled = fewer steps; also a file-level variant",
+        note="fewer denoising steps — the one 13B build with its own repo",
     ),
     Candidate(
         key="wan21-i2v-14b-480p",
         decision="WAN2_1_I2V_14B",
         label="Wan2.1 I2V-14B-480P",
-        author="Wan-AI",
+        authors=("Wan-AI",),
         must=("wan2.1", "i2v", "14b", "480p"),
         target_shape=(832, 480),
         note="OWNER-PRIORITISED: 480P is the closest official shape to "
@@ -145,7 +176,7 @@ CANDIDATES: tuple[Candidate, ...] = (
         key="wan21-i2v-14b-720p",
         decision="WAN2_1_I2V_14B",
         label="Wan2.1 I2V-14B-720P",
-        author="Wan-AI",
+        authors=("Wan-AI",),
         must=("wan2.1", "i2v", "14b", "720p"),
         target_shape=(1280, 720),
         note="carried for completeness; a bigger canvas costs VRAM and "
@@ -155,7 +186,7 @@ CANDIDATES: tuple[Candidate, ...] = (
         key="wan22-i2v-a14b",
         decision="WAN2_2_I2V_A14B",
         label="Wan2.2 I2V-A14B",
-        author="Wan-AI",
+        authors=("Wan-AI",),
         must=("wan2.2", "i2v", "a14b"),
         target_shape=(832, 480),
         note="SEPARATE CANDIDATE from Wan2.1 — mixture-of-experts, expect "
@@ -165,23 +196,27 @@ CANDIDATES: tuple[Candidate, ...] = (
         key="hunyuanvideo-1.5-i2v",
         decision="HUNYUAN_VIDEO_1_5_I2V",
         label="HunyuanVideo-1.5 I2V",
-        author="tencent",
+        authors=("tencent",),
         must=("hunyuanvideo-1.5",),
+        variant="480p_i2v",
         target_shape=(832, 480),
-        note="evaluate the current open-weight implementation and its "
-        "documented offloading configuration",
+        note="ELEVEN complete checkpoints share transformer/, one per "
+        "resolution and task. ONIQ needs 480p_i2v and only that one.",
     ),
     Candidate(
         key="cogvideox-5b-i2v",
         decision="COGVIDEOX_I2V",
         label="CogVideoX-5B-I2V",
-        author="THUDM",
+        # THUDM published CogVideoX and later became zai-org. Both are listed
+        # because the first run found nothing under THUDM alone, and "the
+        # publisher renamed itself" is not the same finding as "the model does
+        # not exist" — the distinction hf_discover was written to protect.
+        authors=("THUDM", "zai-org"),
         must=("cogvideox", "5b", "i2v"),
         target_shape=(720, 480),
         note="lower-resource comparison candidate",
     ),
 )
-
 
 def _get(url: str, token, timeout: int = 60):
     request = urllib.request.Request(url)
@@ -263,28 +298,38 @@ def measure(repo: str, token, get=_get) -> dict:
     row["is_diffusers"] = "model_index.json" in sizes
 
     roles: dict[str, int] = {}
-    for role in ROLE_DIRS:
-        total = sum(
-            size
-            for path, size in sizes.items()
-            if path.startswith(role + "/") and path.endswith(WEIGHT_SUFFIXES)
-        )
-        if total:
-            roles[role] = total
+    variants: dict[str, dict[str, int]] = {}
+    role_files: dict[str, list] = {}
+    nested = 0
+    for path, size in sizes.items():
+        if not path.endswith(WEIGHT_SUFFIXES):
+            continue
+        parts = path.split("/")
+        if parts[0] not in ROLE_DIRS:
+            continue
+        if len(parts) == 2:
+            roles[parts[0]] = roles.get(parts[0], 0) + size
+            role_files.setdefault(parts[0], []).append((path, size))
+        elif len(parts) == 3 and parts[1] not in ROLE_DIRS:
+            # A named sub-checkpoint: transformer/480p_i2v/... Kept apart,
+            # never added to its siblings.
+            variants.setdefault(parts[0], {})
+            variants[parts[0]][parts[1]] = variants[parts[0]].get(parts[1], 0) + size
+        else:
+            # A NESTED PIPELINE. LTX-Video-0.9.8-13B-distilled ships a whole
+            # second copy of itself under vae/ — vae/transformer/...,
+            # vae/text_encoder/... A prefix match reads that as a 44 GiB VAE,
+            # which is how the first matrix came to project 750 GiB of decode
+            # for a model that runs on one card. Counted and excluded.
+            nested += size
     row["roles"] = roles
+    row["role_variants"] = variants
+    row["nested_bytes"] = nested
     # The raw per-file listing behind each role total. Printed so a wrong
     # sum is visible as a wrong sum rather than arriving as a confident GiB
     # figure nobody can check.
     row["role_files"] = {
-        role: sorted(
-            (
-                (path, size)
-                for path, size in sizes.items()
-                if path.startswith(role + "/") and path.endswith(WEIGHT_SUFFIXES)
-            ),
-            key=lambda f: -f[1],
-        )
-        for role in roles
+        role: sorted(files, key=lambda f: -f[1]) for role, files in role_files.items()
     }
 
     # Root-level checkpoints. This is where LTX keeps its fp8 and distilled
@@ -299,9 +344,7 @@ def measure(repo: str, token, get=_get) -> dict:
         ),
         key=lambda f: -f["bytes"],
     )
-    row["total_weight_bytes"] = sum(
-        size for path, size in sizes.items() if path.endswith(WEIGHT_SUFFIXES)
-    )
+    row["total_weight_bytes"] = sum(roles.values())
     row["config_paths"] = sorted(
         path for path in sizes if path.endswith("config.json")
     )

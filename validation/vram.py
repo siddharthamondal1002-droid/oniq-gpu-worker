@@ -147,17 +147,31 @@ def vae_decode_bytes(shape: Shape, arch: Arch, *, dtype: str = "bf16",
 
 
 def weight_bytes(roles: dict[str, int], *, precision: str,
-                 shipped: str = "bf16") -> dict[str, int]:
-    """MEASURED weights, rescaled if the run would use a different precision.
+                 shipped: str | dict[str, str] = "bf16") -> dict[str, int]:
+    """MEASURED weights, rescaled to the precision the run would actually use.
 
-    Only the transformer rescales. An fp8 LTX checkpoint is an fp8 DiT beside
-    an unchanged text encoder and VAE, and pretending otherwise would flatter
-    every quantised row in the matrix.
+    `shipped` is per-role, because IT VARIES WITHIN ONE REPOSITORY. Wan2.1
+    ships its transformer in fp32 and Wan2.2 ships the same-sized transformer
+    in fp32 beside a bf16 text encoder; treating a repository as having one
+    dtype double-counts some components and halves others. The registry reads
+    `torch_dtype` per component and hands the map in here.
+
+    Only the transformer rescales when the target is fp8: an fp8 checkpoint is
+    an fp8 DiT beside an unchanged text encoder and VAE, and pretending
+    otherwise would flatter every quantised row in the matrix. Everything
+    rescales between float widths, because loading a fp32 checkpoint in bf16
+    is the ordinary thing to do and halves it.
     """
-    ratio = DTYPE_BYTES[precision] / DTYPE_BYTES[shipped]
     out = {}
     for role, size in roles.items():
-        out[role] = int(size * ratio) if role.startswith("transformer") else size
+        role_shipped = shipped.get(role, "bf16") if isinstance(shipped, dict) else shipped
+        target = precision
+        if precision in ("fp8", "int8") and not role.startswith("transformer"):
+            # Quantised builds quantise the DiT only. The rest loads at the
+            # widest sensible compute dtype, not at the DiT's.
+            target = "bf16"
+        ratio = DTYPE_BYTES[target] / DTYPE_BYTES[role_shipped]
+        out[role] = int(size * ratio)
     return out
 
 
@@ -186,7 +200,7 @@ def resident_bytes(weights: dict[str, int], offload: str) -> tuple[int, str]:
 
 
 def plan(*, roles: dict[str, int], arch: Arch, shape: Shape,
-         config: Config, shipped: str = "bf16") -> dict:
+         config: Config, shipped: str | dict[str, str] = "bf16") -> dict:
     """Everything one configuration needs, measured and projected kept apart."""
     weights = weight_bytes(roles, precision=config.precision, shipped=shipped)
     resident, why = resident_bytes(weights, config.offload)
