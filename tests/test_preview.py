@@ -241,3 +241,13 @@ def test_the_benchmark_asks_for_a_preview_and_production_does_not():
     # The probe and the drawn reference both ask; nothing else does.
     assert src.count("preview=True") == 2
     assert 'payload["preview"] = True' in inspect.getsource(spend_run.one_job)
+
+
+def test_preview_is_a_flag_not_anything_truthy():
+    """Every other field in this contract is refused rather than guessed at."""
+    with pytest.raises(contract.ContractError) as exc:
+        contract.validate_job({
+            "op": "image_generate", "output_key": "out/x.png",
+            "preview": "yes", "params": {"prompt": "a woman"},
+        })
+    assert "preview must be true or false" in str(exc.value)

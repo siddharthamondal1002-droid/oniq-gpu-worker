@@ -318,6 +318,12 @@ def validate_job(raw) -> dict:
             "op must be one of: " + ", ".join(ALLOWED_OPS),
         )
 
+    # `preview` is a flag, and a flag that accepts anything truthy is not a
+    # flag. Typed here rather than coerced, because every other field in this
+    # contract is refused rather than guessed at.
+    if "preview" in raw and not isinstance(raw["preview"], bool):
+        raise ContractError("invalid-input", "preview must be true or false")
+
     # image_generate and story_generate are the TEXT-ONLY ops: it draws from a prompt, so
     # it has no source object. An input_key sent with it is refused rather
     # than ignored — a caller that thinks it is conditioning on an image
