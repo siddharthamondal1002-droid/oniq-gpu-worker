@@ -323,6 +323,7 @@ def validate_job(raw) -> dict:
     # contract is refused rather than guessed at.
     if "preview" in raw and not isinstance(raw["preview"], bool):
         raise ContractError("invalid-input", "preview must be true or false")
+    preview = bool(raw.get("preview"))
 
     # image_generate and story_generate are the TEXT-ONLY ops: it draws from a prompt, so
     # it has no source object. An input_key sent with it is refused rather
@@ -405,6 +406,7 @@ def validate_job(raw) -> dict:
             "op": op,
             "input_key": None,
             "output_key": output_key,
+            "preview": preview,
             "params": {"prompt": prompt.strip()},
         }
 
@@ -449,6 +451,13 @@ def validate_job(raw) -> dict:
             "model": model,
             "input_key": input_key,
             "output_key": output_key,
+            # CARRIED, not just admitted. Every return here builds an explicit
+            # dict, so a field that is validated above and left out below is
+            # accepted and then silently discarded — which is what happened to
+            # `preview` on 2026-08-29: the flag was checked, the job ran, and
+            # the worker never saw it, so the reference came back invisible
+            # and cost a dispatch to find out.
+            "preview": preview,
             "params": {"prompt": prompt.strip()},
         }
 

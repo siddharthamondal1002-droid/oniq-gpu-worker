@@ -251,3 +251,56 @@ def test_preview_is_a_flag_not_anything_truthy():
             "preview": "yes", "params": {"prompt": "a woman"},
         })
     assert "preview must be true or false" in str(exc.value)
+
+
+# --------------------- the field must SURVIVE validation, not just pass it
+
+
+def test_the_preview_flag_reaches_the_worker_not_just_the_validator():
+    """Every branch of validate_job builds an explicit dict, so a field that
+    is checked above and left out below is accepted and then silently
+    discarded. That is exactly what happened on 2026-08-29: the flag was
+    validated, the job ran, the worker never saw it, and the reference came
+    back invisible — one dispatch to find out."""
+    job = contract.validate_job({
+        "op": "image_generate", "output_key": "out/probe-reference.png",
+        "preview": True, "params": {"prompt": "one adult woman, plain background"},
+    })
+    assert job["preview"] is True
+    assert preview.wanted(job) is True
+
+
+def test_the_probe_job_carries_it_too():
+    job = contract.validate_job({
+        "op": "model_probe", "model": "cogvideox-i2v",
+        "input_key": "out/probe-reference.png", "output_key": "out/p.mp4",
+        "preview": True, "params": {"prompt": "she turns toward the camera"},
+    })
+    assert job["preview"] is True
+
+
+def test_a_job_that_did_not_ask_carries_false_not_a_missing_key():
+    """Production never sends the flag. The worker must read a definite
+    False rather than guessing from an absent key."""
+    job = contract.validate_job({
+        "op": "image_generate", "output_key": "out/x.png",
+        "params": {"prompt": "a still"},
+    })
+    assert job["preview"] is False
+    assert preview.wanted(job) is False
+
+
+def test_every_op_that_admits_the_flag_also_returns_it():
+    """Walked rather than spot-checked: the bug was one branch out of seven
+    that admitted the field and dropped it."""
+    admitting = []
+    for op, extra in (
+        ("image_generate", {"output_key": "o/x.png",
+                            "params": {"prompt": "p"}}),
+        ("model_probe", {"model": "cogvideox-i2v", "input_key": "i/r.png",
+                         "output_key": "o/x.mp4", "params": {"prompt": "p"}}),
+    ):
+        job = contract.validate_job({"op": op, "preview": True, **extra})
+        admitting.append(op)
+        assert job.get("preview") is True, op
+    assert admitting == ["image_generate", "model_probe"]
