@@ -133,9 +133,40 @@ jobs:
 
       - name: Imports and serverless entrypoint
         run: |
-          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler, videogen, audio, storygen; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); import diffusers, transformers, imageio, imageio_ffmpeg; from diffusers import LTXImageToVideoPipeline; import av; from piper import PiperVoice; print('imports ok, tensor->bytes ok, LTX pipeline importable, piper+av importable')"
+          docker run --rm oniq-gpu-worker:ci python3 -c "import contract, preprocess, storage, handler, videogen, audio, storygen; import runpod; assert hasattr(runpod.serverless, 'start'); import numpy, torch; t = torch.zeros(2, 3, dtype=torch.uint8); assert t.numpy().tobytes() == bytes(6); import diffusers, transformers, imageio, imageio_ffmpeg; from diffusers import LTXImageToVideoPipeline; import av; from piper import PiperVoice; import modelprobe; print('imports ok, tensor->bytes ok, LTX pipeline importable, piper+av importable, modelprobe importable')"
 
       # THE COEXISTENCE PROOF (owner directive 2026-08-27). Qwen3 needs
+      # EVERY PIPELINE THE BENCHMARK NEEDS, importable on the shipped pins.
+      # Not a formality: diffusers 0.33.1 carried WanImageToVideoPipeline but
+      # no `transformer_2`, so Wan2.2 would have imported cleanly and then
+      # failed on a rented GPU with the checkpoint already downloaded. The
+      # class existing is not the same as the class being able to load the
+      # model, so the two-expert attribute is asserted too.
+      - name: every benchmark pipeline is importable and Wan2.2-capable
+        run: |
+          docker run --rm oniq-gpu-worker:ci python3 - <<'PY'
+          import inspect
+
+          import diffusers
+          from diffusers import (
+              CogVideoXImageToVideoPipeline,
+              LTXImageToVideoPipeline,
+              WanImageToVideoPipeline,
+          )
+
+          print("diffusers", diffusers.__version__)
+          params = inspect.signature(WanImageToVideoPipeline.__init__).parameters
+          assert "transformer_2" in params, (
+              "this diffusers cannot drive Wan2.2's two-expert mixture: "
+              f"WanImageToVideoPipeline takes {sorted(params)}"
+          )
+          # The 13B LTX checkpoint is a single root-level file, which needs
+          # the single-file loader rather than a component directory.
+          assert hasattr(LTXImageToVideoPipeline, "from_single_file")
+          import regex, ftfy, huggingface_hub  # noqa: F401
+          print("wan/ltx/cogvideox importable; Wan2.2 two-expert supported")
+          PY
+
       # transformers >= 4.51 and LTX runs on diffusers 0.33.1 / torch
       # 2.5.1; the bump had to be PROVEN against those pins rather than
       # assumed. This step fails the build if the story model's config

@@ -152,6 +152,12 @@ def test_the_create_sends_the_digest_and_a_disk_but_never_env():
     assert image == GOOD
     assert name == ta.TEMPLATE_NAME
     assert disk == ta.CONTAINER_DISK_GB
+    # The benchmark's largest candidate is 117.52 GiB of weights and the
+    # baked image already holds ~40-52 GiB. A disk that cannot hold both
+    # cannot evaluate the model at all — which is what 80 GB meant.
+    assert ta.CONTAINER_DISK_GB >= 160, (
+        "too small to fetch Wan2.2 (117.52 GiB) beside the baked image"
+    )
 
 
 def test_create_template_has_no_parameter_that_could_carry_a_credential():

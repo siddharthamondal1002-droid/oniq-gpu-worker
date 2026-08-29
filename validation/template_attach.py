@@ -51,7 +51,21 @@ TEMPLATE_NAME = "oniq-gpu-worker"
 # The image carries an LTX pipeline, an 8B checkpoint and torch+CUDA. The
 # container disk has to hold the whole image with room to write outputs;
 # too small a disk fails the pull on the rented card, at cost.
-CONTAINER_DISK_GB = 80
+#
+# RAISED 80 -> 200 on 2026-08-29, and the reason is arithmetic rather than
+# comfort. The model benchmark downloads a candidate checkpoint at job time,
+# and the published footprints are 83.89 GiB (Wan2.1 I2V-14B) and 117.52 GiB
+# (Wan2.2 I2V-A14B) — both larger than the ENTIRE 80 GB disk before the
+# baked image is counted, so neither could be fetched at all. Converting to
+# bf16 on the way in does not rescue Wan2.2 either: it is still ~64 GiB.
+#
+# 200 leaves room for the image (~40-52 GiB measured/estimated) plus the
+# largest candidate plus the transient a snapshot download holds while
+# writing. The nominal number is NOT trusted: modelprobe reads free space
+# from the running worker and refuses before the first byte moves, because
+# running out of disk 60 GiB into a 118 GiB fetch burns the whole watchdog
+# window and produces no evidence about the model at all.
+CONTAINER_DISK_GB = 200
 
 
 class Refused(Exception):

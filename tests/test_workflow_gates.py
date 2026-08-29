@@ -300,7 +300,10 @@ def test_requirements_are_the_recorded_pins():
         "pillow==11.0.0",
         "boto3==1.35.76",
         "numpy==2.1.3",
-        "diffusers==0.33.1",
+        # 0.35.2 since 2026-08-29: the first minor whose Wan i2v pipeline
+        # carries transformer_2/boundary_ratio, without which Wan2.2's
+        # two-expert mixture cannot be driven at all.
+        "diffusers==0.35.2",
         # Bumped 2026-08-27 for Qwen3, which raises KeyError: 'qwen3'
         # below 4.51. Proven against the diffusers/torch pins LTX runs on
         # by the image job's coexistence step before anything was baked.
@@ -317,6 +320,14 @@ def test_requirements_are_the_recorded_pins():
         "av==13.1.0",
         # 4-bit loading for the story model, which runs ALONE by design.
         "bitsandbytes==0.45.0",
+        # Model-benchmark runtime deps (2026-08-29). Named rather than left
+        # transitive: a pin that arrives only through somebody else's
+        # dependency tree is one a resolver can take away, and Wan's i2v
+        # pipeline imports regex at module top — a hard import, not an
+        # optional one.
+        "huggingface_hub==0.34.6",
+        "regex==2026.7.19",
+        "ftfy==6.3.1",
     ]
 
 
