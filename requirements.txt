@@ -21,12 +21,32 @@ numpy==2.1.3
 # The LTX PRODUCTION path moves with this bump, so it is not taken on
 # faith: worker-ci imports every pipeline, and a real LTX 2B generation on
 # the new image is run as a production canary before any benchmark job.
-diffusers==0.35.2
+#
+# BUMPED 0.35.2 -> 0.38.0 on 2026-08-29 for the HunyuanVideo-1.5 probe, and
+# again the reason is a named class: HunyuanVideo15ImageToVideoPipeline
+# first ships in 0.36.0, and 0.35.2 has zero HunyuanVideo15 references.
+# 0.38.0 rather than newer or older, MEASURED against each tag's setup.py:
+# 0.39.0 and 0.40.0 raise the torch floor to >=2.6 (this image bakes
+# 2.5.1+cu121, and a torch/CUDA bump for a benchmark is production churn
+# nobody ordered), and 0.40.0 additionally demands huggingface-hub>=1.23.
+# 0.38.0 keeps torch>=1.4 and hub>=0.34,<2.0 — every pin below stands —
+# while carrying five months of fixes to the hunyuan_video1_5 pipeline
+# that 0.36.0 lacks. Verified AT THE TAG: the v0.38.0 i2v pipeline has the
+# use_meanflow/timestep_r branch the step-distilled checkpoint needs.
+diffusers==0.38.0
 # transformers >= 4.51 is REQUIRED by Qwen3: below it the config raises
-# KeyError: 'qwen3' and the story model cannot load at all. The bump is
-# proven against diffusers 0.33.1 / torch 2.5.1 by worker-ci's import
-# test before anything is baked — LTX runs on those pins.
-transformers==4.51.3
+# KeyError: 'qwen3' and the story model cannot load at all.
+#
+# BUMPED 4.51.3 -> 4.57.1 on 2026-08-29: the HunyuanVideo-1.5 pipeline
+# imports Qwen2_5_VLTextModel, which does not exist below 4.52.0 (checked
+# in the published sources: absent at 4.49.0 and 4.51.0, present and
+# exported at 4.52.0). 4.57.1 is the exact version Tencent's own
+# HunyuanVideo-1.5 repository pins, and its floors (torch>=2.2,
+# hub>=0.34,<1.0, accelerate>=0.26) all hold against this image. The
+# Qwen3 STORY path moves with this bump, so it is not taken on faith:
+# worker-ci import-proves the story stack and a production canary runs
+# on the new image before any benchmark job.
+transformers==4.57.1
 accelerate==1.2.1
 sentencepiece==0.2.0
 protobuf==5.29.3
@@ -51,8 +71,8 @@ bitsandbytes==0.45.0
 # dependency that arrives only as somebody else's transitive pin is one
 # that can vanish under a resolver.
 #
-# huggingface_hub: diffusers 0.35.2 requires >=0.34.0, and modelprobe calls
-#   snapshot_download directly. transformers 4.51.3 accepts <1.0.
+# huggingface_hub: diffusers 0.38.0 requires >=0.34.0,<2.0, and modelprobe
+#   calls snapshot_download directly. transformers 4.57.1 accepts >=0.34,<1.0.
 # regex: `import regex as re` at the top of Wan's i2v pipeline — a hard
 #   import, not an optional one. Without it Wan cannot be constructed.
 # ftfy: Wan's text path checks is_ftfy_available() and cleans prompts with

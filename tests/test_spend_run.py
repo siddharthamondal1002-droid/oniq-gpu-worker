@@ -2008,6 +2008,30 @@ def test_every_dispatched_payload_passes_the_workers_own_contract():
         assert validated["op"] == op
 
 
+def test_an_unpinned_probe_row_is_refused_before_dispatch():
+    """The interim PENDING-REGISTRY-PIN state must cost a refusal at $0, not
+    a dispatched job the worker then refuses on a rented card. The hunyuan
+    rows wear the marker until the model-bench read pins them; this is the
+    fence that makes wearing it safe. (Parametric on the row's actual state:
+    once pinned, the row dispatches like any other and the contract test
+    above covers it.)"""
+    import modelprobe
+
+    row = modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"]
+    if len(row["revision"]) == 40:
+        payload = _dispatched_payload(
+            "model_probe", output_key="out/p.mp4", input_key="out/ref.png",
+            model="hunyuanvideo-1.5-i2v", preview=True,
+        )
+        assert payload["model"] == "hunyuanvideo-1.5-i2v"
+    else:
+        with pytest.raises(SystemExit, match="not a pinned commit sha"):
+            _dispatched_payload(
+                "model_probe", output_key="out/p.mp4", input_key="out/ref.png",
+                model="hunyuanvideo-1.5-i2v", preview=True,
+            )
+
+
 def test_the_probe_payload_carries_the_common_action_prompt():
     payload = _dispatched_payload(
         "model_probe", output_key="out/p.mp4", input_key="out/ref.png",

@@ -150,6 +150,7 @@ jobs:
           import diffusers
           from diffusers import (
               CogVideoXImageToVideoPipeline,
+              HunyuanVideo15ImageToVideoPipeline,
               LTXImageToVideoPipeline,
               WanImageToVideoPipeline,
           )
@@ -163,8 +164,22 @@ jobs:
           # The 13B LTX checkpoint is a single root-level file, which needs
           # the single-file loader rather than a component directory.
           assert hasattr(LTXImageToVideoPipeline, "from_single_file")
+          # HunyuanVideo-1.5 (2026-08-29): the pipeline exists at 0.36.0 but
+          # the class existing is again not the class being able to run the
+          # STEP-DISTILLED checkpoint — that needs the meanflow branch, and
+          # the transformers side needs Qwen2_5_VLTextModel (absent below
+          # 4.52.0, which is exactly why 4.51.3 was bumped). Both asserted
+          # here so a pin regression fails a free build, not a rented GPU.
+          call_params = inspect.signature(
+              HunyuanVideo15ImageToVideoPipeline.__call__).parameters
+          assert "width" not in call_params and "height" not in call_params, (
+              "hunyuan i2v grew canvas kwargs; modelprobe's no-canvas row "
+              f"assumption no longer holds: {sorted(call_params)}"
+          )
+          from transformers import Qwen2_5_VLTextModel  # noqa: F401
           import regex, ftfy, huggingface_hub  # noqa: F401
-          print("wan/ltx/cogvideox importable; Wan2.2 two-expert supported")
+          print("wan/ltx/cogvideox/hunyuan15 importable; "
+                "Wan2.2 two-expert supported; Qwen2_5_VLTextModel present")
           PY
 
       # transformers >= 4.51 and LTX runs on diffusers 0.33.1 / torch

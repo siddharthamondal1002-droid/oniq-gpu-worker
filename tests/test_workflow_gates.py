@@ -306,14 +306,17 @@ def test_requirements_are_the_recorded_pins():
         "pillow==11.0.0",
         "boto3==1.35.76",
         "numpy==2.1.3",
-        # 0.35.2 since 2026-08-29: the first minor whose Wan i2v pipeline
-        # carries transformer_2/boundary_ratio, without which Wan2.2's
-        # two-expert mixture cannot be driven at all.
-        "diffusers==0.35.2",
-        # Bumped 2026-08-27 for Qwen3, which raises KeyError: 'qwen3'
-        # below 4.51. Proven against the diffusers/torch pins LTX runs on
-        # by the image job's coexistence step before anything was baked.
-        "transformers==4.51.3",
+        # 0.38.0 since 2026-08-29 (was 0.35.2 earlier the same day):
+        # HunyuanVideo15ImageToVideoPipeline first ships in 0.36.0, and
+        # 0.38.0 is the last release whose floors fit the baked torch
+        # 2.5.1+cu121 and huggingface_hub 0.34.6 — 0.39.0 raises the torch
+        # floor to >=2.6.
+        "diffusers==0.38.0",
+        # 4.57.1 since 2026-08-29 (was 4.51.3): the hunyuan pipeline
+        # imports Qwen2_5_VLTextModel, absent below 4.52.0; 4.57.1 is the
+        # version Tencent's own repository pins. Qwen3 still needs >=4.51,
+        # which this satisfies.
+        "transformers==4.57.1",
         "accelerate==1.2.1",
         "sentencepiece==0.2.0",
         "protobuf==5.29.3",

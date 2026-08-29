@@ -1147,6 +1147,22 @@ def one_job(
     watch_s = None
     policy = None
     if op == "model_probe":
+        # THE PIN IS CHECKED HERE FOR FREE, before RunPod hears anything. The
+        # worker's spec() refuses an unpinned revision too, but its refusal
+        # arrives on a rented card; this one costs nothing. A row still
+        # wearing PENDING-REGISTRY-PIN is waiting on the $0 registry read
+        # (mode model-bench) and must not be dispatched at all.
+        import re as _re
+
+        import modelprobe as _modelprobe
+
+        _row = _modelprobe.PROBE_MODELS.get(model or "")
+        if _row and not _re.match(r"^[0-9a-f]{40}$", _row.get("revision") or ""):
+            raise SystemExit(
+                f"REFUSED: probe row {model!r} revision "
+                f"{_row.get('revision')!r} is not a pinned commit sha — run "
+                "the $0 model-bench read and pin it before dispatching"
+            )
         # PER-JOB, probe only. The endpoint's own executionTimeoutMs is 600000
         # and stays there: raising it would change the spend bound of every
         # production job. This raises it for THIS job, to the probe ceiling the

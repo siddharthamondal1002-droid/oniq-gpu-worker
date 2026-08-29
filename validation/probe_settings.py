@@ -49,6 +49,90 @@ def card_url(repo: str, revision: str, path: str) -> str:
     return f"{HOST}/{repo}/raw/{revision}/{path}"
 
 
+_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def read_ref(row: dict) -> str:
+    """What ref to READ a row at. A pinned sha reads at the pin; a row still
+    wearing the interim PENDING-REGISTRY-PIN marker reads at main, because
+    resolving that marker into a sha is exactly what this reader is for."""
+    revision = row.get("revision") or ""
+    return revision if _SHA.match(revision) else "main"
+
+
+def api_url(repo: str, revision: str) -> str:
+    return f"{HOST}/api/models/{repo}/revision/{revision}?blobs=true"
+
+
+def fnmatch_any(patterns, path: str) -> bool:
+    import fnmatch
+
+    return any(fnmatch.fnmatch(path, p) for p in patterns)
+
+
+def listing_summary(text: str, allow) -> dict:
+    """sha + what the allow list would actually fetch, from one API read.
+
+    THE PIN AND THE BILL COME FROM HERE. `sha` is the commit the row must be
+    pinned to before any spend, and `allow_bytes` is what snapshot_download
+    would move — matched with fnmatch, whose `*` crosses slashes exactly the
+    way huggingface_hub's does, so this predicts the hub's behaviour rather
+    than a tidier one.
+    """
+    try:
+        doc = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(doc, dict) or not doc.get("sha"):
+        return {}
+    per_component: dict[str, int] = {}
+    total = 0
+    unsized = []
+    for entry in doc.get("siblings") or []:
+        name = entry.get("rfilename") or ""
+        if not name or not fnmatch_any(allow, name):
+            continue
+        size = entry.get("size")
+        if size is None:
+            unsized.append(name)
+            continue
+        total += size
+        head = name.split("/", 1)[0]
+        per_component[head] = per_component.get(head, 0) + size
+    return {
+        "sha": doc["sha"],
+        "allow_bytes": total,
+        "allow_gib": round(total / 1024**3, 2),
+        "per_component_gib": {
+            k: round(v / 1024**3, 2) for k, v in sorted(per_component.items())
+        },
+        "unsized": unsized,
+    }
+
+
+# Config files worth reading per row, beyond the scheduler: the transformer's
+# config answers the questions that kept HunyuanVideo-1.5 NOT_EVALUATED (does
+# the checkpoint declare use_meanflow; how many channels does it eat), the
+# guider config carries the distilled guidance scale that is NOT a __call__
+# argument, and the VAE config carries the compression ratios the frame
+# arithmetic depends on.
+PEEK_FILES = ("transformer/config.json", "guider/config.json", "vae/config.json")
+PEEK_KEYS = ("_class_name", "use_meanflow", "in_channels", "out_channels",
+             "num_layers", "guidance_scale", "spatial_compression_ratio",
+             "temporal_compression_ratio", "latent_channels", "target_size",
+             "task_type", "scaling_factor")
+
+
+def config_peek(text: str) -> dict:
+    try:
+        doc = json.loads(text)
+    except Exception:
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: doc[k] for k in PEEK_KEYS if k in doc}
+
+
 def interesting_lines(text: str, limit: int = 40, context: int = 6) -> list[str]:
     """Lines a human should read, in file order, with their surroundings.
 
@@ -131,11 +215,34 @@ def report(fetcher=fetch) -> int:
     print("Nothing here is applied automatically. A row gets a step count only")
     print("when a human reads one of these citations and writes it down.\n")
     for key, row in sorted(modelprobe.PROBE_MODELS.items()):
+        ref = read_ref(row)
         print(f"--- {key}  ({row['repo']} @ {row['revision'][:12]})")
+        if ref != row["revision"]:
+            print(f"    INTERIM: revision {row['revision']!r} is not a pin — "
+                  f"reading at {ref!r}; the sha below is the pin to write")
         print(f"    currently probing with: "
               f"steps={row.get('steps') or 'PIPELINE DEFAULT'}, "
               f"guidance={row.get('guidance') if row.get('guidance') is not None else 'PIPELINE DEFAULT'}")
-        card = fetcher(card_url(row["repo"], row["revision"], "README.md"))
+        info = fetcher(api_url(row["repo"], ref))
+        summary = listing_summary(info, row["allow"]) if info else {}
+        if not summary:
+            print("    listing | UNREADABLE — sha and sizes not resolved")
+        else:
+            print(f"    listing | sha={summary['sha']}")
+            print(f"    listing | allow list fetches {summary['allow_gib']} GiB "
+                  f"(row says download_gib={row['download_gib']})")
+            print(f"    listing | per component: {summary['per_component_gib']}")
+            if summary["unsized"]:
+                print(f"    listing | *** {len(summary['unsized'])} matched "
+                      f"file(s) report no size: {summary['unsized'][:5]} ***")
+        for peek_path in PEEK_FILES:
+            body = fetcher(card_url(row["repo"], ref, peek_path))
+            if body is None:
+                continue
+            peeked = config_peek(body)
+            if peeked:
+                print(f"    {peek_path} | {peeked}")
+        card = fetcher(card_url(row["repo"], ref, "README.md"))
         if card is None:
             print("    README.md: UNREADABLE (no citation available)")
         else:
@@ -145,7 +252,7 @@ def report(fetcher=fetch) -> int:
             for line in lines:
                 print(f"    card | {line}")
         sched = fetcher(
-            card_url(row["repo"], row["revision"], "scheduler/scheduler_config.json")
+            card_url(row["repo"], ref, "scheduler/scheduler_config.json")
         )
         if sched is None:
             print("    scheduler/scheduler_config.json: absent or unreadable")
@@ -154,7 +261,7 @@ def report(fetcher=fetch) -> int:
         # DOES THE ALLOW LIST COVER WHAT THE PIPELINE NEEDS. A missing
         # subfolder is not discovered until from_pretrained runs, which is
         # after the whole download has been paid for on a rented GPU.
-        index = fetcher(card_url(row["repo"], row["revision"], "model_index.json"))
+        index = fetcher(card_url(row["repo"], ref, "model_index.json"))
         if index is None:
             print("    model_index.json: UNREADABLE — coverage NOT checked")
         else:

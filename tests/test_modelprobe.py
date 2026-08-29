@@ -79,28 +79,73 @@ def rig(tmp_path, monkeypatch):
 # ------------------------------------------------------------ the model table
 
 
-def test_only_the_four_authorised_candidates_are_probeable():
+def test_only_the_authorised_candidates_are_probeable():
     assert set(modelprobe.PROBE_MODELS) == {
         "ltx-13b", "wan21-i2v-480p", "wan22-i2v-a14b", "cogvideox-i2v",
+        "hunyuanvideo-1.5-i2v", "hunyuanvideo-1.5-i2v-12step",
     }
 
 
-def test_hunyuan_is_absent_and_named_not_evaluated():
-    """Owner rule: probe it only if the architecture resolves without guessing.
-    On 2026-08-29 it did not, so it is recorded as unevaluated rather than
-    given a row built on inference."""
-    assert "hunyuanvideo-1.5-i2v" not in modelprobe.PROBE_MODELS
-    assert modelprobe.NOT_EVALUATED["hunyuanvideo-1.5-i2v"] == "ARCHITECTURE_NOT_RESOLVED"
+def test_hunyuan_resolved_from_source_and_left_not_evaluated():
+    """Owner rule: probe it only if the architecture resolves without
+    guessing. On 2026-08-29 it did not (ARCHITECTURE_NOT_RESOLVED); later the
+    same day diffusers 0.38.0's HunyuanVideo15ImageToVideoPipeline plus the
+    community's per-variant diffusers-layout repo resolved it from source, so
+    the rows exist and the unevaluated ledger is empty."""
+    assert "hunyuanvideo-1.5-i2v" in modelprobe.PROBE_MODELS
+    assert modelprobe.NOT_EVALUATED == {}
+
+
+def test_the_two_hunyuan_rows_differ_only_in_steps():
+    """Owner phase 15: one checkpoint, two officially recommended step
+    counts, dispatched separately. Everything else identical, or the
+    comparison measures a second difference nobody asked for."""
+    a = modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"]
+    b = modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v-12step"]
+    assert (a["steps"], b["steps"]) == (8, 12)
+    for field in ("repo", "revision", "pipeline", "dtype", "offload",
+                  "frames", "fps", "download_gib", "allow", "licence"):
+        assert a[field] == b[field], field
+
+
+def test_hunyuan_rows_carry_no_canvas_and_the_territory_restriction():
+    """The pipeline accepts no width/height — it buckets from the reference
+    image — and the licence string must carry the territory restriction so
+    no later reader mistakes this for a permissive checkpoint."""
+    for key in ("hunyuanvideo-1.5-i2v", "hunyuanvideo-1.5-i2v-12step"):
+        row = modelprobe.PROBE_MODELS[key]
+        assert "width" not in row and "height" not in row, key
+        assert row["offload"] == "sequential", key
+        assert (row["frames"], row["fps"]) == (121, 24), key
+        assert "EU" in row["licence"], key
+        assert "guidance" not in row, key
 
 
 def test_every_candidate_pins_a_revision_and_records_its_licence():
     """A repository name names a moving branch; the licence recorded is the
     licence at that commit, which is the only form of the claim that stays
-    true."""
+    true. ONE interim state is legal — the literal PENDING-REGISTRY-PIN a
+    new row wears until the $0 registry read pins it — and it is legal
+    precisely because spec() refuses to run it (asserted below)."""
     for key, row in modelprobe.PROBE_MODELS.items():
-        assert len(row["revision"]) == 40, key
+        assert (len(row["revision"]) == 40
+                or row["revision"] == "PENDING-REGISTRY-PIN"), key
         assert row["licence"], key
         assert row["repo"].count("/") == 1, key
+
+
+def test_an_unpinned_revision_is_unspendable():
+    """The teeth behind the interim marker: any row not pinned to a 40-hex
+    commit is refused by spec() before a byte moves, so a dispatch during
+    the interim state costs a refusal, never a download of moving bytes."""
+    for key, row in modelprobe.PROBE_MODELS.items():
+        if len(row["revision"]) == 40:
+            assert modelprobe.spec(key) is row
+        else:
+            with pytest.raises(modelprobe.ProbeStop) as stop:
+                modelprobe.spec(key)
+            assert stop.value.failure == "MODEL_ERROR"
+            assert "pinned" in stop.value.detail
 
 
 def test_wan21_and_wan22_are_separate_rows_with_separate_downloads():
@@ -147,13 +192,10 @@ def test_each_candidate_runs_at_a_shape_it_actually_supports():
         assert 3.0 <= seconds <= 6.5, row["label"]
 
 
-def test_spec_refuses_an_unknown_or_unevaluated_key():
+def test_spec_refuses_an_unknown_key():
     with pytest.raises(modelprobe.ProbeStop) as unknown:
         modelprobe.spec("veo")
     assert unknown.value.failure == "MODEL_ERROR"
-    with pytest.raises(modelprobe.ProbeStop) as hunyuan:
-        modelprobe.spec("hunyuanvideo-1.5-i2v")
-    assert "NOT_EVALUATED" in hunyuan.value.detail
 
 
 # ------------------------------------------------------------------ disk gate
@@ -292,6 +334,29 @@ def test_the_pipeline_is_called_at_the_candidates_own_shape(rig):
     assert pipe.called_with["num_frames"] == 49
 
 
+def test_a_row_without_a_canvas_sends_no_canvas_kwargs(rig, monkeypatch):
+    """HunyuanVideo-1.5's pipeline raises TypeError on width/height — it
+    buckets the canvas from the reference image. This drives the real run()
+    path with a pipe as strict as the real one, so a regression here fails
+    a free test instead of TypeError-ing a paid job at the last moment."""
+    monkeypatch.setitem(
+        modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"], "revision", "f" * 40,
+    )
+
+    def strict_pipe(**kwargs):
+        if "width" in kwargs or "height" in kwargs:
+            raise TypeError("unexpected keyword argument 'width'")
+        strict_pipe.called_with = kwargs
+        return [b"frame"] * 3
+
+    modelprobe.run(probe_job("hunyuanvideo-1.5-i2v"), rig["ref"], rig["out"],
+                   fetch=rig["fetch"], load_pipeline=lambda local: strict_pipe,
+                   torch=FakeTorch())
+    assert strict_pipe.called_with["num_frames"] == 121
+    assert strict_pipe.called_with["num_inference_steps"] == 8
+    assert "guidance_scale" not in strict_pipe.called_with
+
+
 # -------------------------------------------------------------- the contract
 
 
@@ -308,9 +373,13 @@ def test_the_contract_refuses_a_repository_in_place_of_a_key():
         contract.validate_job(probe_job("Wan-AI/Wan2.1-I2V-14B-480P-Diffusers"))
 
 
-def test_the_contract_refuses_hunyuan_by_name_with_its_reason():
-    with pytest.raises(contract.ContractError, match="ARCHITECTURE_NOT_RESOLVED"):
-        contract.validate_job(probe_job("hunyuanvideo-1.5-i2v"))
+def test_the_contract_admits_hunyuan_but_spec_still_gates_the_pin():
+    """The contract's job is key membership; the revision pin is spec()'s.
+    While the hunyuan row wears its interim marker the contract admits the
+    job and the worker refuses it at $0-of-download, which is the designed
+    fail-closed order — never a fetch of moving bytes."""
+    job = contract.validate_job(probe_job("hunyuanvideo-1.5-i2v"))
+    assert job["model"] == "hunyuanvideo-1.5-i2v"
 
 
 def test_model_probe_carries_no_extra_top_level_fields():
@@ -513,7 +582,11 @@ def test_every_sampling_setting_names_where_it_came_from():
     for key, row in modelprobe.PROBE_MODELS.items():
         if row.get("steps") is not None or row.get("guidance") is not None:
             assert row.get("sampling_source"), key
-            assert "card" in row["sampling_source"], key
+            # The citation must name a concrete publisher artifact: a model
+            # card, the repository README's config table, or the publisher's
+            # own code. "Recommended settings" with no artifact is not one.
+            assert any(kind in row["sampling_source"]
+                       for kind in ("card", "README", "PIPELINE_CONFIGS")), key
 
 
 def test_a_candidate_whose_card_states_no_step_count_gets_no_step_count():

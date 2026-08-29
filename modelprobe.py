@@ -29,6 +29,7 @@ means "the pipeline completed", never "the clip is good".
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import contract
@@ -241,17 +242,147 @@ PROBE_MODELS: dict[str, dict] = {
             "tokenizer/*", "scheduler/*", "vae/*",
         ],
     },
+    "hunyuanvideo-1.5-i2v": {
+        "label": "HunyuanVideo-1.5 480p I2V step-distilled (8 steps)",
+        "repo": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v_step_distilled",
+        # INTERIM MARKER until the $0 registry read pins the commit. spec()
+        # refuses any revision that is not a 40-hex sha, so this row cannot
+        # fetch moving bytes even if dispatched early; probe_settings reads
+        # the repository at "main" while this marker stands, and the pin it
+        # prints is what replaces it.
+        "revision": "PENDING-REGISTRY-PIN",
+        "pipeline": "HunyuanVideo15ImageToVideoPipeline",
+        # NOT a permissive licence, and the restriction reaches OUTPUTS:
+        # Tencent HunyuanVideo-1.5 Community License, LICENSE at
+        # Tencent-Hunyuan/HunyuanVideo-1.5@60783e70 — Section 1.l excludes the
+        # EU, UK and South Korea from the Territory, and Section 5.c forbids
+        # using or displaying "Output or results" outside it. Recorded here so
+        # the benchmark's decision weighs it; adopting the model in production
+        # would be an owner business decision on top of any quality result.
+        "licence": "Tencent HunyuanVideo-1.5 Community License (no EU/UK/KR, incl. outputs)",
+        # Official default dtype. Tencent's CLI (--dtype) offers bf16 or fp32
+        # only, and the diffusers docs page loads bf16; the CLI additionally
+        # forces the VAE to fp16 internally, which the uniform diffusers
+        # from_pretrained path does not reproduce — the whole pipeline runs
+        # bf16 here, the same single-dtype convention as every other row.
+        "dtype": "bfloat16",
+        # 8.3B bf16 transformer is ~15.5 GiB resident under model-level
+        # offload — before activations over ~12k-token variable-length
+        # attention that this card would run on plain SDPA (the docs
+        # recommend flash/sage for exactly that path). The margin is real on
+        # paper and unmeasured in practice, and an OOM caused by that gamble
+        # would be my configuration wearing the costume of a fact about the
+        # model. Sequential offload is also the closest diffusers equivalent
+        # of the path Tencent itself auto-enables on cards under 60 GB
+        # (group offload, one block per group), and it is the mode three of
+        # the four measured candidates already ran under.
+        "offload": "sequential",
+        # NO width/height ON PURPOSE, and the loader passes neither: this
+        # pipeline accepts no such kwargs. It derives the canvas from the
+        # reference image's aspect ratio against its trained 480p bucket
+        # list (target_size 640, stride 16) and centre-crops to the closest
+        # bucket. The output's real dimensions are read from the frames.
+        "frames": 121,
+        "fps": 24,
+        # INTERIM estimate (transformer ~33.3 + Qwen2.5-VL text encoder +
+        # byT5 + SigLIP + VAE, search-snippet-derived); pinned from the $0
+        # registry read before any spend, like the revision.
+        "download_gib": 57.0,
+        # Cited: the repo's own optimal-config table says "8 or 12
+        # (recommended)" for this checkpoint, and Tencent's code defaults it
+        # to 12 (PIPELINE_CONFIGS["480p_i2v_step_distilled"]: guidance 1.0,
+        # flow shift 7.0, steps 12 — hyvideo/commons/__init__.py@60783e70).
+        # The owner ordered 8 first. Guidance is deliberately NOT a row key:
+        # the converted checkpoint ships its guider at scale 1.0 (CFG off,
+        # negative prompt never encoded) and the pipeline's __call__ accepts
+        # no guidance_scale at all.
+        "steps": 8,
+        "sampling_source": "official README optimal-config table + Tencent "
+                           "PIPELINE_CONFIGS (8 or 12 steps; guidance and "
+                           "shift ship in the checkpoint)",
+        "allow": [
+            "model_index.json", "transformer/*", "text_encoder/*",
+            "tokenizer/*", "text_encoder_2/*", "tokenizer_2/*",
+            "image_encoder/*", "feature_extractor/*", "scheduler/*",
+            "vae/*", "guider/*",
+        ],
+    },
+    "hunyuanvideo-1.5-i2v-12step": {
+        # THE SAME CHECKPOINT at the other officially recommended step count.
+        # Owner phase 15: dispatched only if the 8-step clip is technically
+        # valid and visually promising, to answer whether quality improves.
+        # A separate row rather than a dispatch knob because sampling is a
+        # server-side constant the caller can pick but never set.
+        "label": "HunyuanVideo-1.5 480p I2V step-distilled (12 steps)",
+        "repo": "hunyuanvideo-community/HunyuanVideo-1.5-Diffusers-480p_i2v_step_distilled",
+        # INTERIM MARKER until the $0 registry read pins the commit. spec()
+        # refuses any revision that is not a 40-hex sha, so this row cannot
+        # fetch moving bytes even if dispatched early; probe_settings reads
+        # the repository at "main" while this marker stands, and the pin it
+        # prints is what replaces it.
+        "revision": "PENDING-REGISTRY-PIN",
+        "pipeline": "HunyuanVideo15ImageToVideoPipeline",
+        # NOT a permissive licence, and the restriction reaches OUTPUTS:
+        # Tencent HunyuanVideo-1.5 Community License, LICENSE at
+        # Tencent-Hunyuan/HunyuanVideo-1.5@60783e70 — Section 1.l excludes the
+        # EU, UK and South Korea from the Territory, and Section 5.c forbids
+        # using or displaying "Output or results" outside it. Recorded here so
+        # the benchmark's decision weighs it; adopting the model in production
+        # would be an owner business decision on top of any quality result.
+        "licence": "Tencent HunyuanVideo-1.5 Community License (no EU/UK/KR, incl. outputs)",
+        # Official default dtype. Tencent's CLI (--dtype) offers bf16 or fp32
+        # only, and the diffusers docs page loads bf16; the CLI additionally
+        # forces the VAE to fp16 internally, which the uniform diffusers
+        # from_pretrained path does not reproduce — the whole pipeline runs
+        # bf16 here, the same single-dtype convention as every other row.
+        "dtype": "bfloat16",
+        # 8.3B bf16 transformer is ~15.5 GiB resident under model-level
+        # offload — before activations over ~12k-token variable-length
+        # attention that this card would run on plain SDPA (the docs
+        # recommend flash/sage for exactly that path). The margin is real on
+        # paper and unmeasured in practice, and an OOM caused by that gamble
+        # would be my configuration wearing the costume of a fact about the
+        # model. Sequential offload is also the closest diffusers equivalent
+        # of the path Tencent itself auto-enables on cards under 60 GB
+        # (group offload, one block per group), and it is the mode three of
+        # the four measured candidates already ran under.
+        "offload": "sequential",
+        # NO width/height ON PURPOSE, and the loader passes neither: this
+        # pipeline accepts no such kwargs. It derives the canvas from the
+        # reference image's aspect ratio against its trained 480p bucket
+        # list (target_size 640, stride 16) and centre-crops to the closest
+        # bucket. The output's real dimensions are read from the frames.
+        "frames": 121,
+        "fps": 24,
+        # INTERIM estimate (transformer ~33.3 + Qwen2.5-VL text encoder +
+        # byT5 + SigLIP + VAE, search-snippet-derived); pinned from the $0
+        # registry read before any spend, like the revision.
+        "download_gib": 57.0,
+        "steps": 12,
+        "sampling_source": "official README optimal-config table + Tencent "
+                           "PIPELINE_CONFIGS (12 is Tencent's own default "
+                           "for this checkpoint)",
+        "allow": [
+            "model_index.json", "transformer/*", "text_encoder/*",
+            "tokenizer/*", "text_encoder_2/*", "tokenizer_2/*",
+            "image_encoder/*", "feature_extractor/*", "scheduler/*",
+            "vae/*", "guider/*",
+        ],
+    },
 }
 
-# HunyuanVideo-1.5 is deliberately ABSENT. Owner rule: it may only be probed if
-# its architecture, checkpoint layout and required configuration resolve from
-# authoritative material without guessing. On 2026-08-29 the registry gave a
-# non-diffusers layout, eleven complete checkpoints sharing one directory, and
-# a config carrying neither depth nor temporal compression ratio. Adding a row
-# here on inference would be the guess the rule forbids.
-NOT_EVALUATED = {
-    "hunyuanvideo-1.5-i2v": "ARCHITECTURE_NOT_RESOLVED",
-}
+# HunyuanVideo-1.5 carried ARCHITECTURE_NOT_RESOLVED here from 2026-08-29
+# until later the same day. Owner rule: probe only what resolves from
+# authoritative material without guessing — and at first it did not: the
+# tencent repository is a non-diffusers layout with eleven complete
+# checkpoints sharing one transformer/ directory. What resolved it, from
+# source rather than inference: diffusers 0.36.0+ ships
+# HunyuanVideo15ImageToVideoPipeline (this image pins 0.38.0), and the
+# hunyuanvideo-community org publishes per-variant diffusers-layout repos, so
+# exactly the 480p I2V step-distilled checkpoint loads the ordinary
+# from_pretrained way. The row's configuration is cited from Tencent's own
+# code at Tencent-Hunyuan/HunyuanVideo-1.5@60783e70, not from a card summary.
+NOT_EVALUATED: dict[str, str] = {}
 
 # The decisive-failure vocabulary, in the order the pipeline can reach them.
 # QUALITY_FAIL is NOT here: this module cannot see frames, and a stage that
@@ -379,14 +510,31 @@ class Phases:
         return int((self._clock() - self._start) * 1000)
 
 
+_SHA_REVISION = re.compile(r"^[0-9a-f]{40}$")
+
+
 def spec(model_key: str) -> dict:
-    """The server's row for this benchmark key. Never a caller-supplied repo."""
+    """The server's row for this benchmark key. Never a caller-supplied repo.
+
+    A row whose revision is not a pinned 40-hex commit is refused OUTRIGHT,
+    before any bytes move: "main" names whatever the publisher pushes next,
+    and a benchmark of moving bytes measures nothing anyone can cite. Rows
+    land with an interim ref so the $0 registry read can resolve them, and
+    this guard is what makes that interim state unspendable.
+    """
     if model_key in NOT_EVALUATED:
         raise ProbeStop("MODEL_ERROR",
                         f"{model_key} is NOT_EVALUATED: {NOT_EVALUATED[model_key]}")
     if model_key not in PROBE_MODELS:
         raise ProbeStop("MODEL_ERROR", f"unknown probe model {model_key!r}")
-    return PROBE_MODELS[model_key]
+    row = PROBE_MODELS[model_key]
+    if not _SHA_REVISION.match(row.get("revision") or ""):
+        raise ProbeStop(
+            "MODEL_ERROR",
+            f"{model_key} revision {row.get('revision')!r} is not a pinned "
+            "commit sha — refusing to fetch moving bytes",
+        )
+    return row
 
 
 def fits_disk(model_key: str, free_bytes: int, *, headroom: float = 1.15) -> bool:
@@ -631,15 +779,22 @@ def _measure(job, input_path, output_path, model_key, spec_row, phases,
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop("CONDITIONING_FAILURE", f"{type(exc).__name__}: {exc}") from exc
 
+    # width/height travel ONLY for rows that carry them. HunyuanVideo-1.5's
+    # pipeline accepts neither kwarg — it derives the canvas from the
+    # reference image's aspect against its trained bucket list — and passing
+    # them would TypeError a paid job at the last possible moment.
+    call_kwargs = {
+        "image": image,
+        "prompt": job["params"]["prompt"],
+        "num_frames": spec_row["frames"],
+        **_sampling(spec_row),
+    }
+    if spec_row.get("width"):
+        call_kwargs["width"] = spec_row["width"]
+    if spec_row.get("height"):
+        call_kwargs["height"] = spec_row["height"]
     try:
-        result = phases.time("inference", lambda: pipe(
-            image=image,
-            prompt=job["params"]["prompt"],
-            width=spec_row["width"],
-            height=spec_row["height"],
-            num_frames=spec_row["frames"],
-            **_sampling(spec_row),
-        ))
+        result = phases.time("inference", lambda: pipe(**call_kwargs))
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop(classify(exc), f"{type(exc).__name__}: {exc}") from exc
 

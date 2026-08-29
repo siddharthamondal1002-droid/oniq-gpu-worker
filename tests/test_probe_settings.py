@@ -106,3 +106,51 @@ def test_a_body_that_is_not_an_index_reads_as_unknown_rather_than_crashing():
     """A 404 page or a redirect is a real outcome. The reader must survive it
     — it runs before every probe and a crash here blocks the benchmark."""
     ps.report(fetcher=lambda url: "<!doctype html>404")
+
+
+# ------------------------------- the listing read: the pin and the bill
+
+
+def test_read_ref_reads_a_pin_at_the_pin_and_the_interim_marker_at_main():
+    assert ps.read_ref({"revision": "a" * 40}) == "a" * 40
+    assert ps.read_ref({"revision": "PENDING-REGISTRY-PIN"}) == "main"
+    assert ps.read_ref({"revision": ""}) == "main"
+
+
+def test_listing_summary_matches_like_the_hub_star_crosses_slashes():
+    """fnmatch's * crosses a slash exactly like huggingface_hub's — the LTX
+    vae lesson. The summary must predict the hub's bill, not a tidier one."""
+    listing = (
+        '{"sha":"' + "b" * 40 + '","siblings":['
+        '{"rfilename":"transformer/a/deep/file.safetensors","size":1073741824},'
+        '{"rfilename":"unrelated/file.bin","size":999},'
+        '{"rfilename":"model_index.json","size":100}]}'
+    )
+    out = ps.listing_summary(listing, ["model_index.json", "transformer/*"])
+    assert out["sha"] == "b" * 40
+    assert out["allow_bytes"] == 1073741824 + 100
+    assert out["per_component_gib"]["transformer"] == 1.0
+
+
+def test_listing_summary_reports_matched_files_with_no_size():
+    listing = ('{"sha":"' + "c" * 40 + '","siblings":['
+               '{"rfilename":"vae/big.safetensors"}]}')
+    out = ps.listing_summary(listing, ["vae/*"])
+    assert out["unsized"] == ["vae/big.safetensors"]
+    assert out["allow_bytes"] == 0
+
+
+def test_a_listing_that_is_not_a_listing_summarises_to_nothing():
+    assert ps.listing_summary("<!doctype html>", ["*"]) == {}
+    assert ps.listing_summary('{"no_sha": true}', ["*"]) == {}
+
+
+def test_config_peek_keeps_only_the_load_bearing_keys():
+    body = ('{"_class_name":"HunyuanVideo15Transformer3DModel",'
+            '"use_meanflow":true,"num_layers":54,"decorative":"x"}')
+    assert ps.config_peek(body) == {
+        "_class_name": "HunyuanVideo15Transformer3DModel",
+        "use_meanflow": True,
+        "num_layers": 54,
+    }
+    assert ps.config_peek("<!doctype html>") == {}
