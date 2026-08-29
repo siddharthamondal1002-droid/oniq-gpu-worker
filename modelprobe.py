@@ -98,6 +98,16 @@ PROBE_MODELS: dict[str, dict] = {
         # This repo is one 13B checkpoint, loadable the ordinary way.
         "repo": "Lightricks/LTX-Video-0.9.8-13B-distilled",
         "revision": "7c64400e1861cc0d7b98d570a1926d5408ec60cd",
+        # ITS model_index.json DECLARES LTXConditionPipeline, not this class,
+        # and that is checked rather than assumed: read at $0 on 2026-08-29,
+        # and both classes take the SAME five components with the same names
+        # (scheduler, vae, text_encoder, tokenizer, transformer) in diffusers
+        # 0.35.2, so from_pretrained loads it here. What differs is the FLOW,
+        # not the weights: the card drives a conditions-list call plus a
+        # latent upsampler, and this probe makes the single-pass image call
+        # every other candidate makes. That uniformity is the point of the
+        # benchmark, and the difference belongs in the report rather than in
+        # a quiet substitution.
         "pipeline": "LTXImageToVideoPipeline",
         "licence": "other (LTX Open Weights)",
         "dtype": "bfloat16",
