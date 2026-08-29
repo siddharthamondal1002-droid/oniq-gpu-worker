@@ -49,10 +49,38 @@ GIB = 1024**3
 # useless, because it is the one that gets believed until the OOM.
 ACTIVATION_K = 12
 
-# Feature-map multiplier during VAE decode: the widest intermediate carries
-# the VAE's base channel count, and the up-blocks hold roughly this many such
-# maps live at once.
+# Feature-map multiplier during VAE decode: how many full-resolution maps the
+# up-blocks hold live at once.
 VAE_DECODE_K = 6
+
+# TILED DECODE IS BOUNDED BY THE TILE, NOT BY THE CLIP. `enable_tiling()` — which
+# ONIQ's own worker already calls — splits the decode SPATIALLY, so the biggest
+# feature map is a tile's worth of pixels however large the canvas is. Modelling
+# tiling as a frame-count cap alone was wrong by more than an order of magnitude
+# against the one real measurement ONIQ owns (see ANCHOR below).
+VAE_TILE_PIXELS = 256 * 256
+VAE_DECODE_TILED_K = 2
+
+# THE ONE REAL NUMBER. RunPod job b1971009-4b48-46b2-b7b1-5e3905d56d7e-u1:
+# LTX-Video 2B on an A5000, bf16, every component resident, vae.enable_tiling()
+# on, 9 frames at 704x480, reported vram_peak_mb 13837 (13.51 GiB) with 13.23
+# GiB of that being weights. So the entire working set measured 0.28 GiB.
+#
+# Every tiled figure in this module inherits a constant fitted to THAT SINGLE
+# POINT. It is a real anchor and it is one anchor: it pins the model at 9 frames
+# on one canvas with one architecture, and says nothing about how the term grows.
+# `anchor_check()` prints projection against measurement on every run so the fit
+# is visible rather than assumed, and any probe that follows should re-fit it.
+ANCHOR = {
+    "job": "b1971009-4b48-46b2-b7b1-5e3905d56d7e-u1",
+    "model": "LTX-Video 2B",
+    "gpu": "NVIDIA RTX A5000",
+    "measured_peak_bytes": 13837 * 1024 * 1024,
+    "resident_weight_bytes": int(13.23 * GIB),
+    "width": 704,
+    "height": 480,
+    "frames": 9,
+}
 
 # CUDA context, cuDNN/cuBLAS workspaces, allocator fragmentation. Nominal VRAM
 # is never all usable, and a plan that assumes it is will OOM at 23.6 GiB on a
@@ -134,16 +162,45 @@ def activation_bytes(shape: Shape, arch: Arch, *, dtype: str = "bf16",
 
 def vae_decode_bytes(shape: Shape, arch: Arch, *, dtype: str = "bf16",
                      tile_frames: int | None = None,
-                     k: int = VAE_DECODE_K) -> int:
-    """PROJECTED decode peak. `tile_frames` is the model card's tiling knob.
+                     k: int = VAE_DECODE_K,
+                     tile_pixels: int = VAE_TILE_PIXELS,
+                     tiled_k: int = VAE_DECODE_TILED_K) -> int:
+    """PROJECTED decode peak, whole-clip or tiled.
 
-    Whole-clip decode is what a naive pipeline does and what OOMs first; the
-    tiled figure is what the same model does once its documented chunking is
-    switched on. Reporting only one of the two is how a model gets wrongly
-    called undeployable.
+    Whole-clip decode is what a naive pipeline does and what OOMs first. Tiled
+    decode is what the same model does once `enable_tiling()` is on, and it is
+    bounded in BOTH dimensions: the frame chunk caps time, the tile caps area.
+    Capping only time overestimated ONIQ's own production configuration by more
+    than tenfold — the anchor caught it.
     """
-    frames = shape.frames if tile_frames is None else min(shape.frames, tile_frames)
-    return frames * shape.height * shape.width * arch.vae_channels * DTYPE_BYTES[dtype] * k
+    if tile_frames is None:
+        return (shape.frames * shape.height * shape.width
+                * arch.vae_channels * DTYPE_BYTES[dtype] * k)
+    frames = min(shape.frames, tile_frames)
+    area = min(shape.height * shape.width, tile_pixels)
+    return frames * area * arch.vae_channels * DTYPE_BYTES[dtype] * tiled_k
+
+
+def anchor_check(arch: Arch) -> dict:
+    """Projection against the one configuration that has a real measurement.
+
+    Reported on every run. A model whose arithmetic cannot reproduce the single
+    case ONIQ has actually observed has no business ranking eight it has not.
+    """
+    shape = Shape(ANCHOR["width"], ANCHOR["height"], ANCHOR["frames"])
+    working = max(
+        activation_bytes(shape, arch),
+        vae_decode_bytes(shape, arch, tile_frames=ANCHOR["frames"]),
+    )
+    projected = ANCHOR["resident_weight_bytes"] + working
+    measured = ANCHOR["measured_peak_bytes"]
+    return {
+        "projected_bytes": projected,
+        "measured_bytes": measured,
+        "ratio": round(projected / measured, 3),
+        "projected_working_set": working,
+        "measured_working_set": measured - ANCHOR["resident_weight_bytes"],
+    }
 
 
 def weight_bytes(roles: dict[str, int], *, precision: str,

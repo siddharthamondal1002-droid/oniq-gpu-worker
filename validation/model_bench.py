@@ -472,6 +472,34 @@ def report(token, get=mr._get) -> tuple[int, list[mr.Row]]:
           "be computed, only observed.")
 
     rows = gather(token, get)
+
+    # THE ANCHOR, FIRST. Every tiled figure below inherits a constant fitted to
+    # one real job, so how well the arithmetic reproduces that job is the honest
+    # header for everything that follows.
+    incumbent = next(
+        (r for r in rows if r.candidate.key == "ltx-2b" and r.configs.get("arch")),
+        None,
+    )
+    if incumbent:
+        check = vram.anchor_check(incumbent.configs["arch"])
+        print("")
+        print(f"=== CALIBRATION against job {vram.ANCHOR['job']} "
+              f"({vram.ANCHOR['model']} on {vram.ANCHOR['gpu']}) ===")
+        print(f"  measured peak   {vram.gib(check['measured_bytes'])}GiB")
+        print(f"  projected peak  {vram.gib(check['projected_bytes'])}GiB  "
+              f"(ratio {check['ratio']})")
+        print(f"  working set     measured "
+              f"{vram.gib(check['measured_working_set'])}GiB vs projected "
+              f"{vram.gib(check['projected_working_set'])}GiB")
+        print("  ONE point, and the tiled-decode constant is fitted TO it. A "
+              "ratio of 1.0 here is a fit, not a validation — it pins the model "
+              "at 9 frames on one canvas and says nothing about how the term "
+              "grows. Every probe that follows should re-fit it.")
+    else:
+        print("")
+        print("=== NO CALIBRATION AVAILABLE — the incumbent row did not "
+              "measure, so nothing below can be checked against a real peak ===")
+
     for row in rows:
         _print_row(row)
 

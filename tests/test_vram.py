@@ -175,3 +175,41 @@ def test_a40_class_ordering_prefers_the_earlier_listed_card_on_a_tie():
     """A5000 and 4090 are both 24 GB; the owner listed the A5000 first, and
     it is the card ONIQ already runs."""
     assert vram.minimum_gpu(int(15 * vram.GIB)) == "RTX A5000 24GB"
+
+
+# ------------------------------------------------------------------- anchor
+
+
+LTX_MEASURED = vram.Arch(hidden=2048, layers=28, vae_spatial=32, vae_temporal=8,
+                         vae_channels=128)
+
+
+def test_the_projection_reproduces_the_one_real_measurement():
+    """LTX-Video 2B, bf16, all resident, tiling on, 9 frames at 704x480, on an
+    A5000: 13,837 MB observed. Arithmetic that cannot reproduce the single case
+    ONIQ has actually run has no business ranking eight it has not."""
+    check = vram.anchor_check(LTX_MEASURED)
+    assert 0.95 <= check["ratio"] <= 1.05, check
+
+
+def test_tiled_decode_is_bounded_by_area_as_well_as_by_frames():
+    """Capping only the frame count overestimated ONIQ's own production
+    configuration more than tenfold: enable_tiling() splits SPATIALLY, so the
+    biggest feature map is a tile however large the canvas."""
+    small = vram.vae_decode_bytes(Shape(704, 480, 97), LTX_MEASURED, tile_frames=16)
+    huge = vram.vae_decode_bytes(Shape(1920, 1080, 97), LTX_MEASURED, tile_frames=16)
+    assert small == huge, "a bigger canvas must not enlarge a tiled decode"
+
+
+def test_untiled_decode_still_grows_with_the_canvas():
+    """The OOM case has to remain visible, or a model gets called deployable
+    on a configuration nobody enabled."""
+    small = vram.vae_decode_bytes(Shape(704, 480, 97), LTX_MEASURED)
+    huge = vram.vae_decode_bytes(Shape(1920, 1080, 97), LTX_MEASURED)
+    assert huge > small * 4
+
+
+def test_tiling_is_never_worse_than_not_tiling():
+    whole = vram.vae_decode_bytes(Shape(704, 480, 97), LTX_MEASURED)
+    tiled = vram.vae_decode_bytes(Shape(704, 480, 97), LTX_MEASURED, tile_frames=16)
+    assert tiled < whole
