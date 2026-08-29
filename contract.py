@@ -221,6 +221,9 @@ OUTPUT_WHITELIST = frozenset(
         "disk_free_bytes",
         "disk_total_bytes",
         "download_bytes",
+        "steps",
+        "guidance",
+        "sampling_source",
         # video_concat evidence
         "segments",
         "concat_ms",

@@ -64,6 +64,7 @@ class FakeClient:
         self._job_statuses = list(job_statuses or [])
         self._health_seq = list(health_seq or [])
         self.submitted = []
+        self.policies = []
         self.cancelled = []
 
     def get_pods(self):
@@ -79,8 +80,9 @@ class FakeClient:
         doc = json.loads(raw)
         return raw, [rp.parse_gpu_type(g) for g in doc["data"]["gpuTypes"]]
 
-    def submit_job(self, endpoint_id, job_input):
+    def submit_job(self, endpoint_id, job_input, policy=None):
         self.submitted.append((endpoint_id, job_input))
+        self.policies.append(policy)
         return "{}", {"id": f"job-{len(self.submitted)}"}
 
     def job_status(self, endpoint_id, job_id):
@@ -1725,3 +1727,63 @@ def test_the_reference_precheck_accepts_a_real_png(monkeypatch, capsys):
     spend_run.require_reference({}, "probe-reference.png",
                          fetch=lambda url: b"\x89PNG\r\n\x1a\n" + b"0" * 100)
     assert "reference verified" in capsys.readouterr().out
+
+
+# ------------------------------- the per-job execution window, probe only
+
+
+def _submitted_policy(client, **kw):
+    """What policy reached the provider, whatever the job then did.
+
+    The status is deliberately FAILED: the policy is attached at SUBMIT, so a
+    failing job proves it just as well as a passing one, and this stays a test
+    about the request rather than about the worker.
+    """
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop):
+        spend_run.one_job(client, facts, sleep=lambda s: None, clock=FakeTime().clock, **kw)
+    return client.policies
+
+
+def test_only_the_probe_job_carries_an_execution_policy():
+    """The live endpoint's executionTimeoutMs is 600000 and stays there:
+    raising it would change the spend bound of every production job, which
+    owner directive 2026-08-29 forbids. Per-job, and only for the benchmark."""
+    import contract
+
+    client = FakeClient(job_statuses=[{"status": "FAILED", "output": {}}])
+    policies = _submitted_policy(
+        client, output_key="out/probe.mp4", op="model_probe",
+        prompt="turn", input_key="out/ref.png", model="cogvideox-i2v",
+    )
+    assert policies == [
+        {"executionTimeout": contract.PROBE_RUNTIME_CEILING_SECONDS * 1000}
+    ]
+
+
+def test_a_production_job_sends_no_policy_at_all():
+    for op, key in (("video_generate", "out/v.mp4"),
+                    ("image_generate", "out/p.png"),
+                    ("audio_mux", "out/a.mp4"),
+                    ("image_preprocess", "out/j.jpeg")):
+        client = FakeClient(job_statuses=[{"status": "FAILED", "output": {}}])
+        assert _submitted_policy(client, output_key=key, op=op) == [None], op
+
+
+def test_the_worker_deadline_and_the_provider_policy_come_from_one_number():
+    """If they came from two, whichever was smaller would kill the job and the
+    other would be a comment — and the measurement would be lost to a
+    disagreement nobody wrote down."""
+    import contract
+
+    assert (spend_run.contract_probe_ceiling_ms()
+            == contract.PROBE_RUNTIME_CEILING_SECONDS * 1000)
+
+
+def test_the_probe_watch_outlasts_the_window_it_authorised():
+    """A driver that stops watching before the provider stops billing leaves
+    an orphan. The watch has to be the wider of the two."""
+    import inspect
+
+    src = inspect.getsource(spend_run.one_job)
+    assert "watch_s = contract_probe_ceiling_ms() // 1000 + 900" in src

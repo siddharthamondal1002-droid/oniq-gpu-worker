@@ -510,3 +510,87 @@ def test_a_download_timeout_survives_the_output_filter():
     })
     assert kept["download_bytes"] == 45 * 1024**3
     assert kept["download_ms"] == 900_000
+
+
+# --------------------------------------- sampling settings, cited not chosen
+
+
+def test_every_sampling_setting_names_where_it_came_from():
+    """A step count with no citation is a preference wearing a number's
+    clothes. Read on 2026-08-29 by validation/probe_settings from each
+    publisher's card at the PINNED revision."""
+    for key, row in modelprobe.PROBE_MODELS.items():
+        if row.get("steps") is not None or row.get("guidance") is not None:
+            assert row.get("sampling_source"), key
+            assert "card" in row["sampling_source"], key
+
+
+def test_a_candidate_whose_card_states_no_step_count_gets_no_step_count():
+    """Wan2.1's card sets guidance_scale=5.0 and states no step count. Filling
+    that in from the neighbouring row would make the comparison a comparison
+    of my invention."""
+    wan21 = modelprobe.PROBE_MODELS["wan21-i2v-480p"]
+    assert "steps" not in wan21
+    assert wan21["guidance"] == 5.0
+
+
+def test_the_sampling_knobs_passed_are_only_the_cited_ones():
+    assert modelprobe._sampling(modelprobe.PROBE_MODELS["wan22-i2v-a14b"]) == {
+        "num_inference_steps": 40, "guidance_scale": 3.5,
+    }
+    assert modelprobe._sampling(modelprobe.PROBE_MODELS["wan21-i2v-480p"]) == {
+        "guidance_scale": 5.0,
+    }
+    assert modelprobe._sampling(modelprobe.PROBE_MODELS["ltx-13b"]) == {
+        "num_inference_steps": 30,
+    }
+    assert modelprobe._sampling({}) == {}
+
+
+def test_the_report_says_which_sampling_was_used(rig):
+    """Two candidates compared at different step counts is a legitimate
+    benchmark only if the report says so on every row."""
+    report = modelprobe.run(probe_job("wan21-i2v-480p"), rig["ref"], rig["out"],
+                            fetch=rig["fetch"],
+                            load_pipeline=lambda local: fake_pipe(),
+                            torch=FakeTorch())
+    assert report["steps"] == "PIPELINE_DEFAULT"
+    assert report["guidance"] == 5.0
+    kept = contract.filter_output({"ok": True, **report})
+    assert kept["steps"] == "PIPELINE_DEFAULT"
+    assert kept["sampling_source"] == report["sampling_source"]
+
+
+def test_the_cited_knobs_reach_the_pipeline(rig):
+    pipe = fake_pipe()
+    modelprobe.run(probe_job("cogvideox-i2v"), rig["ref"], rig["out"],
+                   fetch=rig["fetch"], load_pipeline=lambda local: pipe,
+                   torch=FakeTorch())
+    assert pipe.called_with["num_inference_steps"] == 50
+    assert pipe.called_with["guidance_scale"] == 6.0
+
+
+# ------------------------------------------------- the batched pipeline output
+
+
+def test_a_batched_pipeline_output_is_unwrapped_to_one_clip():
+    """Every diffusers video pipeline answers with frames BATCHED — a list of
+    clips. Encoding the outer list writes a file nothing can play, and it does
+    it without raising."""
+    class Output:
+        frames = [["f0", "f1", "f2"]]
+
+    assert modelprobe._frames_of(Output()) == ["f0", "f1", "f2"]
+
+
+def test_a_plain_list_of_frames_passes_through():
+    assert modelprobe._frames_of(["f0", "f1"]) == ["f0", "f1"]
+
+
+def test_a_pipeline_that_returned_nothing_is_a_generation_failure(rig):
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                       fetch=rig["fetch"],
+                       load_pipeline=lambda local: fake_pipe(frames=[]),
+                       torch=FakeTorch())
+    assert stop.value.failure == "GENERATION_FAILURE"

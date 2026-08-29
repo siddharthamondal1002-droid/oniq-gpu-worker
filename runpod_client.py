@@ -494,12 +494,34 @@ def parse_endpoint(doc: dict) -> dict:
 # ---------------------------------------------------------------- serverless
 
 
-def submit_job(endpoint_id: str, job_input: dict):
-    """POST /run (async). Mutating — the spend path only."""
+def submit_job(endpoint_id: str, job_input: dict, policy: dict | None = None):
+    """POST /run (async). Mutating — the spend path only.
+
+    `policy` is a PER-JOB override and is sent only when a caller passes one.
+    The live endpoint carries executionTimeoutMs 600000 (read 2026-08-29),
+    which is right for production — a paid job whose checkpoint is already in
+    the image has no business running ten minutes — and far too short for a
+    benchmark that downloads a 44-118 GiB checkpoint before it starts.
+
+    Raising the ENDPOINT's timeout would change the spend bound of every
+    production job, which owner directive 2026-08-29 forbids. A per-job
+    policy changes one job. That is the whole reason it is here rather than a
+    PATCH, and it is the same fence `model` sits behind: only the probe path
+    ever passes one, and the contract admits it on no production op.
+
+    This field is NOT in rest.runpod.io's OpenAPI document, because /run
+    lives on the serverless host, which publishes none — so it is unverified
+    by schema and verified by outcome instead. That is safe here: an ignored
+    field leaves the 600s default in place, and a rejected body fails the
+    submit before a worker starts, which costs nothing.
+    """
+    body: dict = {"input": job_input}
+    if policy:
+        body["policy"] = policy
     status, raw = _request(
         f"{SERVERLESS_BASE}/{endpoint_id}/run",
         method="POST",
-        body={"input": job_input},
+        body=body,
     )
     if status != 200:
         raise RunPodApiError(f"submit_job -> {status}")

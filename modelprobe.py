@@ -55,6 +55,15 @@ DOWNLOAD_BUDGET_SECONDS = int(contract.PROBE_RUNTIME_CEILING_SECONDS * 0.55)
 # `dtype` is the precision to LOAD at, which is not the precision on disk.
 # Wan ships fp32; loading bf16 halves it, and that is the difference between
 # fitting this card and not.
+# SAMPLING SETTINGS ARE CITED, NEVER CHOSEN HERE.
+#
+# Read from each publisher's own model card at the PINNED revision on
+# 2026-08-29 by validation/probe_settings (a $0 registry read, re-runnable).
+# A row carries `steps`/`guidance` only where the card states one; where it
+# does not, the field is absent and the pipeline's own default stands, which
+# the report says explicitly. A 13B distilled checkpoint sampled at an
+# invented step count is not that model performing badly, it is the wrong
+# experiment — so nothing here is a preference.
 PROBE_MODELS: dict[str, dict] = {
     "ltx-13b": {
         "label": "LTX-Video 13B (distilled)",
@@ -76,6 +85,13 @@ PROBE_MODELS: dict[str, dict] = {
         "fps": 24,
         # Measured: transformer 24.29 + text_encoder 17.74 + vae 2.32.
         "download_gib": 44.36,
+        # Cited: the card's FIRST pass runs at 30 steps, then hands latents to
+        # a separate upsampler and a 10-step refine. This probe runs the base
+        # pass only — one pipeline, ONIQ's own canvas — so 30 is the figure
+        # that applies and the two-stage upscale is deliberately not measured.
+        # It states no guidance scale, so the pipeline's default stands.
+        "steps": 30,
+        "sampling_source": "model card, base LTXConditionPipeline call",
         # THE VAE PATTERNS ARE TWO EXACT FILENAMES, not vae/*. This
         # repository nests a SECOND COMPLETE COPY of itself under vae/ —
         # vae/transformer/, vae/text_encoder/ — 42.03 GiB of it, and
@@ -107,6 +123,10 @@ PROBE_MODELS: dict[str, dict] = {
         "frames": 81,
         "fps": 16,
         "download_gib": 83.89,
+        # Cited: the card's i2v call sets guidance_scale=5.0 and states NO
+        # step count, so the pipeline default stands and the report says so.
+        "guidance": 5.0,
+        "sampling_source": "model card, i2v example (no step count stated)",
         "allow": [
             "model_index.json", "transformer/*", "transformer_2/*",
             "text_encoder/*", "tokenizer/*", "scheduler/*", "vae/*",
@@ -129,6 +149,10 @@ PROBE_MODELS: dict[str, dict] = {
         # separately measured — the label shares a number with 2.1 and nothing
         # else.
         "download_gib": 117.52,
+        # Cited: the card's i2v call, verbatim.
+        "steps": 40,
+        "guidance": 3.5,
+        "sampling_source": "model card, i2v example",
         "allow": [
             "model_index.json", "transformer/*", "transformer_2/*",
             "text_encoder/*", "tokenizer/*", "scheduler/*", "vae/*",
@@ -151,6 +175,10 @@ PROBE_MODELS: dict[str, dict] = {
         "frames": 49,
         "fps": 8,
         "download_gib": 20.15,
+        # Cited: the card's i2v example, verbatim.
+        "steps": 50,
+        "guidance": 6.0,
+        "sampling_source": "model card, i2v example",
         "allow": [
             "model_index.json", "transformer/*", "text_encoder/*",
             "tokenizer/*", "scheduler/*", "vae/*",
@@ -418,6 +446,10 @@ def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
         "height": spec_row.get("height"),
         "frames": spec_row.get("frames"),
         "fps": spec_row.get("fps"),
+        "steps": spec_row.get("steps") or "PIPELINE_DEFAULT",
+        "guidance": spec_row.get("guidance") if spec_row.get("guidance") is not None
+                    else "PIPELINE_DEFAULT",
+        "sampling_source": spec_row.get("sampling_source") or "pipeline default",
         "failure": failure,
         "output_bytes": output_bytes,
         "total_wall_ms": phases.total_ms(),

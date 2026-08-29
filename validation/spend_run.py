@@ -460,10 +460,11 @@ def submit_and_wait(
     *,
     poll_s: int = 5,
     watch_s: int | None = None,
+    policy: dict | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
-    _, submitted = client.submit_job(endpoint_id, job_input)
+    _, submitted = client.submit_job(endpoint_id, job_input, policy=policy)
     job_id = submitted.get("id")
     if not job_id:
         raise SpendStop("submit-unparsed", "job id missing from submit response")
@@ -821,6 +822,19 @@ def contract_video_canvas() -> tuple:
     return (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
 
 
+def contract_probe_ceiling_ms() -> int:
+    """The benchmark's window, in the milliseconds RunPod's policy wants.
+
+    ONE source. If the worker's deadline and the provider's job policy came
+    from two numbers, whichever was smaller would kill the job and the other
+    would be a comment — and the measurement would be lost to a disagreement
+    nobody wrote down.
+    """
+    import contract
+
+    return contract.PROBE_RUNTIME_CEILING_SECONDS * 1000
+
+
 def verify_gpu_success(output) -> None:
     """Phase 14: HTTP 200 alone is insufficient, and so is each of these
     alone — all must hold."""
@@ -1031,6 +1045,15 @@ def one_job(
         # on no other op — a benchmark ROW id, never a repository or a path.
         payload["model"] = model
     watch_s = None
+    policy = None
+    if op == "model_probe":
+        # PER-JOB, probe only. The endpoint's own executionTimeoutMs is 600000
+        # and stays there: raising it would change the spend bound of every
+        # production job. This raises it for THIS job, to the probe ceiling the
+        # contract sets — the same window the worker's own deadline uses, so
+        # the two agree instead of one killing the other mid-measurement.
+        policy = {"executionTimeout": contract_probe_ceiling_ms()}
+        watch_s = contract_probe_ceiling_ms() // 1000 + 900
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
         # worker, so the harness must not send one either.
@@ -1053,6 +1076,7 @@ def one_job(
         facts["endpoint_id"],
         payload,
         watch_s=watch_s,
+        policy=policy,
         sleep=sleep,
         clock=clock,
     )
