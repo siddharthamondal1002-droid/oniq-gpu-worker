@@ -62,6 +62,11 @@ WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pth", ".pt")
 # torch_dtype as configs spell it, mapped to vram.py's vocabulary. Read rather
 # than assumed: Wan ships fp32 transformers, so treating every checkpoint as
 # bf16 overstates what a bf16 load actually costs by a factor of two.
+SAFETENSOR_DTYPES = {
+    "F64": "fp32", "F32": "fp32", "BF16": "bf16", "F16": "fp16",
+    "F8_E4M3": "fp8", "F8_E5M2": "fp8", "I8": "int8", "U8": "int8",
+}
+
 DTYPE_NAMES = {
     "float32": "fp32", "torch.float32": "fp32", "float": "fp32",
     "bfloat16": "bf16", "torch.bfloat16": "bf16",
@@ -349,6 +354,60 @@ def measure(repo: str, token, get=_get) -> dict:
         path for path in sizes if path.endswith("config.json")
     )
     return row
+
+
+def header_dtype(repo: str, revision: str, path: str, token,
+                 fetch=None) -> str | None:
+    """The dtype actually on disk, read out of the safetensors header.
+
+    Most diffusers component configs carry no `torch_dtype`, so the shipped
+    precision cannot be read from JSON — and it is not a detail. Wan ships
+    fp32 transformers; assuming bf16 on disk means a bf16 load is reported at
+    twice its real size, which is the difference between one card and two.
+
+    A safetensors file opens with a little-endian u64 header length followed
+    by that many bytes of JSON naming every tensor's dtype. A Range request
+    for the first 64 KiB is enough to read it, so this costs one partial
+    fetch per component rather than a download. The dtype reported is the one
+    the LARGEST tensor uses: headers routinely mix a few fp32 norms into an
+    otherwise bf16 checkpoint, and the bulk is what sets the bytes.
+    """
+    if not path.endswith(".safetensors"):
+        return None
+    url = RAW_API.format(repo=repo, revision=revision or "main", path=path)
+    raw = (fetch or _range_get)(url, token, 65536)
+    if not raw or len(raw) < 8:
+        return None
+    length = int.from_bytes(raw[:8], "little")
+    if length <= 0 or 8 + length > len(raw):
+        return None
+    try:
+        header = json.loads(raw[8:8 + length].decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    biggest, best = None, -1
+    for name, meta in header.items():
+        if name == "__metadata__" or not isinstance(meta, dict):
+            continue
+        shape = meta.get("shape") or []
+        size = 1
+        for dim in shape:
+            size *= dim if isinstance(dim, int) else 1
+        if size > best:
+            biggest, best = meta.get("dtype"), size
+    return SAFETENSOR_DTYPES.get(str(biggest or "").upper())
+
+
+def _range_get(url: str, token, nbytes: int):
+    request = urllib.request.Request(url)
+    request.add_header("Range", f"bytes=0-{nbytes - 1}")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            return resp.read()
+    except Exception:  # noqa: BLE001 — an unreadable header is not a failure
+        return None
 
 
 def fetch_config(repo: str, revision: str, path: str, token, get=_get) -> dict:

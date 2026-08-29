@@ -212,3 +212,66 @@ def test_token_is_never_echoed_into_the_url():
 
     mr.catalogue("Lightricks", "SECRET-TOKEN", get=get)
     assert "SECRET-TOKEN" not in seen["url"]
+
+
+# ------------------------------------------------ the dtype actually on disk
+
+
+def _header(tensors):
+    """A minimal safetensors prefix: u64 header length, then the JSON."""
+    import json as _json
+    import struct
+    blob = _json.dumps(tensors).encode()
+    return struct.pack("<Q", len(blob)) + blob
+
+
+def test_header_dtype_reads_the_precision_from_the_file_itself():
+    """Component configs mostly carry no torch_dtype, and the shipped
+    precision is not a detail: Wan ships fp32 transformers, so assuming bf16
+    reports a bf16 load at twice its real size."""
+    blob = _header({"w": {"dtype": "F32", "shape": [4096, 4096]}})
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: blob) == "fp32"
+
+
+def test_header_dtype_follows_the_largest_tensor_not_the_first():
+    """Checkpoints routinely mix a few fp32 norms into a bf16 model. The bulk
+    is what sets the bytes."""
+    blob = _header({
+        "norm": {"dtype": "F32", "shape": [16]},
+        "w": {"dtype": "BF16", "shape": [4096, 4096]},
+    })
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: blob) == "bf16"
+
+
+def test_header_dtype_recognises_an_fp8_checkpoint():
+    blob = _header({"w": {"dtype": "F8_E4M3", "shape": [4096, 4096]}})
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: blob) == "fp8"
+
+
+def test_header_dtype_declines_rather_than_guesses():
+    """Every failure path returns None so the caller keeps its own default
+    rather than inheriting a fabricated precision."""
+    blob = _header({"w": {"dtype": "F32", "shape": [8]}})
+    assert mr.header_dtype("r", "rev", "t/x.bin", None, fetch=lambda *a: blob) is None
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: None) is None
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: b"\x00" * 4) is None
+
+
+def test_header_dtype_refuses_a_header_longer_than_it_fetched():
+    """A truncated read must not be parsed as if it were complete."""
+    import struct
+    assert mr.header_dtype(
+        "r", "rev", "t/x.safetensors", None,
+        fetch=lambda *a: struct.pack("<Q", 10**9) + b"{}",
+    ) is None
+
+
+def test_header_dtype_survives_a_metadata_only_header():
+    blob = _header({"__metadata__": {"format": "pt"}})
+    assert mr.header_dtype("r", "rev", "t/x.safetensors", None,
+                           fetch=lambda *a: blob) is None

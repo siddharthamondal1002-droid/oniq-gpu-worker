@@ -301,3 +301,38 @@ def test_an_fp32_checkpoint_halves_when_loaded_bf16():
     ))
     as_published = next(p for p in plans if p["label"] == "as published")
     assert as_published["resident_weight_bytes"] == 30 * vram.GIB
+
+
+def test_ltx_spatial_ratio_includes_the_vaes_own_patchify():
+    """LTX compresses 32x spatially: three halvings AND a 4x patch inside the
+    VAE. Deriving from the stage list alone gives 8 and understates the token
+    count — and therefore the working set — fourfold."""
+    arch, notes = mb.arch_from_configs(
+        {"hidden_size": 2048, "num_layers": 28},
+        {
+            "block_out_channels": [128, 256, 512, 512],
+            "spatio_temporal_scaling": [True, True, True, False],
+            "patch_size": 4,
+        },
+    )
+    assert arch.vae_spatial == 32
+    assert arch.vae_temporal == 8
+    assert any("patch 4" in n for n in notes)
+
+
+def test_config_path_follows_the_chosen_variant():
+    """Reading the first transformer config alphabetically would describe a
+    1080p super-resolution model while the measured bytes are the 480p I2V
+    one."""
+    paths = [
+        "transformer/1080p_sr_distilled/config.json",
+        "transformer/480p_i2v/config.json",
+        "vae/config.json",
+    ]
+    tpath, _ = mb.pick_config_paths(paths, "480p_i2v")
+    assert tpath == "transformer/480p_i2v/config.json"
+
+
+def test_config_path_prefers_the_component_root_when_no_variant_is_named():
+    paths = ["transformer/a/config.json", "transformer/config.json"]
+    assert mb.pick_config_paths(paths)[0] == "transformer/config.json"

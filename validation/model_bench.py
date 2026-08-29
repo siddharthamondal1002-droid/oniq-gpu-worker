@@ -66,7 +66,13 @@ VAE_WIDTH_KEYS = ("block_out_channels", "base_channels", "dim", "base_dim")
 VAE_STAGE_KEYS = ("block_out_channels", "dim_mult", "down_block_types")
 # Which of those halvings are also temporal. Wan spells it `temperal_downsample`
 # — the typo is in the published config, so it is matched as published.
-VAE_TEMPORAL_STAGE_KEYS = ("temperal_downsample", "temporal_downsample")
+VAE_TEMPORAL_STAGE_KEYS = (
+    "temperal_downsample", "temporal_downsample", "spatio_temporal_scaling",
+)
+# LTX compresses 32x spatially: three halvings AND a 4x patchify inside the
+# VAE itself. Deriving from the stage list alone gives 8 and understates the
+# token count fourfold.
+VAE_PATCH_KEYS = ("patch_size",)
 
 
 def _first(cfg: dict, keys) -> tuple[object, str | None]:
@@ -135,11 +141,18 @@ def arch_from_configs(transformer: dict, vae: dict) -> tuple[Arch | None, list[s
     if not vae_spatial:
         # Derived: one halving per decoder stage after the first. Every VAE
         # here publishes its stage list even when it publishes no ratio.
-        stages, sk = _first(vae, VAE_STAGE_KEYS)
-        if isinstance(stages, (list, tuple)) and len(stages) > 1:
-            vae_spatial = 2 ** (len(stages) - 1)
-            notes.append(f"vae_spatial={vae_spatial} derived from {sk!r} "
-                         f"({len(stages)} stages)")
+        scaling = vae.get("spatio_temporal_scaling")
+        vae_patch = _as_int(_first(vae, VAE_PATCH_KEYS)[0]) or 1
+        if isinstance(scaling, (list, tuple)):
+            vae_spatial = 2 ** sum(1 for f in scaling if f) * vae_patch
+            notes.append(f"vae_spatial={vae_spatial} derived from "
+                         f"'spatio_temporal_scaling' x patch {vae_patch}")
+        else:
+            stages, sk = _first(vae, VAE_STAGE_KEYS)
+            if isinstance(stages, (list, tuple)) and len(stages) > 1:
+                vae_spatial = 2 ** (len(stages) - 1) * vae_patch
+                notes.append(f"vae_spatial={vae_spatial} derived from {sk!r} "
+                             f"({len(stages)} stages, patch {vae_patch})")
     elif vae_spatial:
         notes.append(f"vae_spatial={vae_spatial}")
 
@@ -194,11 +207,28 @@ def arch_from_configs(transformer: dict, vae: dict) -> tuple[Arch | None, list[s
     )
 
 
-def pick_config_paths(paths: list[str]) -> tuple[str | None, str | None]:
-    """The transformer's and VAE's config.json out of the repository listing."""
-    transformer = next(
-        (p for p in paths if p.startswith("transformer/")), None
-    )
+def pick_config_paths(paths: list[str],
+                      variant: str | None = None) -> tuple[str | None, str | None]:
+    """The transformer's and VAE's config.json out of the repository listing.
+
+    Where a repository ships several complete checkpoints, the VARIANT decides
+    which config describes the weights being measured. HunyuanVideo-1.5 keeps
+    eleven under transformer/, and reading the first one alphabetically would
+    describe a 1080p super-resolution model while the bytes measured are the
+    480p I2V one.
+    """
+    candidates = [p for p in paths if p.startswith("transformer/")]
+    transformer = None
+    if variant:
+        transformer = next(
+            (p for p in candidates if p.startswith(f"transformer/{variant}/")), None
+        )
+    if not transformer:
+        # Prefer a config sitting directly in the component directory over one
+        # nested inside a variant we did not choose.
+        transformer = next(
+            (p for p in candidates if p.count("/") == 1), None
+        ) or (candidates[0] if candidates else None)
     vae = next((p for p in paths if p.startswith("vae/")), None)
     return transformer, vae
 
@@ -308,20 +338,30 @@ def gather(token, get=mr._get) -> list[mr.Row]:
         # ships an fp32 transformer beside a bf16 text encoder, and assuming
         # one dtype for the repository misreports both.
         dtypes: dict[str, str] = {}
+        role_files = row.measurement.get("role_files") or {}
         for role in roles:
             try:
                 cfg = mr.fetch_config(
                     row.repo, revision, f"{role}/config.json", token, get
                 )
+                named = str(cfg.get("torch_dtype") or "").lower()
+                if named:
+                    dtypes[role] = mr.DTYPE_NAMES.get(named, "bf16")
+                    continue
             except Exception:  # noqa: BLE001 — absent config is not an error
-                continue
-            named = str(cfg.get("torch_dtype") or "").lower()
-            if named:
-                dtypes[role] = mr.DTYPE_NAMES.get(named, "bf16")
+                pass
+            # Most component configs carry no torch_dtype, so fall through to
+            # the file itself: a safetensors header states every tensor's
+            # dtype and a 64 KiB range request is enough to read it.
+            files = role_files.get(role) or []
+            if files:
+                probed = mr.header_dtype(row.repo, revision, files[0][0], token)
+                if probed:
+                    dtypes[role] = probed
 
         tcfg, vcfg = {}, {}
         paths = row.measurement.get("config_paths") or []
-        tpath, vpath = pick_config_paths(paths)
+        tpath, vpath = pick_config_paths(paths, candidate.variant)
         for path, sink in ((tpath, "t"), (vpath, "v")):
             if not path:
                 continue
