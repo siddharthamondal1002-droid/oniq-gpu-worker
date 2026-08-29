@@ -37,8 +37,16 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-env, ltx-discover]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-env, ltx-discover, frames-pull]
         default: discover
+      public_base:
+        description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
+        type: string
+        default: ""
+      frame_keys:
+        description: "frames-pull: comma-separated R2 object keys to fetch frames from, e.g. validation/out/ltx-001.mp4. Read-only, $0 — these are objects that ALREADY exist; no job is submitted."
+        type: string
+        default: ""
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
         type: string
@@ -166,6 +174,50 @@ jobs:
           name: discovery
           path: discovery.json
           if-no-files-found: ignore
+
+  frames_pull:
+    # THE FREE HALF OF THE PROOF, and it needs no generation at all.
+    #
+    # Objects earlier canaries already wrote are still in the bucket. This
+    # job pulls frames out of them over the PUBLIC read base, which
+    # exercises the entire chain a paid canary depends on — base
+    # validation, URL construction, download, artifact verification,
+    # ffmpeg extraction, artifact upload — against real LTX output, for
+    # nothing.
+    #
+    # IT CANNOT SPEND, BY CONSTRUCTION: no RUNPOD_API_KEY is in scope
+    # here, no gpu-spend environment, and frame_pull names no endpoint.
+    # There is nothing in this job that could submit a job even by
+    # mistake.
+    name: "frame pull - read-only, $0"
+    if: inputs.mode == 'frames-pull'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: "Frames from objects that already exist"
+        # Both values travel as ENVIRONMENT, never interpolated into the
+        # shell: a dispatch input pasted straight into a `run:` script is
+        # a command injection, and the fact that only the owner can
+        # dispatch is not a reason to write it that way.
+        env:
+          R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
+          FRAME_KEYS: ${{ inputs.frame_keys }}
+        run: python -m validation.frame_pull keys
+      - name: "The frames, for inspection"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ltx-frames
+          path: frames/
+          if-no-files-found: warn
+          retention-days: 30
 
   template_probe:
     name: "template probe - read-only, $0"
@@ -444,7 +496,11 @@ jobs:
       - name: "Frames from the clips this run actually produced"
         if: always()
         env:
-          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          # The dispatch input wins over the variable, the same way
+          # endpoint_id and test_input_key already do — so a run is never
+          # blocked on a repository variable being wrong, and a value can
+          # be corrected without an owner visiting the settings page.
+          R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
         run: python -m validation.frame_pull
 
       - name: "The frames, for inspection"

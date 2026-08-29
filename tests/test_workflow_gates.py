@@ -1,6 +1,7 @@
 """The six spend gates, verified by parsing the files — not by reading
 them. A gate that only exists in prose is not a gate."""
 
+import json
 import os
 
 import yaml
@@ -382,6 +383,12 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # Dockerfile names a checkpoint which does not exist. Read-only,
         # and it picks nothing.
         "ltx-discover",
+        # frames-pull joined 2026-08-29 (owner directive: judge LTX from
+        # frames, not metadata). It READS objects that already exist over
+        # the bucket's public base and cuts stills out of them. It holds
+        # no RunPod credential at all, so it is a $0 mode that cannot
+        # become a paid one by mistake.
+        "frames-pull",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -606,3 +613,30 @@ def test_gate7_the_frame_puller_never_submits_a_job():
     src = open(path, encoding="utf-8").read()
     for forbidden in ("runpod", "RUNPOD_API_KEY", "/run", "submit"):
         assert forbidden not in src, f"frame_pull references {forbidden!r}"
+
+
+def test_gate7_the_free_frame_pull_job_holds_no_runpod_credential():
+    # It reads objects that already exist. Giving it the key would make a
+    # $0 job one mistake away from a paid one.
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["frames_pull"]
+    assert "RUNPOD_API_KEY" not in json.dumps(job)
+    assert "environment" not in job, "gpu-spend is for jobs that can spend"
+
+
+def test_gate7_dispatch_inputs_never_reach_a_shell_directly():
+    # A workflow_dispatch input interpolated into a `run:` script is a
+    # command injection. public_base and frame_keys travel as env.
+    doc, _ = _load("gpu-validation.yml")
+    for job in doc["jobs"].values():
+        for step in job.get("steps", []):
+            script = step.get("run") or ""
+            for name in ("inputs.public_base", "inputs.frame_keys"):
+                assert name not in script, f"{name} interpolated into a run: script"
+
+
+def test_gate7_the_read_base_input_overrides_the_variable_everywhere():
+    _, raw = _load("gpu-validation.yml")
+    assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 2, (
+        "both the spend job and the free frame pull must honour the override"
+    )

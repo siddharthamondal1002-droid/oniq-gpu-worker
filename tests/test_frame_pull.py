@@ -31,8 +31,9 @@ def _mp4(size: int = 64) -> bytes:
 
 
 class _Result:
-    def __init__(self, returncode: int = 0):
+    def __init__(self, returncode: int = 0, stdout: str = ""):
         self.returncode = returncode
+        self.stdout = stdout
 
 
 # ------------------------------------------------------------ the base
@@ -203,7 +204,7 @@ def test_a_good_clip_yields_its_frames_and_a_sheet(tmp_path):
         BASE,
         out_dir=str(tmp_path),
         fetch=lambda url: data,
-        run=lambda args: (calls.append(args), _Result(0))[1],
+        run=lambda args, **kw: (calls.append(args), _Result(0))[1],
     )
     assert "error" not in report
     assert report["bytes"] == 128
@@ -220,7 +221,7 @@ def test_one_unfetchable_clip_does_not_lose_the_others(tmp_path):
         BASE,
         out_dir=str(tmp_path),
         fetch=lambda url: (_ for _ in ()).throw(OSError("connection reset")),
-        run=lambda args: _Result(0),
+        run=lambda args, **kw: _Result(0),
     )
     assert report["error"] == "fetch-failed:OSError"
     assert report["artifacts"] == []
@@ -233,7 +234,7 @@ def test_a_wrong_sized_download_is_reported_not_cut_into_frames(tmp_path):
         BASE,
         out_dir=str(tmp_path),
         fetch=lambda url: _mp4(64),
-        run=lambda args: (ran.append(args), _Result(0))[1],
+        run=lambda args, **kw: (ran.append(args), _Result(0))[1],
     )
     assert report["error"] == "artifact-size-mismatch"
     assert ran == [], "nothing is extracted from bytes that failed verification"
@@ -247,7 +248,7 @@ def test_the_fetch_url_is_built_from_the_public_base_and_the_key(tmp_path):
         BASE + "/",
         out_dir=str(tmp_path),
         fetch=lambda url: (seen.append(url), _mp4(64))[1],
-        run=lambda args: _Result(0),
+        run=lambda args, **kw: _Result(0),
     )
     assert seen == [BASE + "/validation/out/d.mp4"]
 
@@ -259,7 +260,7 @@ def test_a_failed_ffmpeg_call_drops_that_frame_and_keeps_the_rest(tmp_path):
         BASE,
         out_dir=str(tmp_path),
         fetch=lambda url: _mp4(64),
-        run=lambda args: _Result(1),
+        run=lambda args, **kw: _Result(1),
     )
     assert report["artifacts"] == ["x.mp4"], "only the clip itself survives"
     assert "error" not in report
@@ -351,3 +352,70 @@ def test_the_summary_is_written_where_the_run_page_reads_it(tmp_path, monkeypatc
 def test_no_summary_path_is_simply_no_summary(monkeypatch):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     frame_pull.write_summary([], [])  # must not raise
+
+
+# ------------------------------------------- keys named directly ($0 path)
+
+
+def test_keys_become_clips_named_after_the_object():
+    clips = frame_pull.clips_from_keys(
+        " validation/out/ltx-001.mp4 , validation/video-test/ltx-001.mp4 ,, "
+    )
+    assert [c["output_key"] for c in clips] == [
+        "validation/out/ltx-001.mp4",
+        "validation/video-test/ltx-001.mp4",
+    ]
+    assert clips[0]["scene"] == "ltx-001"
+    # No worker report stands behind a hand-named key, so no size claim
+    # is invented for it — the mp4 magic is still checked.
+    assert "output_bytes" not in clips[0]
+    assert "video_seconds" not in clips[0]
+
+
+def test_no_keys_is_a_quiet_success(monkeypatch, capsys):
+    monkeypatch.setenv("FRAME_KEYS", "")
+    assert frame_pull.main(["keys"]) == 0
+    assert "names no object" in capsys.readouterr().out
+
+
+def test_a_duration_with_no_worker_report_is_measured_not_assumed():
+    probed = frame_pull.probe_seconds(
+        "clip.mp4", run=lambda args, **kw: _Result(0, "4.041667\n")
+    )
+    assert probed == pytest.approx(4.041667)
+    assert "ffprobe" in frame_pull.ffprobe_args("clip.mp4")[0]
+
+
+@pytest.mark.parametrize(
+    "result", [_Result(1, "4.0"), _Result(0, ""), _Result(0, "N/A"), _Result(0, "0")]
+)
+def test_an_unmeasurable_duration_is_none_never_a_guess(result):
+    assert frame_pull.probe_seconds("clip.mp4", run=lambda args, **kw: result) is None
+
+
+def test_a_hand_named_clip_is_probed_then_cut(tmp_path):
+    seen = []
+
+    def fake_run(args, **kw):
+        seen.append(args[0])
+        if args[0] == "ffprobe":
+            return _Result(0, "4.04\n")
+        return _Result(0)
+
+    report = frame_pull.pull_clip(
+        frame_pull.clips_from_keys("validation/out/ltx-001.mp4")[0],
+        BASE,
+        out_dir=str(tmp_path),
+        fetch=lambda url: _mp4(256),
+        run=fake_run,
+    )
+    assert report["measured_seconds"] == pytest.approx(4.04)
+    assert seen[0] == "ffprobe", "the duration is measured before frames are cut"
+    assert len(report["artifacts"]) == 8
+
+
+def test_a_flag_shaped_base_says_so_instead_of_talking_about_schemes():
+    with pytest.raises(frame_pull.FramePullError) as exc:
+        frame_pull.normalise_base("on")
+    assert exc.value.code == "base-not-a-url"
+    assert "not an on/off flag" in exc.value.message

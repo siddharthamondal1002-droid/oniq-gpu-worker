@@ -46,6 +46,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,6 +98,16 @@ def normalise_base(raw: str) -> str:
             "R2_PUBLIC_BASE_URL is not set; frames cannot be retrieved",
         )
     parts = urllib.parse.urlsplit(base)
+    if not parts.scheme:
+        # MEASURED 2026-08-29: this variable was first set to the literal
+        # string "on", the shape the three motion routing flags take. A
+        # flag-shaped value is the likely mistake here, so it gets its own
+        # message rather than the confusing "scheme '' is not https".
+        raise FramePullError(
+            "base-not-a-url",
+            f"{base!r} is not a URL — this is a read base like "
+            "https://pub-<id>.r2.dev, not an on/off flag",
+        )
     if parts.scheme != "https":
         raise FramePullError("base-not-https", f"scheme {parts.scheme!r} is not https")
     if not parts.netloc:
@@ -308,7 +319,14 @@ def pull_clip(
     report["bytes"] = len(data)
     report["artifacts"].append(os.path.basename(local))
 
-    for index, when in enumerate(frame_times(clip.get("video_seconds")), start=1):
+    # The worker's reported duration when there is one; otherwise measure
+    # it. A key named by hand carries no report, and guessing a duration
+    # would sample the wrong moments of somebody else's clip.
+    seconds = clip.get("video_seconds")
+    if not seconds:
+        seconds = probe_seconds(local, run=run)
+        report["measured_seconds"] = seconds
+    for index, when in enumerate(frame_times(seconds), start=1):
         dest = os.path.join(out_dir, f"{stem}-f{index}-{when}s.png")
         if run(ffmpeg_frame_args(local, when, dest)).returncode == 0:
             report["artifacts"].append(os.path.basename(dest))
@@ -323,8 +341,59 @@ def _write_file(path: str, data: bytes) -> None:
         handle.write(data)
 
 
+def ffprobe_args(src: str) -> list:
+    return [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", src,
+    ]
+
+
+def probe_seconds(path: str, *, run=subprocess.run):
+    """A clip's real duration, measured. Used when the manifest does not
+    carry one — a key named by hand has no worker report behind it."""
+    try:
+        done = run(ffprobe_args(path), capture_output=True, text=True)
+    except OSError:
+        return None
+    if getattr(done, "returncode", 1) != 0:
+        return None
+    try:
+        seconds = float((done.stdout or "").strip())
+    except ValueError:
+        return None
+    return seconds if seconds > 0 else None
+
+
+def clips_from_keys(raw: str) -> list:
+    """A manifest built from object keys named directly.
+
+    THE FREE HALF OF THE PROOF. Objects a previous run already generated
+    are still in the bucket, and pulling frames out of them costs nothing
+    — no endpoint, no job, no GPU second. It exercises exactly the chain
+    a paid canary needs (base -> URL -> download -> verify -> ffmpeg ->
+    artifact) against real LTX output, which is the difference between
+    believing the plumbing works and having seen it work.
+
+    No output_bytes and no video_seconds: a key named by hand has no
+    worker report behind it, so the size cross-check is skipped (the mp4
+    magic still is not) and the duration is MEASURED with ffprobe rather
+    than assumed.
+    """
+    clips = []
+    for key in [k.strip() for k in (raw or "").split(",") if k.strip()]:
+        clips.append({"scene": key.rsplit("/", 1)[-1].rsplit(".", 1)[0], "output_key": key})
+    return clips
+
+
 def main(argv=None) -> int:
-    clips = read_manifest()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "keys":
+        clips = clips_from_keys(os.environ.get("FRAME_KEYS", ""))
+        if not clips:
+            print("frame-pull: FRAME_KEYS names no object — nothing to fetch")
+            return 0
+    else:
+        clips = read_manifest()
     if not clips:
         print("frame-pull: no clips in this run's manifest — nothing to fetch")
         return 0
