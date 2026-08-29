@@ -300,3 +300,40 @@ def test_production_ops_are_unchanged_by_the_new_op():
         "params": {"prompt": "x"},
     })
     assert "model" not in video
+
+
+# ------------------------------------------- the report actually gets returned
+
+
+def test_every_field_the_probe_measures_survives_filter_output(rig):
+    """filter_output drops anything unlisted, so a measurement missing from
+    the whitelist is a measurement the worker takes, pays for, and throws
+    away. This walks the real report against the real filter."""
+    report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+    dropped = set(report) - set(contract.OUTPUT_WHITELIST)
+    assert not dropped, f"these measurements would be discarded: {sorted(dropped)}"
+
+
+def test_a_failed_probe_also_survives_the_filter():
+    """A refusal carries its own evidence — which stage, and why."""
+    report = modelprobe.probe_report(
+        "wan22-i2v-a14b", modelprobe.PROBE_MODELS["wan22-i2v-a14b"],
+        modelprobe.Phases(), before={}, peaks={}, failure="VRAM_OOM",
+        detail="CUDA out of memory",
+    )
+    dropped = set(report) - set(contract.OUTPUT_WHITELIST)
+    assert not dropped, sorted(dropped)
+    assert report["failure"] == "VRAM_OOM"
+    assert report["detail"]
+
+
+def test_the_worker_reports_the_disk_it_actually_has(rig, monkeypatch):
+    """The template asks for 200 GB; the owner's instruction is not to trust
+    that nominal figure. This is read from the running container."""
+    monkeypatch.setattr(modelprobe, "free_disk_bytes", lambda p="/tmp": 150 * 1024**3)
+    monkeypatch.setattr(modelprobe, "total_disk_bytes", lambda p="/tmp": 200 * 1024**3)
+    report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+    assert report["disk_free_bytes"] == 150 * 1024**3
+    assert report["disk_total_bytes"] == 200 * 1024**3

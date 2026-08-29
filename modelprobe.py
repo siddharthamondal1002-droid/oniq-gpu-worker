@@ -249,6 +249,16 @@ def free_disk_bytes(path: str = "/tmp") -> int:
     return stat.f_bavail * stat.f_frsize
 
 
+def total_disk_bytes(path: str = "/tmp") -> int:
+    """What the worker ACTUALLY has, not what the template asked for.
+
+    The template requests 200 GB; the owner's instruction is not to trust
+    that nominal figure. This is the number the running container reports.
+    """
+    stat = os.statvfs(path)
+    return stat.f_blocks * stat.f_frsize
+
+
 def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
                  before: dict, peaks: dict, failure: str,
                  output_bytes: int = 0, detail: str = "") -> dict:
@@ -309,7 +319,9 @@ def run(job: dict, input_path: str, output_path: str,
     # DISK FIRST. Cheapest possible refusal, and it distinguishes "this card
     # cannot hold the model" from "this worker had nowhere to put it" — two
     # findings that would otherwise both arrive as a failed probe.
-    free = free_disk_bytes(PROBE_CACHE if os.path.isdir(PROBE_CACHE) else "/tmp")
+    where = PROBE_CACHE if os.path.isdir(PROBE_CACHE) else "/tmp"
+    free = free_disk_bytes(where)
+    disk = {"disk_free_bytes": free, "disk_total_bytes": total_disk_bytes(where)}
     if not fits_disk(model_key, free):
         raise ProbeStop(
             "LOAD_FAILED",
@@ -350,11 +362,13 @@ def run(job: dict, input_path: str, output_path: str,
     if size <= 0:
         raise ProbeStop("ARTIFACT_FAILURE", "encoder produced no bytes")
 
-    return probe_report(
+    report = probe_report(
         model_key, spec_row, phases,
         before=before, peaks=cuda_peaks(torch),
         failure="SUCCESS", output_bytes=size,
     )
+    report.update(disk)
+    return report
 
 
 def _load_reference(path: str):  # pragma: no cover - thin PIL wrapper

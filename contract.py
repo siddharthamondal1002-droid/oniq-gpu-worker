@@ -173,6 +173,34 @@ OUTPUT_WHITELIST = frozenset(
         # watermark evidence — whether the mark was actually burned, so the
         # application can fail closed when entitlement and artifact disagree
         "watermarked",
+        # model_probe evidence — owner directive 2026-08-29. EVERY field the
+        # benchmark asks for, because filter_output drops anything unlisted
+        # and a probe whose measurements were silently discarded would have
+        # cost a rented GPU and returned nothing. test_modelprobe walks the
+        # report against this set so the two cannot drift apart.
+        "label",
+        "repo",
+        "revision",
+        "licence",
+        "dtype",
+        "offload",
+        "failure",
+        "detail",
+        "total_wall_ms",
+        "download_ms",
+        "conditioning_load_ms",
+        # VRAM read from the device, before and at peak. Separate from
+        # vram_peak_mb above: those are the production video fields, and a
+        # benchmark that reused them would be comparing rounded megabytes.
+        "vram_total_bytes",
+        "vram_before_allocated_bytes",
+        "vram_before_reserved_bytes",
+        "peak_allocated_bytes",
+        "peak_reserved_bytes",
+        # Disk, because "the model did not fit on the worker" and "the model
+        # does not work" are different findings.
+        "disk_free_bytes",
+        "disk_total_bytes",
         # video_concat evidence
         "segments",
         "concat_ms",
