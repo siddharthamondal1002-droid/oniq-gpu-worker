@@ -469,6 +469,11 @@ jobs:
           python-version: "3.11"
       - name: "Measure all nine candidates, project the VRAM matrix"
         run: python -m validation.model_bench
+      - name: "What each candidate's PUBLISHER says to sample it with"
+        # $0 and read-only. A step count that is not in one of these
+        # citations does not get written into a probe row: an invented
+        # number would make the benchmark a measurement of the invention.
+        run: python -m validation.probe_settings
       - name: "Keep the measured matrix"
         if: always()
         uses: actions/upload-artifact@v4

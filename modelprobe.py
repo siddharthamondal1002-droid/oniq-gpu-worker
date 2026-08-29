@@ -38,6 +38,16 @@ import contract
 # production checkpoints it runs beside.
 PROBE_CACHE = "/tmp/probe-models"
 
+# How much of the job's window the FETCH may take before the probe gives up.
+#
+# The handler's ceiling covers the whole job; this covers the download alone,
+# and it is smaller on purpose. A fetch allowed to run to the job ceiling
+# leaves nothing for the load and the generation, so it would spend the entire
+# rental and still have no clip — the most expensive way to learn nothing.
+# Stopping here instead converts an impossible download into a MEASUREMENT:
+# bytes landed, seconds spent, and the rate those imply for the rest.
+DOWNLOAD_BUDGET_SECONDS = int(contract.PROBE_RUNTIME_CEILING_SECONDS * 0.55)
+
 # Every candidate the owner authorised, pinned. The revision is not decoration:
 # a repository name names a moving branch, and the licence recorded here is the
 # licence AT THIS COMMIT — which is the only form of that claim that stays true.
@@ -163,6 +173,7 @@ NOT_EVALUATED = {
 # completed is never a statement about what it produced.
 FAILURES = (
     "LOAD_FAILED",
+    "DOWNLOAD_TIMEOUT",
     "VRAM_OOM",
     "CUDA_FAILURE",
     "MODEL_ERROR",
@@ -312,6 +323,78 @@ def total_disk_bytes(path: str = "/tmp") -> int:
     return stat.f_blocks * stat.f_frsize
 
 
+def dir_bytes(path: str) -> int:
+    """Bytes actually on disk under a directory. Follows no symlinks, so a
+    huggingface cache that hardlinks into a blob store is counted once."""
+    total = 0
+    seen: set = set()
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            full = os.path.join(root, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            if st.st_ino and st.st_ino in seen:
+                continue
+            seen.add(st.st_ino)
+            total += st.st_size
+    return total
+
+
+def fetch_within_budget(fetch, measure, budget_s: int, *,
+                        clock=time.monotonic, sleeper=time.sleep,
+                        poll_s: float = 5.0, spawn=None):
+    """Run the checkpoint download, and give up at the budget with numbers.
+
+    huggingface_hub offers no whole-snapshot timeout, so the fetch runs on a
+    worker thread and this polls the clock. On overrun the thread is
+    ABANDONED rather than joined: the job is ending either way, the container
+    is reclaimed with it, and waiting for a download that has already proved
+    too slow would spend the rest of the window to change nothing.
+
+    What comes back on overrun is the finding: how many bytes landed and how
+    long they took. A candidate that cannot be fetched here is a real result
+    about running this model on this worker, and it is only a result if the
+    rate is measured rather than guessed.
+    """
+    import threading
+
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = fetch()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    if spawn is None:  # pragma: no cover - the real thread
+        thread = threading.Thread(target=target, daemon=True)
+        thread.start()
+        spawned = thread
+    else:
+        spawned = spawn(target)
+
+    began = clock()
+    while True:
+        if "value" in box or "error" in box:
+            break
+        if clock() - began >= budget_s:
+            landed = measure()
+            elapsed = max(clock() - began, 1e-9)
+            rate = landed / elapsed / (1024 * 1024)
+            raise ProbeStop(
+                "DOWNLOAD_TIMEOUT",
+                f"{landed / 1024**3:.2f}GiB fetched in {elapsed:.0f}s "
+                f"({rate:.1f} MiB/s) — the budget of {budget_s}s expired with "
+                "the checkpoint incomplete, so no GPU time was spent on it",
+            )
+        sleeper(poll_s)
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
                  before: dict, peaks: dict, failure: str,
                  output_bytes: int = 0, detail: str = "",
@@ -358,12 +441,18 @@ def probe_report(model_key: str, spec_row: dict, phases: Phases, *,
 
 
 def run(job: dict, input_path: str, output_path: str,
-        load_pipeline=None, torch=None) -> dict:
+        load_pipeline=None, torch=None, fetch=None) -> dict:
     """One probe. Downloads, loads, conditions, generates, encodes, measures.
 
-    `load_pipeline` and `torch` are injectable for the CPU test rig, the same
-    seam videogen uses: everything here except the CUDA pass itself is
-    exercised without a GPU.
+    THE DOWNLOAD IS ITS OWN PHASE. Owner directive 2026-08-29: "do not hide
+    cold-start cost — Wan weight-loading time must be explicitly reported."
+    Fetching 117.52 GiB and building a pipeline out of it are two different
+    costs with two different fixes, and a single `model_load` number would
+    report the network as the model.
+
+    `fetch`, `load_pipeline` and `torch` are injectable for the CPU test rig,
+    the same seam videogen uses: everything here except the CUDA pass itself
+    is exercised without a GPU.
     """
     model_key = job.get("model")
     spec_row = spec(model_key)
@@ -389,11 +478,26 @@ def run(job: dict, input_path: str, output_path: str,
             f"{free / 1024**3:.1f}GiB free — no download attempted",
         )
 
+    if fetch is None:  # pragma: no cover - real path only
+        fetch = _real_fetch(spec_row)
     if load_pipeline is None:  # pragma: no cover - real path only
         load_pipeline = _real_loader(spec_row)
 
+    cache_dir = _cache_dir(spec_row)
     try:
-        pipe = phases.time("model_load", lambda: load_pipeline())
+        local = phases.time("download", lambda: fetch_within_budget(
+            fetch,
+            lambda: dir_bytes(cache_dir),
+            DOWNLOAD_BUDGET_SECONDS,
+        ))
+    except ProbeStop:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ProbeStop("LOAD_FAILED", f"{type(exc).__name__}: {exc}") from exc
+    disk["download_bytes"] = dir_bytes(cache_dir)
+
+    try:
+        pipe = phases.time("model_load", lambda: load_pipeline(local))
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop(classify(exc), f"{type(exc).__name__}: {exc}") from exc
 
@@ -403,15 +507,20 @@ def run(job: dict, input_path: str, output_path: str,
         raise ProbeStop("CONDITIONING_FAILURE", f"{type(exc).__name__}: {exc}") from exc
 
     try:
-        frames = phases.time("inference", lambda: pipe(
+        result = phases.time("inference", lambda: pipe(
             image=image,
             prompt=job["params"]["prompt"],
             width=spec_row["width"],
             height=spec_row["height"],
             num_frames=spec_row["frames"],
+            **_sampling(spec_row),
         ))
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop(classify(exc), f"{type(exc).__name__}: {exc}") from exc
+
+    frames = _frames_of(result)
+    if not frames:
+        raise ProbeStop("GENERATION_FAILURE", "the pipeline returned no frames")
 
     try:
         phases.time("encode", lambda: _encode(frames, output_path, spec_row["fps"]))
@@ -438,36 +547,98 @@ def _load_reference(path: str):  # pragma: no cover - thin PIL wrapper
     return Image.open(path).convert("RGB")
 
 
+def _frames_of(result):
+    """The frames a diffusers video pipeline actually returned.
+
+    Every video pipeline here answers with an output object whose `frames`
+    is BATCHED — a list of clips, one per prompt. Treating that object, or
+    the outer list, as the frame sequence is the failure videogen already
+    learned: it encodes without error and writes a file nothing can play.
+    A plain list passes through, which is what the CPU rig hands over.
+    """
+    frames = getattr(result, "frames", result)
+    if frames is None:
+        return []
+    first = next(iter(frames), None) if len(frames) else None
+    if isinstance(first, (list, tuple)):
+        return list(first)
+    try:  # a numpy batch: (batch, frames, h, w, c)
+        import numpy as np
+
+        if isinstance(frames, np.ndarray) and frames.ndim == 5:
+            return list(frames[0])
+    except ImportError:  # pragma: no cover - numpy is always present here
+        pass
+    return list(frames)
+
+
+def _sampling(spec_row: dict) -> dict:
+    """The sampling knobs for this candidate, and ONLY the ones its publisher
+    states. A row that names no step count runs at its own pipeline's default
+    and says so in the report — a guessed step count would make the benchmark
+    a measurement of my guess."""
+    knobs = {}
+    if spec_row.get("steps"):
+        knobs["num_inference_steps"] = spec_row["steps"]
+    if spec_row.get("guidance") is not None:
+        knobs["guidance_scale"] = spec_row["guidance"]
+    return knobs
+
+
 def _encode(frames, output_path: str, fps: int):  # pragma: no cover
+    """h264/yuv420p, the same encoder production uses — a probe clip that
+    only plays in one viewer would not be inspectable evidence."""
+    import numpy as np
     import imageio.v2 as imageio
 
-    writer = imageio.get_writer(output_path, fps=fps, codec="libx264",
-                                quality=contract.VIDEO_QUALITY)
+    writer = imageio.get_writer(
+        output_path,
+        fps=fps,
+        codec="libx264",
+        quality=None,
+        pixelformat="yuv420p",
+        output_params=["-crf", "23", "-preset", "medium"],
+    )
     try:
         for frame in frames:
-            writer.append_data(frame)
+            writer.append_data(np.asarray(frame))
     finally:
         writer.close()
 
 
-def _real_loader(spec_row: dict):  # pragma: no cover - needs CUDA and network
-    """Build the loader for one candidate. Every knob comes from the row."""
+def _cache_dir(spec_row: dict) -> str:
+    """Where this candidate's weights land. One directory per repo, so the
+    bytes measured on a timeout belong to the candidate being timed."""
+    return os.path.join(PROBE_CACHE, spec_row["repo"].replace("/", "--"))
 
-    def load():
-        import torch
+
+def _real_fetch(spec_row: dict):  # pragma: no cover - needs the network
+    """The download, separated from the load so each is timed on its own."""
+
+    def fetch():
         from huggingface_hub import snapshot_download
 
-        os.makedirs(PROBE_CACHE, exist_ok=True)
-        local = snapshot_download(
+        local_dir = _cache_dir(spec_row)
+        os.makedirs(local_dir, exist_ok=True)
+        return snapshot_download(
             spec_row["repo"],
             revision=spec_row["revision"],
-            local_dir=os.path.join(PROBE_CACHE, spec_row["repo"].replace("/", "--")),
+            local_dir=local_dir,
             token=os.environ.get("HF_TOKEN") or None,
             # BOUNDED. Without this a snapshot takes whatever the repository
             # happens to contain, which for one of these candidates is four
             # 13B variants and four fp8 copies — 200 GiB fetched to use 27.
             allow_patterns=spec_row["allow"],
         )
+
+    return fetch
+
+
+def _real_loader(spec_row: dict):  # pragma: no cover - needs CUDA
+    """Build the loader for one candidate. Every knob comes from the row."""
+
+    def load(local):
+        import torch
         import diffusers
 
         cls = getattr(diffusers, spec_row["pipeline"])

@@ -41,11 +41,20 @@ class Cleanup:
             return {"ok": False, "error": type(exc).__name__}
 
 
-def _check_deadline(started: float) -> None:
-    if time.monotonic() - started > contract.RUNTIME_CEILING_SECONDS:
+def _ceiling(op: str) -> int:
+    """model_probe downloads its checkpoint at job time; production never
+    does. One ceiling for the benchmark, production's untouched."""
+    if op == "model_probe":
+        return contract.PROBE_RUNTIME_CEILING_SECONDS
+    return contract.RUNTIME_CEILING_SECONDS
+
+
+def _check_deadline(started: float, op: str = "") -> None:
+    ceiling = _ceiling(op)
+    if time.monotonic() - started > ceiling:
         raise contract.ContractError(
             "runtime-exceeded",
-            f"job exceeded the {contract.RUNTIME_CEILING_SECONDS}s ceiling",
+            f"job exceeded the {ceiling}s ceiling",
         )
 
 
@@ -70,7 +79,7 @@ def handle(event) -> dict:
         if job["op"] == "story_generate":
             # Text in the response, no artifact: nothing to upload.
             metrics = storygen.run(job)
-            _check_deadline(started)
+            _check_deadline(started, job["op"])
             return contract.filter_output({**metrics, "cleanup_ok": True})
 
         if job["op"] in ("video_generate", "audio_mux", "video_concat", "model_probe"):
@@ -89,7 +98,7 @@ def handle(event) -> dict:
                 seg_path = f"{workdir}/seg{index:03d}.mp4"
                 storage.download(key, seg_path, contract.MAX_INPUT_BYTES)
                 segment_paths.append(seg_path)
-                _check_deadline(started)
+                _check_deadline(started, job["op"])
             metrics = videogen.run_concat(job, segment_paths, output_path)
         elif job["op"] == "image_generate":
             # Text-only: there is no source object to fetch. The engine
@@ -97,7 +106,7 @@ def handle(event) -> dict:
             metrics = videogen.run_image(job, output_path)
         else:
             storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
-            _check_deadline(started)
+            _check_deadline(started, job["op"])
 
             if job["op"] == "video_generate":
                 metrics = videogen.run(job, input_path, output_path)
@@ -114,10 +123,10 @@ def handle(event) -> dict:
                 metrics = audio.run(job, input_path, output_path)
             else:
                 metrics = preprocess.run(job, input_path, output_path)
-        _check_deadline(started)
+        _check_deadline(started, job["op"])
 
         storage.upload(output_path, job["output_key"])
-        _check_deadline(started)
+        _check_deadline(started, job["op"])
 
         return contract.filter_output(
             {

@@ -70,7 +70,10 @@ def rig(tmp_path, monkeypatch):
         lambda frames, path, fps: open(path, "wb").write(b"\x00\x00\x00\x18ftypmp42"),
     )
     monkeypatch.setattr(modelprobe, "free_disk_bytes", lambda p="/tmp": 500 * 1024**3)
-    return {"ref": str(ref), "out": str(out)}
+    # The fetch is a seam of its own now: no test reaches the network, and
+    # the download phase is exercised on the same path the real one takes.
+    monkeypatch.setattr(modelprobe, "dir_bytes", lambda path: 7 * 1024**3)
+    return {"ref": str(ref), "out": str(out), "fetch": lambda: str(tmp_path)}
 
 
 # ------------------------------------------------------------ the model table
@@ -162,7 +165,7 @@ def test_a_candidate_larger_than_the_disk_is_refused_before_downloading(rig, mon
     monkeypatch.setattr(modelprobe, "free_disk_bytes", lambda p="/tmp": 20 * 1024**3)
     with pytest.raises(modelprobe.ProbeStop) as stop:
         modelprobe.run(probe_job("wan22-i2v-a14b"), rig["ref"], rig["out"],
-                       load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                       fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert stop.value.failure == "LOAD_FAILED"
     assert "no download attempted" in stop.value.detail
     assert not os.path.exists(rig["out"])
@@ -207,7 +210,7 @@ def test_a_failure_at_each_stage_is_named_for_that_stage(rig, monkeypatch):
     monkeypatch.setattr(modelprobe, "_load_reference", boom)
     with pytest.raises(modelprobe.ProbeStop) as stop:
         modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                       load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                       fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert stop.value.failure == "CONDITIONING_FAILURE"
 
 
@@ -215,7 +218,7 @@ def test_an_encoder_that_writes_nothing_is_an_artifact_failure(rig, monkeypatch)
     monkeypatch.setattr(modelprobe, "_encode", lambda f, p, fps: open(p, "wb").close())
     with pytest.raises(modelprobe.ProbeStop) as stop:
         modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                       load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                       fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert stop.value.failure == "ARTIFACT_FAILURE"
 
 
@@ -224,7 +227,7 @@ def test_an_encoder_that_writes_nothing_is_an_artifact_failure(rig, monkeypatch)
 
 def test_a_successful_probe_records_every_column_the_owner_asked_for(rig):
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert report["failure"] == "SUCCESS"
     for phase in ("model_load_ms", "conditioning_load_ms", "inference_ms",
                   "encode_ms", "total_wall_ms"):
@@ -267,7 +270,7 @@ def test_cost_is_never_computed_by_the_worker():
 def test_vram_is_read_from_the_device_not_from_checkpoint_size(rig):
     torch = FakeTorch(peak=17 * 1024**3)
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(), torch=torch)
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=torch)
     assert report["peak_allocated_bytes"] == 17 * 1024**3
     assert torch.cuda.reset_calls == 1, "peaks must be reset before the probe"
 
@@ -275,7 +278,7 @@ def test_vram_is_read_from_the_device_not_from_checkpoint_size(rig):
 def test_a_cpu_worker_reports_no_vram_rather_than_zero(rig):
     """Zero allocated bytes and no GPU at all are different findings."""
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(),
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(),
                             torch=FakeTorch(available=False))
     assert "peak_allocated_bytes" not in report
     assert "vram_total_bytes" not in report
@@ -284,7 +287,7 @@ def test_a_cpu_worker_reports_no_vram_rather_than_zero(rig):
 def test_the_pipeline_is_called_at_the_candidates_own_shape(rig):
     pipe = fake_pipe()
     modelprobe.run(probe_job("cogvideox-i2v"), rig["ref"], rig["out"],
-                   load_pipeline=lambda: pipe, torch=FakeTorch())
+                   fetch=rig["fetch"], load_pipeline=lambda local: pipe, torch=FakeTorch())
     assert pipe.called_with["width"] == 720
     assert pipe.called_with["num_frames"] == 49
 
@@ -335,7 +338,7 @@ def test_every_field_the_probe_measures_survives_filter_output(rig):
     the whitelist is a measurement the worker takes, pays for, and throws
     away. This walks the real report against the real filter."""
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     dropped = set(report) - set(contract.OUTPUT_WHITELIST)
     assert not dropped, f"these measurements would be discarded: {sorted(dropped)}"
 
@@ -359,7 +362,7 @@ def test_the_worker_reports_the_disk_it_actually_has(rig, monkeypatch):
     monkeypatch.setattr(modelprobe, "free_disk_bytes", lambda p="/tmp": 150 * 1024**3)
     monkeypatch.setattr(modelprobe, "total_disk_bytes", lambda p="/tmp": 200 * 1024**3)
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert report["disk_free_bytes"] == 150 * 1024**3
     assert report["disk_total_bytes"] == 200 * 1024**3
 
@@ -369,7 +372,7 @@ def test_the_probe_proves_which_card_it_ran_on(rig):
     the wrong card is not the benchmark. A result measured on some other GPU
     would be worse than none, because it would look like an answer."""
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(), torch=FakeTorch())
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(), torch=FakeTorch())
     assert report["device"] == "cuda"
     assert report["gpu_name"] == "NVIDIA RTX A5000"
     assert report["vram_peak_mb"] > 0
@@ -378,7 +381,132 @@ def test_the_probe_proves_which_card_it_ran_on(rig):
 
 def test_a_cpu_run_reports_cpu_so_the_harness_can_refuse_it(rig):
     report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
-                            load_pipeline=lambda: fake_pipe(),
+                            fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(),
                             torch=FakeTorch(available=False))
     assert report["device"] == "cpu"
     assert "gpu_name" not in report
+
+
+# ------------------------------------------- the download, timed and bounded
+
+
+def test_the_download_has_a_budget_smaller_than_the_job_ceiling():
+    """A fetch allowed to run to the job ceiling leaves nothing for the load
+    and the generation — it would spend the whole rental and still have no
+    clip, which is the most expensive way to learn nothing."""
+    assert modelprobe.DOWNLOAD_BUDGET_SECONDS < contract.PROBE_RUNTIME_CEILING_SECONDS
+    assert modelprobe.DOWNLOAD_BUDGET_SECONDS > 0
+
+
+def test_the_probe_ceiling_is_separate_from_productions():
+    """Owner directive: do not alter production. A benchmark that downloads
+    118 GiB at job time needs a different window from a job whose checkpoint
+    is already baked into the image, and it must not move production's."""
+    assert contract.RUNTIME_CEILING_SECONDS == 900
+    assert contract.PROBE_RUNTIME_CEILING_SECONDS > contract.RUNTIME_CEILING_SECONDS
+
+
+def test_a_fetch_that_finishes_in_time_returns_its_directory():
+    calls = []
+    result = modelprobe.fetch_within_budget(
+        lambda: "/local/weights",
+        lambda: 0,
+        60,
+        clock=lambda: 0.0,
+        sleeper=calls.append,
+        spawn=lambda target: target(),
+    )
+    assert result == "/local/weights"
+    assert calls == []
+
+
+def test_a_fetch_error_reaches_the_caller_rather_than_being_swallowed():
+    with pytest.raises(RuntimeError):
+        modelprobe.fetch_within_budget(
+            _raiser(RuntimeError("connection reset")),
+            lambda: 0,
+            60,
+            clock=lambda: 0.0,
+            sleeper=lambda s: None,
+            spawn=lambda target: target(),
+        )
+
+
+def _raiser(exc):
+    def fn():
+        raise exc
+    return fn
+
+
+def test_an_overrunning_fetch_stops_with_the_rate_it_actually_achieved():
+    """The finding is the measurement. A candidate that cannot be fetched
+    here is a real result about this worker, and only a result if the rate
+    is measured rather than guessed."""
+    ticks = iter([0.0, 100.0, 900.0, 900.0, 900.0])
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.fetch_within_budget(
+            lambda: "never",
+            lambda: 45 * 1024**3,
+            900,
+            clock=lambda: next(ticks),
+            sleeper=lambda s: None,
+            spawn=lambda target: None,   # never runs: the fetch is still going
+        )
+    assert stop.value.failure == "DOWNLOAD_TIMEOUT"
+    assert "45.00GiB" in stop.value.detail
+    assert "MiB/s" in stop.value.detail
+    assert "no GPU time was spent" in stop.value.detail
+
+
+def test_download_timeout_is_a_named_failure_not_a_quality_verdict():
+    assert "DOWNLOAD_TIMEOUT" in modelprobe.FAILURES
+    assert "QUALITY_FAIL" not in modelprobe.FAILURES
+
+
+def test_the_download_is_timed_apart_from_the_model_load_on_a_real_run(rig):
+    """Owner directive: do not hide cold-start cost. Fetching 117 GiB and
+    building a pipeline out of it are two costs with two different fixes, and
+    one combined number would report the network as the model."""
+    report = modelprobe.run(probe_job(), rig["ref"], rig["out"],
+                            fetch=rig["fetch"],
+                            load_pipeline=lambda local: fake_pipe(),
+                            torch=FakeTorch())
+    assert "download_ms" in report
+    assert "model_load_ms" in report
+    assert report["download_bytes"] == 7 * 1024**3
+
+
+def test_the_loader_is_handed_the_directory_the_fetch_returned():
+    """The two phases are separate but not independent: the pipeline must be
+    built from the snapshot that was just measured, never re-resolved."""
+    seen = {}
+
+    def loader(local):
+        seen["local"] = local
+        return fake_pipe()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = os.path.join(tmp, "ref.png")
+        open(ref, "wb").write(b"\x89PNG\r\n\x1a\n")
+        out = os.path.join(tmp, "out.mp4")
+        modelprobe._load_reference = lambda p: "IMAGE"
+        modelprobe._encode = lambda f, p, fps: open(p, "wb").write(b"\x00" * 32)
+        modelprobe.free_disk_bytes = lambda p="/tmp": 500 * 1024**3
+        modelprobe.dir_bytes = lambda p: 1
+        modelprobe.run(probe_job(), ref, out,
+                       fetch=lambda: "/snapshot/here",
+                       load_pipeline=loader, torch=FakeTorch())
+    assert seen["local"] == "/snapshot/here"
+
+
+def test_a_download_timeout_survives_the_output_filter():
+    """The measurement is the deliverable. A timeout that reached the harness
+    stripped of its numbers would be indistinguishable from a crash."""
+    kept = contract.filter_output({
+        "ok": False, "code": "DOWNLOAD_TIMEOUT",
+        "download_bytes": 45 * 1024**3, "download_ms": 900_000,
+        "disk_free_bytes": 1, "disk_total_bytes": 2,
+    })
+    assert kept["download_bytes"] == 45 * 1024**3
+    assert kept["download_ms"] == 900_000

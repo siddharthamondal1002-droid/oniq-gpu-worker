@@ -265,3 +265,26 @@ def test_serverless_start_is_main_guarded():
     guard_pos = src.index('if __name__ == "__main__":')
     assert src.index("import runpod") > guard_pos
     assert "runpod.serverless.start" in src
+
+
+def test_the_probe_ceiling_applies_to_model_probe_only():
+    """Owner directive 2026-08-29: do not alter production. A benchmark that
+    downloads its checkpoint at job time needs a wider window than a job whose
+    weights are already in the image — and giving it one must not give one to
+    anything else."""
+    assert handler._ceiling("model_probe") == contract.PROBE_RUNTIME_CEILING_SECONDS
+    for op in ("image_preprocess", "video_generate", "image_generate",
+               "audio_mux", "video_concat", "story_generate", ""):
+        assert handler._ceiling(op) == contract.RUNTIME_CEILING_SECONDS, op
+
+
+def test_a_probe_inside_the_probe_ceiling_is_not_a_runtime_error(monkeypatch):
+    """900s would have killed every candidate after paying for it in full:
+    the deadline is checked AFTER the work returns, so the window is billed,
+    the clip is discarded, and the measurements go with it."""
+    over_production = contract.RUNTIME_CEILING_SECONDS + 10
+    monkeypatch.setattr(handler.time, "monotonic", lambda: over_production)
+    handler._check_deadline(0.0, "model_probe")
+    with pytest.raises(contract.ContractError) as exc:
+        handler._check_deadline(0.0, "video_generate")
+    assert exc.value.code == "runtime-exceeded"

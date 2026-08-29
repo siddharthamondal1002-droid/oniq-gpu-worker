@@ -54,6 +54,25 @@ DEFAULT_QUALITY = 85
 # the financial admission charges for in full.
 RUNTIME_CEILING_SECONDS = 900
 
+# THE BENCHMARK'S OWN CEILING — model_probe only, owner directive
+# 2026-08-29. Production's 900s is unchanged and this constant never
+# touches it.
+#
+# A production job loads a checkpoint that is already in the image. A probe
+# DOWNLOADS one: 20.15 GiB for the smallest candidate and 117.52 GiB for
+# the largest, before a single frame is generated. Measured against 900s
+# that is not a slow job, it is a job that cannot finish — and the way it
+# fails is the expensive way, because handler checks the deadline AFTER the
+# work returns: the full window is billed, the clip is discarded, and every
+# phase measurement the owner asked for is lost with it.
+#
+# 1800s at the A5000's live secure rate reserves well inside the $0.50 job
+# cap, so this buys measurement time rather than raising exposure past a
+# gate. It is a starting figure, not a finding: the probe reports its
+# download throughput, and the cheap candidates run first precisely so the
+# large ones are dispatched against a MEASURED rate instead of this guess.
+PROBE_RUNTIME_CEILING_SECONDS = 1800
+
 # Video generation: everything below is a SERVER decision. The caller's
 # only degree of freedom is the motion prompt; resolution, frame count,
 # fps and the model are constants here and in videogen.py, so no job can
@@ -201,6 +220,7 @@ OUTPUT_WHITELIST = frozenset(
         # does not work" are different findings.
         "disk_free_bytes",
         "disk_total_bytes",
+        "download_bytes",
         # video_concat evidence
         "segments",
         "concat_ms",
