@@ -1403,11 +1403,26 @@ def require_reference(facts: dict, key: str, *, fetch=None) -> None:
     the normal one. Nothing here converts an unknown into a success: the
     check is announced as not-run, and the probe row carries that fact.
     """
+    # UNSET AND UNUSABLE ARE THE SAME SITUATION. The repository variable is
+    # literally the string "on" — someone set an on/off flag where a URL
+    # belongs — so `if not base` is False and the old code went on to build a
+    # URL out of it, failed, and reported the REFERENCE as missing. That is a
+    # false accusation against an image that exists: it cost a refused
+    # dispatch on 2026-08-29 and, worse, it blamed the artifact for a
+    # configuration fault. The base is validated first now, and a base that
+    # cannot make a URL means the check cannot run — not that the file is
+    # gone.
     base = os.environ.get("R2_PUBLIC_BASE_URL", "")
-    if not base:
+    usable = ""
+    if base:
+        try:
+            usable = frame_pull.normalise_base(base)
+        except frame_pull.FramePullError as exc:
+            print(f"reference PRE-CHECK UNAVAILABLE: {exc.code} — {exc.message}")
+    if not usable:
         print(
-            f"reference NOT PRE-CHECKED: {key} — no public read base is "
-            "configured, and the production bucket is private by owner "
+            f"reference NOT PRE-CHECKED: {key} — no usable public read base "
+            "is configured, and the production bucket is private by owner "
             "directive. The worker downloads the reference before it fetches "
             "any weights, so a missing one costs a sub-second failure rather "
             "than a rented window (measured: 202ms, run 72)."
@@ -1415,7 +1430,7 @@ def require_reference(facts: dict, key: str, *, fetch=None) -> None:
         return
     getter = fetch or frame_pull._fetch
     try:
-        data = getter(frame_pull.public_url(base, key))
+        data = getter(frame_pull.public_url(usable, key))
     except Exception as exc:  # noqa: BLE001
         raise SpendStop(
             "reference-missing",

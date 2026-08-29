@@ -1936,3 +1936,38 @@ def test_the_probe_watch_covers_the_cold_pull_as_well_as_the_window():
     ceiling_s = contract.PROBE_RUNTIME_CEILING_SECONDS
     watch_s = 2 * ceiling_s
     assert watch_s - ceiling_s > measured_cold_pull_s
+
+
+def test_an_unusable_read_base_means_the_check_cannot_run_not_that_it_failed(
+    monkeypatch, capsys
+):
+    """The repository variable is literally "on" — an on/off flag where a URL
+    belongs. `if not base` is False for that, so the old code built a URL out
+    of it, failed, and reported the REFERENCE as missing: a false accusation
+    against an image that exists, which cost a refused dispatch on
+    2026-08-29 and blamed the artifact for a configuration fault."""
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "on")
+    spend_run.require_reference({}, "validation/out/probe-reference.png")
+    out = capsys.readouterr().out
+    assert "PRE-CHECK UNAVAILABLE" in out
+    assert "base-not-a-url" in out
+    assert "NOT PRE-CHECKED" in out
+
+
+def test_a_usable_base_still_catches_a_genuinely_missing_reference(monkeypatch):
+    """Degrading when the base is unusable must not degrade when it IS."""
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev")
+
+    def gone(url):
+        raise OSError("404")
+
+    with pytest.raises(spend_run.SpendStop) as stop:
+        spend_run.require_reference({}, "probe-reference.png", fetch=gone)
+    assert stop.value.code == "reference-missing"
+
+
+def test_a_usable_base_verifies_a_real_png(monkeypatch, capsys):
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev/")
+    spend_run.require_reference({}, "probe-reference.png",
+                                fetch=lambda url: b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    assert "reference verified" in capsys.readouterr().out
