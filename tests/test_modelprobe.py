@@ -723,3 +723,40 @@ def test_the_handler_returns_the_failed_probes_numbers(monkeypatch):
     assert result["download_ms"] == 990_000
     assert result["repo"] == "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
     assert "unexpected-exception" not in str(result)
+
+
+# ------------------- the caches must point somewhere this user can write
+
+
+def test_every_huggingface_cache_points_inside_the_probe_cache():
+    """The first live probe failed in 7.4s with a doubled Rust I/O error
+    that looked nothing like a permissions fault. The worker runs as uid
+    10001 with HOME=/home/oniq; the image bakes its models as ROOT with the
+    same HOME, and `/home/oniq/.cache` survives the bake owned by root — so
+    the hub cannot create its cache there at job time."""
+    for var in ("HF_HOME", "HF_HUB_CACHE", "HF_XET_CACHE", "XDG_CACHE_HOME"):
+        assert os.environ[var].startswith(modelprobe.PROBE_CACHE), var
+
+
+def test_the_caches_are_set_at_module_level_not_inside_the_fetch():
+    """huggingface_hub reads these into constants at import. Setting them
+    only inside fetch() would be too late if anything imported the hub
+    first."""
+    import inspect
+
+    src = inspect.getsource(modelprobe)
+    head = src.split("PROBE_MODELS:")[0]
+    fetch = inspect.getsource(modelprobe._real_fetch)
+    for var in ("HF_HOME", "HF_XET_CACHE"):
+        assert f'os.environ.setdefault("{var}"' in head, var
+        assert f'os.environ.setdefault("{var}"' not in fetch, var
+
+
+def test_the_probe_never_writes_into_the_baked_production_models():
+    """A probe shares a disk with production's checkpoints. It must not be
+    able to disturb them."""
+    for var in ("HF_HOME", "HF_HUB_CACHE", "HF_XET_CACHE", "XDG_CACHE_HOME"):
+        assert not os.environ[var].startswith("/app")
+    assert modelprobe.PROBE_CACHE.startswith("/tmp")
+    for row in modelprobe.PROBE_MODELS.values():
+        assert modelprobe._cache_dir(row).startswith("/tmp")

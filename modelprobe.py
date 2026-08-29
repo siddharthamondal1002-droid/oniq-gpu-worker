@@ -39,6 +39,30 @@ import preview
 # production checkpoints it runs beside.
 PROBE_CACHE = "/tmp/probe-models"
 
+# EVERY HUGGINGFACE CACHE POINTED SOMEWHERE THIS USER CAN WRITE.
+#
+# The first live probe failed in 7.4s with:
+#
+#   LOAD_FAILED: OSError: I/O error: I/O error: Permission denied (os error 13)
+#
+# after a 5s "download". Nothing to do with the model. The worker runs as
+# uid 10001 with HOME=/home/oniq, and the image bakes its models as ROOT
+# with that same HOME. The bake deletes ~/.cache/huggingface afterwards but
+# `/home/oniq/.cache` itself survives, owned by root — so at job time the
+# hub tries to create its cache inside a directory this user cannot write,
+# and the Rust chunk-cache layer reports it as a doubled I/O error that
+# looks nothing like a permissions fault.
+#
+# Set at MODULE level, so it is in place before anything in this process
+# imports huggingface_hub and reads these into constants. Production is
+# untouched: videogen loads baked checkpoints with local_files_only and
+# never writes a hub cache at all.
+_PROBE_HF_HOME = os.path.join(PROBE_CACHE, "hf")
+os.environ.setdefault("HF_HOME", _PROBE_HF_HOME)
+os.environ.setdefault("HF_HUB_CACHE", os.path.join(_PROBE_HF_HOME, "hub"))
+os.environ.setdefault("HF_XET_CACHE", os.path.join(_PROBE_HF_HOME, "xet"))
+os.environ.setdefault("XDG_CACHE_HOME", os.path.join(PROBE_CACHE, "xdg"))
+
 # How much of the job's window the FETCH may take before the probe gives up.
 #
 # The handler's ceiling covers the whole job; this covers the download alone,
@@ -722,6 +746,14 @@ def _real_fetch(spec_row: dict):  # pragma: no cover - needs the network
     """The download, separated from the load so each is timed on its own."""
 
     def fetch():
+        # Belt and braces: the module-level assignment above is the one that
+        # matters, but these directories must EXIST and be ours before the
+        # hub or its chunk-cache tries to create them inside a root-owned
+        # parent — which is precisely how the first probe died.
+        for path in (os.environ["HF_HOME"], os.environ["HF_HUB_CACHE"],
+                     os.environ["HF_XET_CACHE"], os.environ["XDG_CACHE_HOME"]):
+            os.makedirs(path, exist_ok=True)
+
         from huggingface_hub import snapshot_download
 
         local_dir = _cache_dir(spec_row)
@@ -730,6 +762,7 @@ def _real_fetch(spec_row: dict):  # pragma: no cover - needs the network
             spec_row["repo"],
             revision=spec_row["revision"],
             local_dir=local_dir,
+            cache_dir=os.environ["HF_HUB_CACHE"],
             token=os.environ.get("HF_TOKEN") or None,
             # BOUNDED. Without this a snapshot takes whatever the repository
             # happens to contain, which for one of these candidates is four
