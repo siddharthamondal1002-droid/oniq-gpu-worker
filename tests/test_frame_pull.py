@@ -303,3 +303,51 @@ def test_a_presigned_base_in_the_variable_refuses_rather_than_authenticating(
     out = capsys.readouterr().out
     assert "base-has-query" in out
     assert "abc" not in out, "a refused credential is never echoed back"
+
+
+# ---------------------------------------------------------- the report
+
+
+def test_the_run_report_names_every_artifact_and_its_measured_evidence():
+    clips = [
+        {
+            "scene": "intro",
+            "output_key": "validation/out/battery-1-intro.mp4",
+            "frames": 97,
+            "fps": 24,
+            "video_seconds": "4.04",
+            "resolution": "704x480",
+        }
+    ]
+    reports = [
+        {
+            "scene": "intro",
+            "output_key": "validation/out/battery-1-intro.mp4",
+            "bytes": 512,
+            "artifacts": ["intro.mp4", "intro-f1-0.577s.png", "intro-sheet.png"],
+        }
+    ]
+    md = frame_pull.summary_markdown(clips, reports)
+    assert "intro-sheet.png" in md
+    assert "97f @ 24fps" in md and "704x480" in md
+    assert "1/1 clip(s) retrieved" in md
+
+
+def test_a_clip_with_no_frames_says_so_in_the_report():
+    clips = [{"scene": "walk", "output_key": "b.mp4"}]
+    reports = [{"scene": "walk", "output_key": "b.mp4", "error": "artifact-not-mp4"}]
+    md = frame_pull.summary_markdown(clips, reports)
+    assert "none — artifact-not-mp4" in md
+    assert "0/1 clip(s) retrieved" in md
+
+
+def test_the_summary_is_written_where_the_run_page_reads_it(tmp_path, monkeypatch):
+    dest = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(dest))
+    frame_pull.write_summary([], [])
+    assert "LTX frames" in dest.read_text(encoding="utf-8")
+
+
+def test_no_summary_path_is_simply_no_summary(monkeypatch):
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    frame_pull.write_summary([], [])  # must not raise

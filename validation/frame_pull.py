@@ -354,7 +354,51 @@ def main(argv=None) -> int:
         json.dump(reports, handle, indent=2, sort_keys=True)
     got = sum(1 for r in reports if not r.get("error"))
     print(f"frame-pull: {got}/{len(reports)} clip(s) retrieved and cut")
+    write_summary(clips, reports)
     return 0
+
+
+def summary_markdown(clips, reports) -> str:
+    """The run's own report of what came back — artifact names and the
+    measured evidence beside them.
+
+    In the run page rather than only inside the downloaded zip, because
+    the first question after a canary is "did the frames come back", and
+    that should be answerable without downloading anything.
+    """
+    by_key = {c.get("output_key"): c for c in clips}
+    lines = ["### LTX frames", "", "| scene | clip | measured | artifacts |", "|---|---|---|---|"]
+    for report in reports:
+        clip = by_key.get(report.get("output_key"), {})
+        measured = (
+            f"{clip.get('frames')}f @ {clip.get('fps')}fps, "
+            f"{clip.get('video_seconds')}s, {clip.get('resolution')}"
+        )
+        if report.get("error"):
+            names = f"**none — {report['error']}**"
+        else:
+            names = "<br>".join(report.get("artifacts") or []) or "none"
+        lines.append(
+            f"| {report.get('scene') or '—'} | `{report.get('output_key')}` "
+            f"| {measured} | {names} |"
+        )
+    got = sum(1 for r in reports if not r.get("error"))
+    lines += ["", f"{got}/{len(reports)} clip(s) retrieved. Download the "
+                  "`ltx-frames` artifact to inspect them."]
+    return "\n".join(lines) + "\n"
+
+
+def write_summary(clips, reports) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(summary_markdown(clips, reports))
+    except OSError:
+        # A report that cannot be written is not a reason to fail a run
+        # whose generation already succeeded.
+        pass
 
 
 if __name__ == "__main__":  # pragma: no cover
