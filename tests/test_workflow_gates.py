@@ -355,6 +355,11 @@ def test_op_input_defaults_to_the_image_workload():
         "image_generate",
         "video_generate",
         "audio_mux",
+        # model_probe joined 2026-08-29 with the open-source benchmark. It
+        # spends like the others and is an explicit choice like the others;
+        # what makes it different is that it downloads a checkpoint the image
+        # does not carry, which is why it can never be a default.
+        "model_probe",
     ]
     assert "OP: ${{ inputs.op }}" in raw
 
@@ -725,9 +730,32 @@ def test_gate9_the_plate_input_is_a_closed_choice():
     doc, raw = _load("gpu-validation.yml")
     plate = _triggers(doc)["workflow_dispatch"]["inputs"]["plate"]
     assert plate["type"] == "choice"
-    assert plate["options"] == ["a", "b"]
+    # "ref" joined 2026-08-29: the model benchmark's controlled reference —
+    # ONE adult, plain background, drawn once and shared by all five
+    # candidates. Still a closed choice; the dispatch picks WHICH reference,
+    # never what is in it.
+    assert plate["options"] == ["a", "b", "ref"]
     assert plate["default"] == "a"
     assert "PLATE: ${{ inputs.plate }}" in raw
+
+
+def test_gate9_the_probe_model_input_is_a_closed_choice():
+    """The dispatch names a benchmark ROW, never a repository. Every
+    checkpoint, revision, precision and offload strategy is a server-side
+    constant in modelprobe, so a dispatch cannot redirect what is downloaded
+    or how it is run."""
+    import modelprobe
+
+    doc, raw = _load("gpu-validation.yml")
+    probe = _triggers(doc)["workflow_dispatch"]["inputs"]["probe_model"]
+    assert probe["type"] == "choice"
+    assert probe["default"] == ""
+    assert set(probe["options"]) == {""} | set(modelprobe.PROBE_MODELS)
+    assert "PROBE_MODEL: ${{ inputs.probe_model }}" in raw
+    # Hunyuan is not offerable: its architecture did not resolve without
+    # guessing, and an option nobody can select is how that stays true.
+    for absent in modelprobe.NOT_EVALUATED:
+        assert absent not in probe["options"]
 
 
 def test_the_model_bench_job_cannot_spend():

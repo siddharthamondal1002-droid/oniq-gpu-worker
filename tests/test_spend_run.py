@@ -1631,3 +1631,97 @@ def test_one_job_carries_a_per_shot_input_key_when_given():
         sleep=ft.sleep, clock=ft.clock,
     )
     assert client.submitted[1][1]["input_key"] == facts["input_ref"]
+
+
+# ------------------------------------------------------- the benchmark probe
+
+
+def test_the_controlled_reference_asks_for_one_subject_and_nothing_else():
+    """plate-001, plate-002 and plate-a each failed because one image model
+    was asked to stage a whole scene. The reference exists to give five video
+    models the same starting frame, so image adherence must not be the
+    variable — anything harder makes the reference itself the experiment."""
+    prompt = spend_run.PROBE_REFERENCE_PROMPT.lower()
+    for banned in ("train", "balloon", "girl", "platform", "rain", "second",
+                   "station", "child"):
+        assert banned not in prompt, banned
+    assert "one adult woman" in prompt
+    assert "plain" in prompt
+
+
+def test_the_reference_prompt_is_positive_only():
+    """Owner directive: positive descriptions only, no negation."""
+    prompt = spend_run.PROBE_REFERENCE_PROMPT.lower()
+    for negation in (" no ", " not ", "without", "avoid", "never"):
+        assert negation not in prompt, negation
+
+
+def test_the_common_action_names_subject_motion_and_pins_the_camera():
+    """Camera movement alone does not count, so the prompt removes the
+    cheapest way for a model to look alive."""
+    action = spend_run.PROBE_ACTION_PROMPT.lower()
+    assert "turns her head and upper body" in action
+    assert "camera does not move" in action
+
+
+def test_the_action_prompt_is_the_same_for_every_candidate():
+    """What is being compared is temporal and identity capability, not who
+    tolerates which prompt. One string, used by all of them."""
+    assert isinstance(spend_run.PROBE_ACTION_PROMPT, str)
+    assert spend_run.PROBE_ACTION_PROMPT.strip()
+
+
+def test_a_probe_job_carries_the_model_key_and_the_reference():
+    """The payload a probe submits must name the benchmark row and the shared
+    reference — otherwise five candidates would be measured against whatever
+    the run-wide test input happened to be."""
+    import inspect
+
+    src = inspect.getsource(spend_run.one_job)
+    assert 'payload["model"] = model' in src
+    assert "if model is not None:" in src
+
+
+def test_only_model_probe_ever_sets_the_model_field():
+    """The contract admits `model` on model_probe alone; one_job must not
+    smuggle it onto a production op."""
+    import inspect
+    src = inspect.getsource(spend_run.one_job)
+    # The field is set from an explicit parameter that defaults to None,
+    # so an op that does not pass it cannot acquire one.
+    assert "model: str | None = None" in src
+
+
+def test_the_reference_precheck_refuses_without_a_public_base(monkeypatch):
+    monkeypatch.delenv("R2_PUBLIC_BASE_URL", raising=False)
+    with pytest.raises(spend_run.SpendStop) as stop:
+        spend_run.require_reference({"output_prefix": "validation/out"}, "x.png")
+    assert stop.value.code == "reference-unverifiable"
+
+
+def test_the_reference_precheck_refuses_a_missing_object(monkeypatch):
+    """Run 72 paid for a job whose input had been deleted. A probe would
+    spend the whole watchdog window downloading weights first."""
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev")
+
+    def boom(url):
+        raise OSError("404")
+
+    with pytest.raises(spend_run.SpendStop) as stop:
+        spend_run.require_reference({}, "probe-reference.png", fetch=boom)
+    assert stop.value.code == "reference-missing"
+
+
+def test_the_reference_precheck_refuses_a_non_png(monkeypatch):
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev")
+    with pytest.raises(spend_run.SpendStop) as stop:
+        spend_run.require_reference({}, "probe-reference.png",
+                             fetch=lambda url: b"<html>403</html>")
+    assert stop.value.code == "reference-missing"
+
+
+def test_the_reference_precheck_accepts_a_real_png(monkeypatch, capsys):
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev")
+    spend_run.require_reference({}, "probe-reference.png",
+                         fetch=lambda url: b"\x89PNG\r\n\x1a\n" + b"0" * 100)
+    assert "reference verified" in capsys.readouterr().out

@@ -741,6 +741,43 @@ PLATE_B_PROMPT = (
 # anywhere on this route (the same fence inHouseMotion holds).
 PLATE_KEYS = {"a": "plate-a.png", "b": "plate-b.png"}
 
+# THE BENCHMARK'S CONTROLLED REFERENCE — owner directive 2026-08-29.
+#
+# Deliberately the opposite of every plate that came before it. plate-001,
+# plate-002 and plate-a each failed because they asked one image model to
+# stage a whole scene — two characters, a prop, a train, weather, staging —
+# and the measured adherence ceiling is two or three elements. Those failures
+# are not this benchmark's problem to re-run: they are the reason this
+# reference has ONE subject and nothing else.
+#
+# The purpose here is NOT to test image adherence. It is to give five video
+# models the same starting frame so their MOTION and IDENTITY can be
+# compared. A reference the image engine can draw reliably is therefore a
+# design requirement, not a compromise — anything harder makes the reference
+# itself the variable.
+#
+# One adult, plain background, upper body, facing camera. No props, no second
+# person, no environment, no weather. Positive description only.
+PROBE_REFERENCE_PROMPT = (
+    "A photographic portrait of one adult woman standing against a plain "
+    "light grey studio background. She faces the camera. Her head, "
+    "shoulders and upper body are clearly visible and well lit. Sharp "
+    "focus, natural skin tones, simple and clean."
+)
+PROBE_REFERENCE_KEY = "probe-reference.png"
+
+# THE COMMON TEST. Same conceptual action for every candidate, so what is
+# compared is temporal and identity capability rather than prompt complexity.
+# Camera movement alone does not count and the sentence says so: the required
+# motion is the SUBJECT's head and upper body, and the camera is pinned still
+# precisely to remove the cheapest way for a model to look alive.
+PROBE_ACTION_PROMPT = (
+    "The woman slowly turns her head and upper body toward the camera. "
+    "Her face, hair, clothing and body proportions stay the same "
+    "throughout. The background stays plain and still. The camera does "
+    "not move."
+)
+
 
 def verify_image_success(output: dict) -> None:
     """The in-house image engine's proof, ON TOP of verify_gpu_success.
@@ -969,6 +1006,7 @@ def one_job(
     op: str = "image_preprocess",
     prompt: str | None = None,
     input_key: str | None = None,
+    model: str | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
@@ -988,6 +1026,10 @@ def one_job(
         "input_key": input_key or facts["input_ref"],
         "output_key": output_key,
     }
+    if model is not None:
+        # Only model_probe carries this, and the worker's contract admits it
+        # on no other op — a benchmark ROW id, never a repository or a path.
+        payload["model"] = model
     watch_s = None
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
@@ -1139,6 +1181,41 @@ def record_standby_state(client) -> None:
             "termination is judged on active compute, and the total worker "
             "count is never claimed to be zero"
         )
+
+
+def require_reference(facts: dict, key: str, *, fetch=None) -> None:
+    """The probe's conditioning image must EXIST before a GPU is rented.
+
+    Run 72 paid for a job whose input had already been deleted from the
+    bucket, and the failure looked identical to a model problem. A probe is
+    worse: the worker would download tens of gigabytes of weights, load them,
+    and only then discover there is nothing to condition on — the entire
+    watchdog window spent to learn something a free HTTP read knew.
+
+    Same check require_plates makes, for the one image the benchmark shares.
+    """
+    base = os.environ.get("R2_PUBLIC_BASE_URL", "")
+    if not base:
+        raise SpendStop(
+            "reference-unverifiable",
+            "R2_PUBLIC_BASE_URL is unset, so the probe reference cannot be "
+            "confirmed to exist before the GPU is rented",
+        )
+    getter = fetch or frame_pull._fetch
+    try:
+        data = getter(frame_pull.public_url(base, key))
+    except Exception as exc:  # noqa: BLE001
+        raise SpendStop(
+            "reference-missing",
+            f"{key} could not be read: {type(exc).__name__}: {exc}",
+        ) from exc
+    if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SpendStop(
+            "reference-missing",
+            f"{key} is not a PNG — the reference must be drawn and "
+            "inspected before any candidate is probed",
+        )
+    print(f"reference verified: {key} ({len(data)} bytes)")
 
 
 def require_plates(facts: dict, *, fetch=None) -> dict:
@@ -1365,6 +1442,7 @@ def main(argv) -> int:
             "image_generate",
             "video_generate",
             "audio_mux",
+            "model_probe",
         ):
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
         if op == "audio_mux":
@@ -1402,26 +1480,82 @@ def main(argv) -> int:
             # module prompt and a fixed key. plate-001/plate-002 are
             # PLATE_INVALID evidence and are never written again.
             which = os.environ.get("PLATE", "a").strip().lower()
-            if which not in PLATE_KEYS:
+            if which == "ref":
+                # The benchmark's controlled reference: ONE subject, drawn
+                # once, and all five candidates condition on it.
+                key, prompt_text, label = (
+                    PROBE_REFERENCE_KEY, PROBE_REFERENCE_PROMPT, "probe reference"
+                )
+            elif which in PLATE_KEYS:
+                key = PLATE_KEYS[which]
+                prompt_text = PLATE_A_PROMPT if which == "a" else PLATE_B_PROMPT
+                label = f"plate {which.upper()}"
+            else:
                 raise SpendStop(
                     "plate-unknown",
                     f"PLATE={which!r} — the references are 'a' "
-                    "(characters + balloon) and 'b' (train)",
+                    "(characters + balloon), 'b' (train) and 'ref' (the "
+                    "benchmark's single-subject reference)",
                 )
-            plate_prompt = PLATE_A_PROMPT if which == "a" else PLATE_B_PROMPT
             rows = [
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/{PLATE_KEYS[which]}",
+                    output_key=f"{facts['output_prefix']}/{key}",
                     op=op,
-                    prompt=plate_prompt,
+                    prompt=prompt_text,
                 )
             ]
-            print(
-                f"PHASE 13-16 PASS — plate {which.upper()} drawn, "
-                "verified and terminated"
-            )
+            print(f"PHASE 13-16 PASS — {label} drawn, verified and terminated")
+        elif op == "model_probe":
+            # ONE candidate, ONE clip, on the A5000 — owner directive
+            # 2026-08-29. Each dispatch names one benchmark row; there is no
+            # battery shape, deliberately, so a single bad assumption cannot
+            # spend five times over before anyone reads a result.
+            import modelprobe
+
+            if through != 16:
+                raise SpendStop(
+                    "probe-through-phase",
+                    "model_probe supports through_phase 16 (one candidate) only",
+                )
+            candidate = os.environ.get("PROBE_MODEL", "").strip()
+            if candidate in modelprobe.NOT_EVALUATED:
+                raise SpendStop(
+                    "probe-not-evaluated",
+                    f"{candidate} is NOT_EVALUATED: "
+                    f"{modelprobe.NOT_EVALUATED[candidate]}",
+                )
+            if candidate not in modelprobe.PROBE_MODELS:
+                raise SpendStop(
+                    "probe-unknown",
+                    f"PROBE_MODEL={candidate!r} — authorised rows are "
+                    + ", ".join(sorted(modelprobe.PROBE_MODELS)),
+                )
+            # THE REFERENCE MUST EXIST BEFORE THE GPU IS RENTED. Run 72 paid
+            # for a job whose input had been deleted; the same check that
+            # guards the battery guards this.
+            reference = f"{facts['output_prefix']}/{PROBE_REFERENCE_KEY}"
+            require_reference(facts, reference)
+            row = modelprobe.PROBE_MODELS[candidate]
+            print(f"probing {row['label']} — {row['repo']} @ {row['revision']}")
+            print(f"  conditioned on: {reference}")
+            print(f"  shape: {row['width']}x{row['height']}x{row['frames']} "
+                  f"@ {row['fps']}fps  ({row['frames'] / row['fps']:.2f}s)")
+            print(f"  published weights: {row['download_gib']:.2f} GiB, "
+                  f"loading {row['dtype']} with {row['offload']} offload")
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    output_key=f"{facts['output_prefix']}/probe-{candidate}.mp4",
+                    op=op,
+                    prompt=PROBE_ACTION_PROMPT,
+                    input_key=reference,
+                    model=candidate,
+                )
+            ]
+            print(f"PHASE 13-16 PASS — {row['label']} probed and terminated")
         elif op == "video_generate":
             # Video knows exactly two shapes (owner directives 2026-08-26
             # and 2026-08-29): 16 = the single canary; 18 = the five-shot

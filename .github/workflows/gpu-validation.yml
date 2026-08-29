@@ -69,9 +69,9 @@ on:
         options: ["16", "17", "18", "19"]
         default: "16"
       op:
-        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only)."
+        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only). model_probe = ONE open-source video candidate named by probe_model, conditioned on the shared probe reference and measured on the A5000 (one candidate per dispatch, phase 16 only)."
         type: choice
-        options: [image_preprocess, image_generate, video_generate, audio_mux]
+        options: [image_preprocess, image_generate, video_generate, audio_mux, model_probe]
         default: image_preprocess
       endpoint_id:
         description: "Endpoint id (optional; must match the single live endpoint)."
@@ -98,10 +98,15 @@ on:
         type: string
         default: ""
       plate:
-        description: "image_generate only: WHICH conditioning plate to draw — a = Maya + girl + red balloon on the platform, b = black train at the platform (owner directive 2026-08-29, multi-reference conditioning; one dispatch draws one plate)."
+        description: "image_generate only: WHICH conditioning plate to draw — a = Maya + girl + red balloon on the platform, b = black train at the platform (owner directive 2026-08-29, multi-reference conditioning; one dispatch draws one plate). ref = the model benchmark's controlled reference: ONE adult, plain background, no props, drawn once and shared by every candidate."
         type: choice
-        options: [a, b]
+        options: [a, b, ref]
         default: a
+      probe_model:
+        description: "model_probe only: which benchmark row to measure. ONE candidate per dispatch — there is deliberately no battery shape, so a single wrong assumption cannot spend five times over before anyone reads a result."
+        type: choice
+        options: ["", ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v]
+        default: ""
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket."
         type: string
@@ -571,6 +576,7 @@ jobs:
       THROUGH_PHASE: ${{ inputs.through_phase }}
       OP: ${{ inputs.op }}
       PLATE: ${{ inputs.plate }}
+      PROBE_MODEL: ${{ inputs.probe_model }}
       # The battery PROVES both conditioning plates exist over the public
       # read base before its first paid submission (require_plates) — the
       # run 72 lesson, times five.
