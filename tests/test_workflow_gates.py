@@ -637,8 +637,13 @@ def test_gate7_dispatch_inputs_never_reach_a_shell_directly():
 
 def test_gate7_the_read_base_input_overrides_the_variable_everywhere():
     _, raw = _load("gpu-validation.yml")
-    assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 2, (
-        "both the spend job and the free frame pull must honour the override"
+    # Three sites now: the spend step itself (the battery PROVES both
+    # conditioning plates exist over the base before its first paid
+    # submission — the run-72 lesson, times five), the spend job's frame
+    # step, and the free frame pull.
+    assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 3, (
+        "spend preflight, spend frames, and the free frame pull must all "
+        "honour the override"
     )
 
 
@@ -686,3 +691,15 @@ def test_gate8_the_frame_job_still_cannot_reach_r2_with_credentials():
 def _spend_frame_steps():
     doc, _ = _load("gpu-validation.yml")
     return doc["jobs"]["frames_pull"]["steps"]
+
+
+def test_gate9_the_plate_input_is_a_closed_choice():
+    # Multi-reference conditioning (owner 2026-08-29): the dispatch picks
+    # WHICH plate to draw, never what it contains — a closed a/b choice,
+    # with the prompts as module constants in the tested driver.
+    doc, raw = _load("gpu-validation.yml")
+    plate = _triggers(doc)["workflow_dispatch"]["inputs"]["plate"]
+    assert plate["type"] == "choice"
+    assert plate["options"] == ["a", "b"]
+    assert plate["default"] == "a"
+    assert "PLATE: ${{ inputs.plate }}" in raw

@@ -770,18 +770,48 @@ def test_no_spend_run_output_can_hit_a_calibration_fixture_basename():
     assert not (built & forbidden), built & forbidden
 
 
-def test_video_battery_runs_exactly_five_shots_in_order(capsys):
+_PLATE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+def _with_plates(monkeypatch):
+    """The battery's plate preflight, satisfied offline: a public base in
+    the environment and a fetch that answers PNG bytes for both keys."""
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-example.r2.dev")
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        return _PLATE_PNG
+
+    return fetch, fetched
+
+
+def test_video_battery_runs_exactly_five_shots_in_order(capsys, monkeypatch):
+    fetch, fetched = _with_plates(monkeypatch)
     client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
     ft = FakeTime()
     facts = _preflight(client)
-    rows = spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    rows = spend_run.video_battery(
+        client, facts, sleep=ft.sleep, clock=ft.clock, fetch=fetch)
     assert len(rows) == 5
     assert len(client.submitted) == 5
+    # The owner's shot prompts travel VERBATIM — the contract is what the
+    # footage is judged against, the stored prompt is what the model is
+    # asked, and they are deliberately not the same string.
     sent_prompts = [payload["params"]["prompt"] for _, payload in client.submitted]
-    assert sent_prompts == [
-        spend_run.compile_motion_prompt(shot["contract"])
-        for shot in spend_run.ACTION_BATTERY
+    assert sent_prompts == [shot["prompt"] for shot in spend_run.ACTION_BATTERY]
+    # Multi-reference conditioning: every shot names ITS plate, both
+    # plates were verified once each BEFORE the first submission, and the
+    # input_key the worker receives is the server-derived plate key.
+    sent_inputs = [payload["input_key"] for _, payload in client.submitted]
+    assert sent_inputs == [
+        "out/validation/plate-a.png",
+        "out/validation/plate-a.png",
+        "out/validation/plate-b.png",
+        "out/validation/plate-b.png",
+        "out/validation/plate-a.png",
     ]
+    assert len(fetched) == 2 and all("plate-" in u for u in fetched)
     keys = [payload["output_key"] for _, payload in client.submitted]
     assert keys == [
         "out/validation/shot-001-maya-turns.mp4",
@@ -799,6 +829,10 @@ def test_video_battery_runs_exactly_five_shots_in_order(capsys):
     assert [r["contract"] for r in rows] == [
         shot["contract"] for shot in spend_run.ACTION_BATTERY
     ]
+    assert [r["plate"].rsplit("/", 1)[-1] for r in rows] == [
+        "plate-a.png", "plate-a.png", "plate-b.png", "plate-b.png",
+        "plate-a.png",
+    ]
     assert all(r["termination"] == spend_run.TERMINATION_CONFIRMED for r in rows)
     assert all(r["vram_total_mb"] == 24576 for r in rows)
     # The log carries the intent next to the result: slug, action and
@@ -810,7 +844,8 @@ def test_video_battery_runs_exactly_five_shots_in_order(capsys):
         assert shot["contract"]["required_motion"] in out
 
 
-def test_video_battery_records_provider_managed_standby_and_proceeds(capsys):
+def test_video_battery_records_provider_managed_standby_and_proceeds(capsys, monkeypatch):
+    fetch, _ = _with_plates(monkeypatch)
     # Owner directive 2026-08-26 (production Phase 6), superseding the
     # same-day blocking gate: standby is provider-managed and not
     # settable by any reachable API — RECORD it and run on active
@@ -819,12 +854,14 @@ def test_video_battery_records_provider_managed_standby_and_proceeds(capsys):
                         job_statuses=[_good_video_status() for _ in range(5)])
     ft = FakeTime()
     facts = _preflight(client)
-    rows = spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    rows = spend_run.video_battery(
+        client, facts, sleep=ft.sleep, clock=ft.clock, fetch=fetch)
     assert len(rows) == 5
     assert "STANDBY_PROVIDER_MANAGED" in capsys.readouterr().out
 
 
-def test_video_battery_stops_midway_with_no_retry_and_no_next_job():
+def test_video_battery_stops_midway_with_no_retry_and_no_next_job(monkeypatch):
+    fetch, _ = _with_plates(monkeypatch)
     statuses = [
         _good_video_status(),
         _good_video_status(),
@@ -834,20 +871,23 @@ def test_video_battery_stops_midway_with_no_retry_and_no_next_job():
     ft = FakeTime()
     facts = _preflight(client)
     with pytest.raises(spend_run.SpendStop) as exc:
-        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+        spend_run.video_battery(
+            client, facts, sleep=ft.sleep, clock=ft.clock, fetch=fetch)
     assert exc.value.code == "job-failed"
     # Scene 3 failed: it was submitted once (no retry) and scenes 4-5
     # were never submitted.
     assert len(client.submitted) == 3
 
 
-def test_video_battery_stops_on_unknown_termination_midway():
+def test_video_battery_stops_on_unknown_termination_midway(monkeypatch):
+    fetch, _ = _with_plates(monkeypatch)
     stuck = [{"workers": {"idle": 0, "running": 1, "initializing": 0}}] * 200
     client = FakeClient(job_statuses=[_good_video_status()], health_seq=stuck)
     ft = FakeTime()
     facts = _preflight(client)
     with pytest.raises(spend_run.SpendStop) as exc:
-        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+        spend_run.video_battery(
+            client, facts, sleep=ft.sleep, clock=ft.clock, fetch=fetch)
     assert exc.value.code == "termination-unknown"
     assert len(client.submitted) == 1
 
@@ -1299,14 +1339,12 @@ def test_image_canary_runs_one_still_at_phase_16(monkeypatch):
     spend_run.main(["spend_run", "run"])
     assert len(calls) == 1
     assert calls[0]["op"] == "image_generate"
-    # The still IS the action battery's conditioning plate (owner
-    # directive 2026-08-29): main must dispatch PLATE_PROMPT — never
-    # IMAGE_PROMPT — and name the object plate-002: plate-001 is the
+    # The still IS a conditioning plate (owner directive 2026-08-29,
+    # multi-reference): with no PLATE set the dispatch draws plate A —
+    # never IMAGE_PROMPT, and never plate-001/plate-002, which are
     # PLATE_INVALID evidence and must never be overwritten.
-    assert calls[0]["prompt"] == spend_run.PLATE_PROMPT
-    assert calls[0]["output_key"] == (
-        "out/validation/plate-002." + spend_run.contract_image_format()
-    )
+    assert calls[0]["prompt"] == spend_run.PLATE_A_PROMPT
+    assert calls[0]["output_key"] == "out/validation/plate-a.png"
 
 
 # ============================================ the no-idle-worker invariant
@@ -1450,19 +1488,146 @@ def test_no_function_name_still_promises_a_standby_gate():
     )
 
 
-def test_plate_prompt_carries_the_owner_ordering_and_exclusions():
-    # Owner directive 2026-08-29 (one authorized replacement): the critical
-    # elements come FIRST — plate-001 measured that this model keeps early
-    # clauses and drops late ones — exactly two people are declared, and the
-    # exclusions are explicit. This is the fix for a measured adherence
-    # failure, so it is pinned like one.
-    p = spend_run.PLATE_PROMPT
-    train, balloon, maya = p.index("train"), p.index("red balloon"), p.index("Maya")
-    assert train < maya and balloon < maya, "critical elements precede the cast"
-    assert "Exactly two people" in p
-    assert p.count("train") >= 2 and p.count("balloon") >= 3
-    assert "away from the tracks" in p
-    for exclusion in ("No other people", "no figures on the tracks",
-                      "no deformed people", "no extra limbs", "no text"):
-        assert exclusion in p, exclusion
-    assert len(p) < 1000
+# ==================== multi-reference conditioning (owner, 2026-08-29)
+
+
+def test_plate_prompts_are_simple_split_and_positive_only():
+    # Written after TWO measured adherence failures: no single overloaded
+    # plate, no negative prompts — this model is demonstrably
+    # negation-blind (plate-002 put its only figure ON the tracks against
+    # an explicit "no figures on the tracks"). Plate A carries the
+    # characters and the balloon; plate B carries the train; neither
+    # mentions the other's cast, and neither contains an exclusion.
+    a, b = spend_run.PLATE_A_PROMPT, spend_run.PLATE_B_PROMPT
+    for needed in ("Maya", "girl", "red balloon", "platform"):
+        assert needed in a, needed
+    assert "train" not in a.lower()
+    for needed in ("train", "platform"):
+        assert needed in b, needed
+    assert "Maya" not in b and "girl" not in b and "balloon" not in b
+    for prompt in (a, b):
+        low = prompt.lower()
+        for negation in ("no ", "not ", "without", "never"):
+            assert negation not in low, f"negation {negation!r} in a plate prompt"
+        assert len(prompt) < 1000
+
+
+def test_plate_keys_match_the_contract_image_format():
+    # The battery derives every conditioning input_key from PLATE_KEYS,
+    # and the image branch writes to the same names — one scheme, and its
+    # extension is the contract's own format, not a copy that can drift.
+    fmt = spend_run.contract_image_format()
+    assert set(spend_run.PLATE_KEYS) == {"a", "b"}
+    for name in spend_run.PLATE_KEYS.values():
+        assert name.endswith("." + fmt), name
+
+
+def test_every_shot_names_a_known_plate_and_the_split_is_the_owners():
+    plates = [shot["plate"] for shot in spend_run.ACTION_BATTERY]
+    assert plates == ["a", "a", "b", "b", "a"]
+    for shot in spend_run.ACTION_BATTERY:
+        assert shot["plate"] in spend_run.PLATE_KEYS
+        assert shot["prompt"], "the owner's shot prompt travels verbatim"
+        assert len(shot["prompt"]) < 1000
+
+
+def test_plate_b_selection_draws_the_train_plate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        spend_run, "preflight",
+        lambda *a, **k: {"endpoint_id": "ep-123", "input_ref": "in/test.png",
+                         "output_prefix": "out/validation"},
+    )
+    monkeypatch.setattr(
+        spend_run, "one_job",
+        lambda *a, **k: (calls.append(k), _good_image_status()["output"])[1],
+    )
+    monkeypatch.setattr(spend_run, "_inputs_from_env", lambda: {})
+    monkeypatch.setattr(spend_run, "economics", lambda rows: {})
+    monkeypatch.setenv("OP", "image_generate")
+    monkeypatch.setenv("THROUGH_PHASE", "16")
+    monkeypatch.setenv("APPROVAL_MODE", "owner-dispatch")
+    monkeypatch.setenv("PLATE", "b")
+    spend_run.main(["spend_run", "run"])
+    assert calls[0]["prompt"] == spend_run.PLATE_B_PROMPT
+    assert calls[0]["output_key"] == "out/validation/plate-b.png"
+
+
+def test_an_unknown_plate_reference_refuses_before_any_job(monkeypatch):
+    submitted = []
+    monkeypatch.setattr(
+        spend_run, "preflight",
+        lambda *a, **k: {"endpoint_id": "ep-123", "input_ref": "in/test.png",
+                         "output_prefix": "out/validation"},
+    )
+    monkeypatch.setattr(
+        spend_run, "one_job", lambda *a, **k: submitted.append(k))
+    monkeypatch.setattr(spend_run, "_inputs_from_env", lambda: {})
+    monkeypatch.setenv("OP", "image_generate")
+    monkeypatch.setenv("THROUGH_PHASE", "16")
+    monkeypatch.setenv("APPROVAL_MODE", "owner-dispatch")
+    monkeypatch.setenv("PLATE", "c")
+    assert spend_run.main(["spend_run", "run"]) != 0
+    assert submitted == []
+
+
+def test_a_missing_plate_refuses_the_battery_before_any_submission(monkeypatch):
+    # The run-72 lesson, times five: a paid job against a deleted input
+    # burned 202ms of billed GPU for a refusal. The battery now PROVES
+    # both plates over the public base first, so a missing plate costs
+    # zero submissions, not five.
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-example.r2.dev")
+    client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
+    ft = FakeTime()
+    facts = _preflight(client)
+
+    def missing(url):
+        raise OSError("HTTP 404")
+
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(
+            client, facts, sleep=ft.sleep, clock=ft.clock, fetch=missing)
+    assert exc.value.code == "plate-missing"
+    assert client.submitted == []
+
+
+def test_an_unset_base_refuses_the_battery_as_unverifiable(monkeypatch):
+    monkeypatch.delenv("R2_PUBLIC_BASE_URL", raising=False)
+    client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
+    ft = FakeTime()
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(client, facts, sleep=ft.sleep, clock=ft.clock)
+    assert exc.value.code == "plate-unverifiable"
+    assert client.submitted == []
+
+
+def test_a_non_png_plate_refuses_the_battery(monkeypatch):
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-example.r2.dev")
+    client = FakeClient(job_statuses=[_good_video_status() for _ in range(5)])
+    ft = FakeTime()
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.video_battery(
+            client, facts, sleep=ft.sleep, clock=ft.clock,
+            fetch=lambda url: b"<!DOCTYPE html>error page")
+    assert exc.value.code == "plate-missing"
+    assert client.submitted == []
+
+
+def test_one_job_carries_a_per_shot_input_key_when_given():
+    client = FakeClient(job_statuses=[_good_video_status(), _good_status()])
+    ft = FakeTime()
+    facts = _preflight(client)
+    spend_run.one_job(
+        client, facts, output_key="out/validation/shot-001-maya-turns.mp4",
+        op="video_generate", prompt="p", input_key="out/validation/plate-a.png",
+        sleep=ft.sleep, clock=ft.clock,
+    )
+    assert client.submitted[0][1]["input_key"] == "out/validation/plate-a.png"
+    # And without one, the run-wide test input, exactly as before.
+    spend_run.one_job(
+        client, facts, output_key="out/validation/x.jpeg",
+        sleep=ft.sleep, clock=ft.clock,
+    )
+    assert client.submitted[1][1]["input_key"] == facts["input_ref"]

@@ -97,6 +97,11 @@ on:
         description: "Type SET-TEMPLATE-ENV (exactly) to allow template-env. Writes the env field of ONE template, by reference."
         type: string
         default: ""
+      plate:
+        description: "image_generate only: WHICH conditioning plate to draw — a = Maya + girl + red balloon on the platform, b = black train at the platform (owner directive 2026-08-29, multi-reference conditioning; one dispatch draws one plate)."
+        type: choice
+        options: [a, b]
+        default: a
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket."
         type: string
@@ -525,6 +530,11 @@ jobs:
       GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
       THROUGH_PHASE: ${{ inputs.through_phase }}
       OP: ${{ inputs.op }}
+      PLATE: ${{ inputs.plate }}
+      # The battery PROVES both conditioning plates exist over the public
+      # read base before its first paid submission (require_plates) — the
+      # run 72 lesson, times five.
+      R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
       # Owner directive 2026-08-25: required reviewers are not offered on
       # this private repository's GitHub plan (the protection-rules
       # section does not render), so the owner's authenticated SPEND

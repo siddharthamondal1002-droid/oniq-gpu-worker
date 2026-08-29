@@ -513,72 +513,133 @@ AUDIO_NARRATION = "The character turns to face the light."
 # shot, and none is a calibration fixture basename (measured 2026-08-29
 # — see the rename notes at the canary output keys in main()).
 ACTION_BATTERY = (
+    # Owner directive 2026-08-29 (multi-reference conditioning): each
+    # shot names the REFERENCE it actually needs ("plate": a reference
+    # id, mapped to a server-derived key — never a path) and carries the
+    # owner's shot prompt VERBATIM. The action contract stays separate
+    # from the prompt: the contract is what the footage is judged
+    # against, the prompt is what the model is asked.
     {
         "slug": "maya-turns",
         "output": "shot-001-maya-turns.mp4",
+        "plate": "a",
+        "prompt": (
+            "Maya stands on the abandoned railway platform beside the "
+            "small girl holding a red balloon. Maya slowly turns her "
+            "head and upper body toward the distant railway while the "
+            "girl remains beside her. Their faces, clothing, body "
+            "proportions, red balloon, and surrounding platform remain "
+            "visually consistent throughout the shot. Gentle cinematic "
+            "push-in."
+        ),
         "contract": {
             "subject": "Maya",
-            "start_state": "standing beside the tracks facing the girl",
-            "action": "slowly turns toward the approaching train",
-            "end_state": "facing the train",
-            "camera_action": "slow push-in",
-            "environment_action": "the girl's balloon sways gently",
+            "start_state": "standing on the platform beside the girl",
+            "action": "slowly turns her head and upper body toward the "
+                      "distant railway",
+            "end_state": "facing toward the railway",
+            "camera_action": "gentle push-in (secondary to the turn)",
+            "environment_action": "the girl remains beside her",
             "required_motion": "head_and_body_rotation",
         },
     },
     {
         "slug": "maya-walks",
         "output": "shot-002-maya-walks.mp4",
+        "plate": "a",
+        "prompt": (
+            "Maya slowly walks along the abandoned railway platform "
+            "while the small girl holding the red balloon remains "
+            "nearby. Maya takes visible, natural steps forward. Her "
+            "face, hair, clothing, body proportions and the girl's "
+            "appearance remain consistent throughout the shot. The red "
+            "balloon moves naturally with the girl. Gentle cinematic "
+            "tracking shot."
+        ),
         "contract": {
             "subject": "Maya",
-            "start_state": "standing on the platform a few steps from the girl",
-            "action": "walks forward along the platform toward the girl",
-            "end_state": "beside the girl",
-            "camera_action": "tracks alongside",
-            "environment_action": "light flickers along the platform",
+            "start_state": "standing on the platform near the girl",
+            "action": "walks along the platform with visible, natural "
+                      "steps",
+            "end_state": "several steps further along the platform",
+            "camera_action": "gentle tracking shot",
+            "environment_action": "the balloon moves naturally with the "
+                                  "girl",
             "required_motion": "walking_legs_and_body",
         },
     },
     {
         "slug": "train-approaches",
         "output": "shot-003-train-approaches.mp4",
+        "plate": "b",
+        "prompt": (
+            "A black train slowly approaches the abandoned railway "
+            "platform from the distance. The train visibly changes "
+            "position and becomes progressively closer. Its body, "
+            "windows, headlights and structure remain consistent "
+            "throughout the shot. The railway environment remains "
+            "stable. Cinematic slow forward movement."
+        ),
         "contract": {
-            "subject": "the distant train",
-            "start_state": "far down the track",
-            "action": "approaches and grows larger while Maya and the girl "
-                      "hold still",
+            "subject": "the black train",
+            "start_state": "distant on the railway line",
+            "action": "visibly changes position and becomes "
+                      "progressively closer to the platform",
             "end_state": "noticeably closer and larger in frame",
-            "camera_action": "static",
-            "environment_action": "wind stirs clothing",
+            "camera_action": "static; camera movement must not be the "
+                             "only source of apparent motion",
+            "environment_action": "the railway environment remains "
+                                  "stable",
             "required_motion": "train_translation",
         },
     },
     {
         "slug": "train-door-opens",
         "output": "shot-004-train-door-opens.mp4",
+        "plate": "b",
+        "prompt": (
+            "The black train is stopped at the abandoned railway "
+            "platform. A clearly visible train door begins closed and "
+            "then physically opens. The same train, doorway, windows "
+            "and surrounding platform remain consistent throughout the "
+            "shot. The door movement is continuous and clearly visible."
+        ),
         "contract": {
-            "subject": "the train",
-            "start_state": "standing at the platform",
-            "action": "its door slides open",
-            "end_state": "with the door fully open",
+            "subject": "the train door",
+            "start_state": "closed, on the train stopped at the "
+                           "platform",
+            "action": "physically opens in one continuous visible "
+                      "movement",
+            "end_state": "open",
             "camera_action": "static",
-            "environment_action": "interior light spills onto the platform",
+            "environment_action": "train and platform remain "
+                                  "consistent",
             "required_motion": "door_slide",
         },
     },
     {
         "slug": "maya-interacts",
         "output": "shot-005-maya-interacts.mp4",
+        "plate": "a",
+        "prompt": (
+            "The small girl holding the red balloon stands beside Maya "
+            "on the abandoned railway platform. The girl slowly raises "
+            "one hand and points toward the darkness behind Maya. Maya "
+            "notices the gesture and turns slightly toward the girl. "
+            "Both characters remain visually consistent throughout the "
+            "shot. The red balloon remains visible and attached to the "
+            "girl's hand."
+        ),
         "contract": {
-            "subject": "Maya and the girl",
+            "subject": "the girl and Maya",
             "start_state": "standing near each other on the platform",
-            "action": "Maya crouches toward the girl and the girl raises "
-                      "her hand toward Maya",
-            "end_state": "with Maya crouched at the girl's eye level and "
-                         "the girl's hand raised",
-            "camera_action": "slow push-in",
-            "environment_action": "the balloon bobs",
-            "required_motion": "arm_raise_and_crouch",
+            "action": "the girl raises one hand and points; Maya "
+                      "notices and turns slightly toward her",
+            "end_state": "girl's hand raised, Maya turned toward her",
+            "camera_action": "static to gentle push-in",
+            "environment_action": "the balloon stays attached to the "
+                                  "girl's hand",
+            "required_motion": "arm_raise_and_reaction",
         },
     },
 )
@@ -608,38 +669,44 @@ IMAGE_PROMPT = (
     "asphalt reflecting the light. Cinematic, photographic, no text."
 )
 
-# The conditioning plate for the action battery — owner directive
-# 2026-08-29, same "the dispatch never chooses the text" discipline as
-# IMAGE_PROMPT. Every element a later shot needs MUST already be in
-# frame: a train cannot approach in a frame with no train, a balloon
-# cannot sway in a frame with no balloon, and Maya cannot walk toward a
-# girl who is not there. Both characters are full-body with space
-# around them because every required motion needs somewhere to go.
-# THE REPLACEMENT PLATE PROMPT, restructured from measured failure.
+# THE MULTI-REFERENCE CONDITIONING PLATES — owner directive 2026-08-29.
 #
-# Plate-001 (job 921ec495, 2026-08-29) was generated from a prompt that
-# named every element once, in narrative order — and the model kept the
-# early clauses and dropped the late ones: Maya arrived, the balloon and
-# the train did not, the girl came out small and deformed ON the rails,
-# and an unrequested man filled the right of frame. PLATE_INVALID.
+# Two generated plates, plate-001 and plate-002, PROVED that this model
+# cannot hold Maya + girl + balloon + train in one text-to-image frame:
+# the first kept early clauses and dropped the rest (plus an invented
+# man), the second kept one subject and the weather and dropped both the
+# girl and the train — and put the lone figure ON the tracks despite an
+# explicit "no figures on the tracks", which is negation-blindness
+# measured twice. Both PLATE_INVALID, $0.02 of measured evidence.
 #
-# Owner directive (2026-08-29, one authorized replacement): critical
-# elements FIRST and repeated, exactly two people declared, explicit
-# exclusions. This ordering is not style — it is the fix for the exact
-# adherence failure the first plate measured.
-PLATE_PROMPT = (
-    "A black train clearly visible in the distance on the railway line. "
-    "A bright red balloon held by a small girl. Exactly two people: "
-    "Maya, an adult woman, standing full-body on the platform of an "
-    "abandoned railway station, and the small girl with the red balloon "
-    "standing a few steps beside her on the platform, well away from "
-    "the tracks. The distant black train is unmistakably visible on the "
-    "rails. The red balloon is unmistakably visible in the girl's hand. "
-    "Rainy, eerie, cinematic atmosphere; wet platform, overcast light, "
-    "photographic realism. No other people, no extra characters, no "
-    "figures on the tracks, no deformed people, no extra limbs, no "
-    "extra balloons, no text, no logos."
+# So the architecture changed instead of the wish: STOP asking one image
+# to describe the whole movie. Each shot names the reference it actually
+# needs — PLATE_A carries the characters, PLATE_B carries the train —
+# and each plate prompt stays inside the two-to-three-element adherence
+# budget the failures measured. POSITIVE DESCRIPTIONS ONLY: exclusions
+# demonstrably backfire on this model, so there are none.
+PLATE_A_PROMPT = (
+    "Maya, a young adult woman in a dark coat, stands on an abandoned "
+    "railway station platform in the rain. A small girl stands a few "
+    "steps beside her on the platform, holding a bright red balloon on "
+    "a string. Both characters are fully visible head to toe, with the "
+    "empty platform and misty air around them. Rainy, eerie, cinematic, "
+    "photographic realism."
 )
+
+PLATE_B_PROMPT = (
+    "A black passenger train stands on the tracks beside an abandoned "
+    "railway station platform in the rain. The train is large and "
+    "clearly visible, its dark body, windows and closed doors facing "
+    "the platform, the track stretching away behind it. Mist, wet "
+    "surfaces, eerie cinematic atmosphere, photographic realism."
+)
+
+# Where each plate lives, relative to the run's output prefix. The
+# battery derives every input_key from THESE — a reference ID in the
+# shot maps to a server-derived key, and no caller-supplied path exists
+# anywhere on this route (the same fence inHouseMotion holds).
+PLATE_KEYS = {"a": "plate-a.png", "b": "plate-b.png"}
 
 
 def verify_image_success(output: dict) -> None:
@@ -868,19 +935,24 @@ def one_job(
     output_key: str,
     op: str = "image_preprocess",
     prompt: str | None = None,
+    input_key: str | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
     """Phases 12-16 for a single job. Fail-closed at every boundary.
 
     `prompt` may only ever come from this module's own constants
-    (VIDEO_PROMPT, PLATE_PROMPT, or a prompt compiled from an
-    ACTION_BATTERY contract) — no caller input reaches it, because the
+    (VIDEO_PROMPT, PLATE_A_PROMPT/PLATE_B_PROMPT, or an ACTION_BATTERY
+    shot's stored prompt) — no caller input reaches it, because the
     workflow exposes no prompt field at all."""
     quote = requote(client)
     payload = {
         "op": op,
-        "input_key": facts["input_ref"],
+        # Per-shot conditioning (owner directive 2026-08-29): a shot that
+        # names its own reference passes it here; everything else keeps
+        # the run-wide test input. Both are server-derived — no caller
+        # path reaches this field.
+        "input_key": input_key or facts["input_ref"],
         "output_key": output_key,
     }
     watch_s = None
@@ -1036,7 +1108,47 @@ def record_standby_state(client) -> None:
         )
 
 
-def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic) -> list:
+def require_plates(facts: dict, *, fetch=None) -> dict:
+    """Both conditioning plates, PROVED to exist before a rupee moves.
+
+    The five-shot battery of 2026-08-29 (run 72) submitted a paid job
+    whose input_key had been deleted from the bucket; the worker refused
+    it in 202ms of billed execution. That was ONE job. This battery
+    would repeat the mistake five times, so the plates are fetched over
+    the public read base and proved by their own PNG magic BEFORE the
+    first submission. Fail-closed: no base means no proof, and no proof
+    means no battery — a SpendStop, never a shrug.
+
+    Returns {reference_id: full_key} for the battery to condition on.
+    """
+    base = os.environ.get("R2_PUBLIC_BASE_URL", "")
+    try:
+        normalised = frame_pull.normalise_base(base)
+    except frame_pull.FramePullError as exc:
+        raise SpendStop(
+            "plate-unverifiable",
+            f"cannot prove the conditioning plates exist ({exc.code}); "
+            "set R2_PUBLIC_BASE_URL (public read base) for the run",
+        )
+    fetcher = fetch or frame_pull._fetch
+    keys = {}
+    for ref, name in sorted(PLATE_KEYS.items()):
+        key = f"{facts['output_prefix']}/{name}"
+        try:
+            data = fetcher(frame_pull.public_url(normalised, key))
+            frame_pull.verify_png(data)
+        except Exception as exc:  # noqa: BLE001 — every shape is a refusal
+            raise SpendStop(
+                "plate-missing",
+                f"conditioning plate {ref.upper()} ({key}) did not verify: "
+                f"{type(exc).__name__} — generate it before the battery",
+            )
+        keys[ref] = key
+        print(f"plate {ref.upper()} verified: {key} ({len(data)} bytes)")
+    return keys
+
+
+def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic, fetch=None) -> list:
     """The owner's five-shot ACTION BATTERY (directive 2026-08-29):
     exactly five video jobs, strictly sequential, each with its own
     requote/admission, verification, billing reconciliation and
@@ -1046,12 +1158,15 @@ def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic
     so the log carries what the shot was supposed to do next to what it
     measurably did — that adjacency is what makes a frame-pull verdict
     arguable from the log alone."""
+    plate_keys = require_plates(facts, fetch=fetch)
     record_standby_state(client)
     rows = []
     for index, shot in enumerate(ACTION_BATTERY, start=1):
         slug = shot["slug"]
         shot_contract = shot["contract"]
+        plate_key = plate_keys[shot["plate"]]
         print(f"--- shot {index}/5 [{slug}] ---")
+        print(f"    conditioned on: plate {shot['plate'].upper()} = {plate_key}")
         print(f"    action: {shot_contract['action']}")
         print(f"    required_motion: {shot_contract['required_motion']}")
         row = one_job(
@@ -1059,12 +1174,14 @@ def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic
             facts,
             output_key=f"{facts['output_prefix']}/{shot['output']}",
             op="video_generate",
-            prompt=compile_motion_prompt(shot_contract),
+            prompt=shot["prompt"],
+            input_key=plate_key,
             sleep=sleep,
             clock=clock,
         )
         row["scene"] = slug
         row["contract"] = shot_contract
+        row["plate"] = plate_key
         rows.append(row)
         print(f"shot {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
     return rows
@@ -1246,19 +1363,32 @@ def main(argv) -> int:
                     "image-through-phase",
                     "image_generate supports through_phase 16 (one still) only",
                 )
+            # WHICH plate: "a" (characters + balloon) or "b" (train).
+            # Owner directive 2026-08-29, multi-reference conditioning —
+            # one dispatch draws ONE plate, and the choice maps to a
+            # module prompt and a fixed key. plate-001/plate-002 are
+            # PLATE_INVALID evidence and are never written again.
+            which = os.environ.get("PLATE", "a").strip().lower()
+            if which not in PLATE_KEYS:
+                raise SpendStop(
+                    "plate-unknown",
+                    f"PLATE={which!r} — the references are 'a' "
+                    "(characters + balloon) and 'b' (train)",
+                )
+            plate_prompt = PLATE_A_PROMPT if which == "a" else PLATE_B_PROMPT
             rows = [
                 one_job(
                     rp,
                     facts,
-                    # plate-002: plate-001 is PLATE_INVALID evidence and
-                    # stays in the bucket unmodified.
-                    output_key=f"{facts['output_prefix']}/plate-002."
-                    + contract_image_format(),
+                    output_key=f"{facts['output_prefix']}/{PLATE_KEYS[which]}",
                     op=op,
-                    prompt=PLATE_PROMPT,
+                    prompt=plate_prompt,
                 )
             ]
-            print("PHASE 13-16 PASS — one real in-house still, verified and terminated")
+            print(
+                f"PHASE 13-16 PASS — plate {which.upper()} drawn, "
+                "verified and terminated"
+            )
         elif op == "video_generate":
             # Video knows exactly two shapes (owner directives 2026-08-26
             # and 2026-08-29): 16 = the single canary; 18 = the five-shot
