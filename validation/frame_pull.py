@@ -307,10 +307,22 @@ def pull_clip(
     the base itself — one clip that cannot be fetched must not lose the
     frames of the four that can.
     """
+    # TWO READ PATHS, AND ONLY ONE OF THEM CARRIES AUTHORITY.
+    #
+    # `_signed` is a presigned, read-only, single-object, short-lived URL —
+    # the private-bucket path (owner directive 2026-08-29: production R2
+    # stays private). It is a CREDENTIAL, so it is used and never named:
+    # it does not reach `report`, a log line, or an exception. Everything
+    # visible is safe_label()'s object name.
+    signed = clip.get("_signed")
     key = clip.get("output_key")
-    url = public_url(base, key)
+    if signed:
+        url = signed
+        report = {"scene": clip.get("scene"), "source": "signed", "artifacts": []}
+    else:
+        url = public_url(base, key)
+        report = {"scene": clip.get("scene"), "output_key": key, "artifacts": []}
     stem = (clip.get("scene") or key or "clip").replace("/", "-")
-    report = {"scene": clip.get("scene"), "output_key": key, "artifacts": []}
     try:
         data = fetch(url)
         verify_artifact(data, clip.get("output_bytes"))
@@ -387,6 +399,60 @@ def probe_seconds(path: str, *, run=subprocess.run):
     return seconds if seconds > 0 else None
 
 
+def safe_label(url: str) -> str:
+    """The object's NAME out of a signed URL, and nothing else.
+
+    A presigned URL is a credential: the signature rides in the query and
+    anyone holding the string can read that object until it expires. So
+    it never reaches a log, a report or an exception message — only this,
+    the last path segment with the query stripped.
+    """
+    path = urllib.parse.urlsplit(url).path
+    tail = urllib.parse.unquote(path.rsplit("/", 1)[-1]) or "clip"
+    return tail.rsplit(".", 1)[0][:80] or "clip"
+
+
+def clips_from_signed(raw: str) -> list:
+    """A manifest from SIGNED URLs — the private-bucket read path.
+
+    OWNER DIRECTIVE 2026-08-29: the production bucket stays private. LTX
+    validation clips are retrieved through an authenticated, read-only,
+    single-object, short-lived URL instead of by opening the bucket to
+    the world. A presigned GET grants exactly one capability — read this
+    one object, until it expires — which is the same shape as the Story
+    job token: a receipt, not a key.
+
+    THE URL IS A CREDENTIAL AND IS TREATED AS ONE. It lives only in the
+    clip dict under `_signed`, is never printed, never written to the
+    report, and never appears in an error. Everything user-visible uses
+    safe_label(). The workflow additionally registers each one with
+    ::add-mask:: before this module runs, so GitHub redacts it from every
+    later line — the same protection story-worker.yml gives the job
+    token.
+
+    A query string is REQUIRED here rather than refused: that is where
+    the signature lives. This is the deliberate opposite of
+    normalise_base, and the two paths stay separate for exactly that
+    reason — a base must never carry authority, and a signed URL is
+    nothing but authority.
+    """
+    clips = []
+    for url in [u.strip() for u in (raw or "").replace(",", "\n").splitlines()]:
+        if not url:
+            continue
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "https":
+            raise FramePullError(
+                "signed-not-https",
+                "a signed URL must be https — refusing to send a credential "
+                "in the clear",
+            )
+        if not parts.netloc:
+            raise FramePullError("signed-no-host", "signed URL has no host")
+        clips.append({"scene": safe_label(url), "_signed": url})
+    return clips
+
+
 def clips_from_keys(raw: str) -> list:
     """A manifest built from object keys named directly.
 
@@ -410,6 +476,41 @@ def clips_from_keys(raw: str) -> list:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "signed":
+        # The private-bucket path. The URLs are credentials: they are read
+        # from the environment, never an argument (an argv is visible in
+        # `ps`), and nothing below ever prints one.
+        try:
+            clips = clips_from_signed(os.environ.get("SIGNED_URLS", ""))
+        except FramePullError as exc:
+            print(f"frame-pull REFUSED: {exc.code} — {exc.message}")
+            return 0
+        if not clips:
+            print("frame-pull: SIGNED_URLS names no object — nothing to fetch")
+            return 0
+        print(f"frame-pull: reading {len(clips)} clip(s) through signed URLs")
+        os.makedirs(FRAME_DIR, exist_ok=True)
+        reports = [pull_clip(clip, "", out_dir=FRAME_DIR) for clip in clips]
+        for report in reports:
+            if report.get("error"):
+                hint = report.get("hint")
+                print(
+                    f"  {report['scene']}: NO FRAMES ({report['error']})"
+                    + (f" — {hint}" if hint else "")
+                )
+            else:
+                print(
+                    f"  {report['scene']}: {report['bytes']} bytes, "
+                    f"{len(report['artifacts'])} artifact(s)"
+                )
+        with open(
+            os.path.join(FRAME_DIR, "frames.json"), "w", encoding="utf-8"
+        ) as handle:
+            json.dump(reports, handle, indent=2, sort_keys=True)
+        got = sum(1 for r in reports if not r.get("error"))
+        print(f"frame-pull: {got}/{len(reports)} clip(s) retrieved and cut")
+        write_summary(clips, reports)
+        return 0
     if argv and argv[0] == "keys":
         clips = clips_from_keys(os.environ.get("FRAME_KEYS", ""))
         if not clips:
@@ -462,7 +563,7 @@ def summary_markdown(clips, reports) -> str:
     the first question after a canary is "did the frames come back", and
     that should be answerable without downloading anything.
     """
-    by_key = {c.get("output_key"): c for c in clips}
+    by_key = {c.get("output_key"): c for c in clips if c.get("output_key")}
     lines = ["### LTX frames", "", "| scene | clip | measured | artifacts |", "|---|---|---|---|"]
     for report in reports:
         clip = by_key.get(report.get("output_key"), {})
@@ -474,10 +575,15 @@ def summary_markdown(clips, reports) -> str:
             names = f"**none — {report['error']}**"
         else:
             names = "<br>".join(report.get("artifacts") or []) or "none"
-        lines.append(
-            f"| {report.get('scene') or '—'} | `{report.get('output_key')}` "
-            f"| {measured} | {names} |"
+        # A signed clip has no public key to name, and its URL is a
+        # credential that must never reach a report. Say where it came
+        # from instead.
+        origin = (
+            f"`{report['output_key']}`"
+            if report.get("output_key")
+            else "_signed URL (private bucket)_"
         )
+        lines.append(f"| {report.get('scene') or '—'} | {origin} | {measured} | {names} |")
     got = sum(1 for r in reports if not r.get("error"))
     lines += ["", f"{got}/{len(reports)} clip(s) retrieved. Download the "
                   "`ltx-frames` artifact to inspect them."]

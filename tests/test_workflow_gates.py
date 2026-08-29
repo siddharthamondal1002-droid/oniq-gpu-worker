@@ -640,3 +640,49 @@ def test_gate7_the_read_base_input_overrides_the_variable_everywhere():
     assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 2, (
         "both the spend job and the free frame pull must honour the override"
     )
+
+
+# ------------------------------- gate 8: the private-bucket read path
+#
+# Owner directive 2026-08-29: production R2 stays PRIVATE. Validation
+# clips are read through a presigned, read-only, single-object,
+# short-lived URL. That URL is a credential, and the whole point of not
+# opening the bucket is lost if it then leaks into a public CI log.
+
+
+def test_gate8_signed_urls_are_masked_before_any_step_can_echo_one():
+    steps = _spend_frame_steps()
+    names = [s.get("name") or "" for s in steps]
+    mask = next(i for i, n in enumerate(names) if "Mask the signed URLs" in n)
+    use = next(i for i, n in enumerate(names) if "signed URLs (private bucket)" in n)
+    assert mask < use, "a credential must be masked before it is used"
+    assert "::add-mask::" in (steps[mask].get("run") or "")
+
+
+def test_gate8_the_signed_url_never_reaches_a_shell_argument():
+    # An argv is visible in `ps`; the URL travels as env on every step.
+    for step in _spend_frame_steps():
+        assert "inputs.signed_urls" not in (step.get("run") or "")
+
+
+def test_gate8_the_two_read_paths_are_mutually_exclusive():
+    steps = {s.get("name"): s for s in _spend_frame_steps()}
+    public = steps["Frames from objects that already exist (public read)"]
+    signed = steps["Frames through signed URLs (private bucket)"]
+    assert public["if"] == "inputs.signed_urls == ''"
+    assert signed["if"] == "inputs.signed_urls != ''"
+    # The signed path is handed no public base — the URL carries its own
+    # authority and a base has nothing to contribute.
+    assert "R2_PUBLIC_BASE_URL" not in json.dumps(signed.get("env", {}))
+
+
+def test_gate8_the_frame_job_still_cannot_reach_r2_with_credentials():
+    doc, _ = _load("gpu-validation.yml")
+    blob = json.dumps(doc["jobs"]["frames_pull"])
+    for forbidden in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_S3_ENDPOINT"):
+        assert forbidden not in blob, "the read path never gains write access"
+
+
+def _spend_frame_steps():
+    doc, _ = _load("gpu-validation.yml")
+    return doc["jobs"]["frames_pull"]["steps"]

@@ -47,6 +47,10 @@ on:
         description: "frames-pull: comma-separated R2 object keys to fetch frames from, e.g. validation/out/ltx-001.mp4. Read-only, $0 — these are objects that ALREADY exist; no job is submitted."
         type: string
         default: ""
+      signed_urls:
+        description: "frames-pull, PRIVATE BUCKET path: presigned read-only GET URLs, one per clip, comma or newline separated. Use this instead of frame_keys when the bucket is private (owner directive 2026-08-29 — production R2 stays private). EACH URL IS A CREDENTIAL: use the SHORTEST workable expiry, because GitHub records dispatch inputs on the run. They are ::add-mask::ed before anything can print one, and never reach a log, report or artifact."
+        type: string
+        default: ""
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
         type: string
@@ -201,7 +205,30 @@ jobs:
           python-version: "3.11"
       - name: ffmpeg
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
-      - name: "Frames from objects that already exist"
+      # MASK FIRST, BEFORE ANYTHING CAN PRINT ONE.
+      #
+      # A presigned URL is a credential — the signature is in the query and
+      # whoever holds the string can read that object until it expires.
+      # ::add-mask:: makes GitHub redact it from every later line of this
+      # job, which is the same protection story-worker.yml gives the Story
+      # job token, and for the same reason: a printed credential is a
+      # printed credential even when it is short-lived.
+      - name: Mask the signed URLs before any step can echo one
+        if: inputs.signed_urls != ''
+        env:
+          SIGNED_URLS: ${{ inputs.signed_urls }}
+        run: |
+          python3 - <<'PY'
+          import os
+          raw = os.environ.get("SIGNED_URLS", "").replace(",", "\n")
+          for url in raw.splitlines():
+              url = url.strip()
+              if url:
+                  print(f"::add-mask::{url}")
+          PY
+
+      - name: "Frames from objects that already exist (public read)"
+        if: inputs.signed_urls == ''
         # Both values travel as ENVIRONMENT, never interpolated into the
         # shell: a dispatch input pasted straight into a `run:` script is
         # a command injection, and the fact that only the owner can
@@ -210,6 +237,14 @@ jobs:
           R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
           FRAME_KEYS: ${{ inputs.frame_keys }}
         run: python -m validation.frame_pull keys
+
+      - name: "Frames through signed URLs (private bucket)"
+        if: inputs.signed_urls != ''
+        # No public base is passed at all on this path: the URL carries its
+        # own authority and there is nothing for a base to contribute.
+        env:
+          SIGNED_URLS: ${{ inputs.signed_urls }}
+        run: python -m validation.frame_pull signed
       - name: "The frames, for inspection"
         if: always()
         uses: actions/upload-artifact@v4

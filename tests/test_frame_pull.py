@@ -469,3 +469,123 @@ def test_a_network_failure_is_still_named_by_class_only(tmp_path):
         run=lambda args, **kw: _Result(0),
     )
     assert report["error"] == "fetch-failed:OSError"
+
+
+# ============================================================================
+# THE PRIVATE-BUCKET PATH (owner directive 2026-08-29: R2 stays private)
+#
+# A presigned URL is a credential: the signature is in the query and anyone
+# holding the string can read that object until it expires. These tests exist
+# because the whole point of not opening the bucket is lost if the credential
+# then leaks into a public CI log.
+# ============================================================================
+
+SIGNED = (
+    "https://oniq-gpu.abc123.r2.cloudflarestorage.com/validation/out/ltx-001.mp4"
+    "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F20260829"
+    "&X-Amz-Signature=1234deadbeefcafe&X-Amz-Expires=900"
+)
+SECRETS = ("X-Amz-Signature", "1234deadbeefcafe", "AKIAEXAMPLE", "abc123")
+
+
+def test_a_signed_url_is_accepted_where_a_base_would_be_refused():
+    # The deliberate opposite of normalise_base: here the query IS the
+    # point. The two paths stay separate for exactly that reason.
+    with pytest.raises(frame_pull.FramePullError):
+        frame_pull.normalise_base(SIGNED)
+    clips = frame_pull.clips_from_signed(SIGNED)
+    assert len(clips) == 1
+    assert clips[0]["_signed"] == SIGNED
+
+
+def test_a_signed_url_is_never_sent_in_the_clear():
+    with pytest.raises(frame_pull.FramePullError) as exc:
+        frame_pull.clips_from_signed("http://oniq-gpu.example/x.mp4?X-Amz-Signature=a")
+    assert exc.value.code == "signed-not-https"
+
+
+def test_only_the_object_name_survives_into_anything_visible():
+    assert frame_pull.safe_label(SIGNED) == "ltx-001"
+    for secret in SECRETS:
+        assert secret not in frame_pull.safe_label(SIGNED)
+
+
+def test_the_credential_never_reaches_the_report(tmp_path):
+    report = frame_pull.pull_clip(
+        frame_pull.clips_from_signed(SIGNED)[0],
+        "",  # no public base at all on this path
+        out_dir=str(tmp_path),
+        fetch=lambda url: _mp4(256),
+        run=lambda args, **kw: _Result(0, "4.04\n"),
+    )
+    assert report["scene"] == "ltx-001"
+    assert report["source"] == "signed"
+    blob = json.dumps(report)
+    for secret in SECRETS:
+        assert secret not in blob, f"{secret} leaked into the report"
+    assert "_signed" not in blob
+
+
+def test_the_credential_never_reaches_the_run_summary():
+    clips = frame_pull.clips_from_signed(SIGNED)
+    reports = [{"scene": "ltx-001", "source": "signed", "bytes": 9, "artifacts": ["a.png"]}]
+    md = frame_pull.summary_markdown(clips, reports)
+    for secret in SECRETS:
+        assert secret not in md
+    assert "signed URL (private bucket)" in md
+
+
+def test_the_credential_never_reaches_stdout(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIGNED_URLS", SIGNED)
+    monkeypatch.setattr(frame_pull, "_fetch", lambda url: _mp4(256))
+    monkeypatch.setattr(
+        frame_pull.subprocess, "run", lambda args, **kw: _Result(0, "4.04\n")
+    )
+    assert frame_pull.main(["signed"]) == 0
+    out = capsys.readouterr().out
+    for secret in SECRETS:
+        assert secret not in out, f"{secret} printed to a public CI log"
+    assert "ltx-001" in out
+
+
+def test_the_signed_path_still_proves_the_bytes(tmp_path):
+    # Authentication is not a reason to trust the payload: a 200 carrying
+    # an HTML error page is still not an mp4.
+    report = frame_pull.pull_clip(
+        frame_pull.clips_from_signed(SIGNED)[0],
+        "",
+        out_dir=str(tmp_path),
+        fetch=lambda url: b"<!DOCTYPE html><html>nope</html>",
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "artifact-not-mp4"
+
+
+def test_a_403_on_the_signed_path_reports_the_status_without_the_url(tmp_path):
+    import urllib.error
+
+    report = frame_pull.pull_clip(
+        frame_pull.clips_from_signed(SIGNED)[0],
+        "",
+        out_dir=str(tmp_path),
+        fetch=lambda url: (_ for _ in ()).throw(
+            urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        ),
+        run=lambda args, **kw: _Result(0),
+    )
+    assert report["error"] == "fetch-failed:HTTP 403"
+    for secret in SECRETS:
+        assert secret not in json.dumps(report)
+
+
+def test_several_signed_urls_may_be_given_at_once():
+    clips = frame_pull.clips_from_signed(SIGNED + "\n" + SIGNED.replace("ltx-001", "ltx-002"))
+    assert [c["scene"] for c in clips] == ["ltx-001", "ltx-002"]
+
+
+def test_no_signed_urls_is_a_quiet_success(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SIGNED_URLS", "")
+    assert frame_pull.main(["signed"]) == 0
+    assert "names no object" in capsys.readouterr().out
