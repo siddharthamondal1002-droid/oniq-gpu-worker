@@ -1301,11 +1301,11 @@ def test_image_canary_runs_one_still_at_phase_16(monkeypatch):
     assert calls[0]["op"] == "image_generate"
     # The still IS the action battery's conditioning plate (owner
     # directive 2026-08-29): main must dispatch PLATE_PROMPT — never
-    # IMAGE_PROMPT — and name the object plate-001, off every fixture
-    # basename.
+    # IMAGE_PROMPT — and name the object plate-002: plate-001 is the
+    # PLATE_INVALID evidence and must never be overwritten.
     assert calls[0]["prompt"] == spend_run.PLATE_PROMPT
     assert calls[0]["output_key"] == (
-        "out/validation/plate-001." + spend_run.contract_image_format()
+        "out/validation/plate-002." + spend_run.contract_image_format()
     )
 
 
@@ -1448,3 +1448,21 @@ def test_no_function_name_still_promises_a_standby_gate():
         f"{promises} name a standby GATE, but standby is informational — "
         "rename to record_/read_ so the name matches the behaviour"
     )
+
+
+def test_plate_prompt_carries_the_owner_ordering_and_exclusions():
+    # Owner directive 2026-08-29 (one authorized replacement): the critical
+    # elements come FIRST — plate-001 measured that this model keeps early
+    # clauses and drops late ones — exactly two people are declared, and the
+    # exclusions are explicit. This is the fix for a measured adherence
+    # failure, so it is pinned like one.
+    p = spend_run.PLATE_PROMPT
+    train, balloon, maya = p.index("train"), p.index("red balloon"), p.index("Maya")
+    assert train < maya and balloon < maya, "critical elements precede the cast"
+    assert "Exactly two people" in p
+    assert p.count("train") >= 2 and p.count("balloon") >= 3
+    assert "away from the tracks" in p
+    for exclusion in ("No other people", "no figures on the tracks",
+                      "no deformed people", "no extra limbs", "no text"):
+        assert exclusion in p, exclusion
+    assert len(p) < 1000

@@ -615,13 +615,30 @@ IMAGE_PROMPT = (
 # cannot sway in a frame with no balloon, and Maya cannot walk toward a
 # girl who is not there. Both characters are full-body with space
 # around them because every required motion needs somewhere to go.
+# THE REPLACEMENT PLATE PROMPT, restructured from measured failure.
+#
+# Plate-001 (job 921ec495, 2026-08-29) was generated from a prompt that
+# named every element once, in narrative order — and the model kept the
+# early clauses and dropped the late ones: Maya arrived, the balloon and
+# the train did not, the girl came out small and deformed ON the rails,
+# and an unrequested man filled the right of frame. PLATE_INVALID.
+#
+# Owner directive (2026-08-29, one authorized replacement): critical
+# elements FIRST and repeated, exactly two people declared, explicit
+# exclusions. This ordering is not style — it is the fix for the exact
+# adherence failure the first plate measured.
 PLATE_PROMPT = (
-    "Cinematic realistic scene: a young woman named Maya standing on a "
-    "railway platform beside the tracks at golden hour. A small girl "
-    "stands a few steps away holding a red balloon. An approaching "
-    "train is visible far down the track. Both characters clearly "
-    "visible full-body, with space around them to move. Photographic, "
-    "natural light, no text."
+    "A black train clearly visible in the distance on the railway line. "
+    "A bright red balloon held by a small girl. Exactly two people: "
+    "Maya, an adult woman, standing full-body on the platform of an "
+    "abandoned railway station, and the small girl with the red balloon "
+    "standing a few steps beside her on the platform, well away from "
+    "the tracks. The distant black train is unmistakably visible on the "
+    "rails. The red balloon is unmistakably visible in the girl's hand. "
+    "Rainy, eerie, cinematic atmosphere; wet platform, overcast light, "
+    "photographic realism. No other people, no extra characters, no "
+    "figures on the tracks, no deformed people, no extra limbs, no "
+    "extra balloons, no text, no logos."
 )
 
 
@@ -1233,7 +1250,9 @@ def main(argv) -> int:
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/plate-001."
+                    # plate-002: plate-001 is PLATE_INVALID evidence and
+                    # stays in the bucket unmodified.
+                    output_key=f"{facts['output_prefix']}/plate-002."
                     + contract_image_format(),
                     op=op,
                     prompt=PLATE_PROMPT,
