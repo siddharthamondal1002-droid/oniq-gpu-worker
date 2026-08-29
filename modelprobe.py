@@ -47,11 +47,16 @@ PROBE_CACHE = "/tmp/probe-models"
 # fitting this card and not.
 PROBE_MODELS: dict[str, dict] = {
     "ltx-13b": {
-        "label": "LTX-Video 13B",
-        "repo": "Lightricks/LTX-Video",
-        "revision": "8984fa25007f376c1a299016d0957a37a2f797bb",
+        "label": "LTX-Video 13B (distilled)",
+        # The 13B build with a DIFFUSERS LAYOUT. Lightricks/LTX-Video also
+        # carries 13B weights, but as root-level single files beside three
+        # other 13B variants and four fp8 copies — pointing a snapshot at
+        # that repository downloads roughly 200 GiB to use 27 of it, and
+        # loading it needs the single-file path rather than from_pretrained.
+        # This repo is one 13B checkpoint, loadable the ordinary way.
+        "repo": "Lightricks/LTX-Video-0.9.8-13B-distilled",
+        "revision": "7c64400e1861cc0d7b98d570a1926d5408ec60cd",
         "pipeline": "LTXImageToVideoPipeline",
-        "single_file": "ltxv-13b-0.9.8-dev.safetensors",
         "licence": "other (LTX Open Weights)",
         "dtype": "bfloat16",
         "offload": "model",
@@ -59,9 +64,22 @@ PROBE_MODELS: dict[str, dict] = {
         "height": 480,
         "frames": 97,
         "fps": 24,
-        # Measured 2026-08-29 from the registry: the single-file 13B checkpoint
-        # plus the pipeline components this repo ships beside it.
-        "download_gib": 26.62 + 17.74 + 1.56,
+        # Measured: transformer 24.29 + text_encoder 17.74 + vae 2.32.
+        "download_gib": 44.36,
+        # THE VAE PATTERNS ARE TWO EXACT FILENAMES, not vae/*. This
+        # repository nests a SECOND COMPLETE COPY of itself under vae/ —
+        # vae/transformer/, vae/text_encoder/ — 42.03 GiB of it, and
+        # huggingface_hub's fnmatch lets `*` cross a slash, so vae/* would
+        # quietly pull the lot.
+        "allow": [
+            "model_index.json",
+            "transformer/*",
+            "text_encoder/*",
+            "tokenizer/*",
+            "scheduler/*",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors",
+        ],
     },
     "wan21-i2v-480p": {
         "label": "Wan2.1 I2V-14B-480P",
@@ -79,6 +97,11 @@ PROBE_MODELS: dict[str, dict] = {
         "frames": 81,
         "fps": 16,
         "download_gib": 83.89,
+        "allow": [
+            "model_index.json", "transformer/*", "transformer_2/*",
+            "text_encoder/*", "tokenizer/*", "scheduler/*", "vae/*",
+            "image_encoder/*", "image_processor/*",
+        ],
     },
     "wan22-i2v-a14b": {
         "label": "Wan2.2 I2V-A14B",
@@ -96,6 +119,11 @@ PROBE_MODELS: dict[str, dict] = {
         # separately measured — the label shares a number with 2.1 and nothing
         # else.
         "download_gib": 117.52,
+        "allow": [
+            "model_index.json", "transformer/*", "transformer_2/*",
+            "text_encoder/*", "tokenizer/*", "scheduler/*", "vae/*",
+            "image_encoder/*", "image_processor/*",
+        ],
     },
     "cogvideox-i2v": {
         "label": "CogVideoX-5B-I2V",
@@ -113,6 +141,10 @@ PROBE_MODELS: dict[str, dict] = {
         "frames": 49,
         "fps": 8,
         "download_gib": 20.15,
+        "allow": [
+            "model_index.json", "transformer/*", "text_encoder/*",
+            "tokenizer/*", "scheduler/*", "vae/*",
+        ],
     },
 }
 
@@ -431,6 +463,10 @@ def _real_loader(spec_row: dict):  # pragma: no cover - needs CUDA and network
             revision=spec_row["revision"],
             local_dir=os.path.join(PROBE_CACHE, spec_row["repo"].replace("/", "--")),
             token=os.environ.get("HF_TOKEN") or None,
+            # BOUNDED. Without this a snapshot takes whatever the repository
+            # happens to contain, which for one of these candidates is four
+            # 13B variants and four fp8 copies — 200 GiB fetched to use 27.
+            allow_patterns=spec_row["allow"],
         )
         import diffusers
 

@@ -110,6 +110,28 @@ def test_wan21_and_wan22_are_separate_rows_with_separate_downloads():
     assert a["download_gib"] != b["download_gib"]
 
 
+def test_every_candidate_bounds_what_it_downloads():
+    """`snapshot_download` with no allow_patterns takes whatever the repository
+    happens to contain. That is not a size estimate being slightly off — it is
+    an unbounded fetch onto a disk the probe shares with production."""
+    for key, row in modelprobe.PROBE_MODELS.items():
+        assert row["allow"], key
+        assert "model_index.json" in row["allow"], key
+        assert "*" not in row["allow"], key
+        assert "**" not in row["allow"], key
+
+
+def test_the_ltx_repo_names_its_vae_files_rather_than_globbing_them():
+    """huggingface_hub's fnmatch lets `*` CROSS a slash, and this repository
+    nests a second complete copy of itself under vae/ — 42 GiB of it. `vae/*`
+    would quietly pull the lot, which is exactly the bug the allow list is
+    here to prevent."""
+    allow = modelprobe.PROBE_MODELS["ltx-13b"]["allow"]
+    assert "vae/*" not in allow
+    assert "vae/config.json" in allow
+    assert "vae/diffusion_pytorch_model.safetensors" in allow
+
+
 def test_each_candidate_runs_at_a_shape_it_actually_supports():
     """Forcing ONIQ's 704x480x97 onto every model would measure the mismatch,
     not the model. CogVideoX in particular is trained at a fixed 720x480x49."""
