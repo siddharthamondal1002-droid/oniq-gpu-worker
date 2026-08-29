@@ -625,3 +625,101 @@ def test_the_offload_choice_is_the_servers_and_no_caller_can_change_it():
            "offload": "model", "params": {"prompt": "turn"}}
     with pytest.raises(contract.ContractError):
         contract.validate_job(job)
+
+
+# --------------------------- a failed probe is a measurement, not a shrug
+
+
+def test_a_stop_carries_everything_measured_before_it(rig, monkeypatch):
+    """The GPU was rented either way. "wan22 fetched 61 GiB in 990s and ran
+    out of budget" is the answer for that candidate; "it failed" is not."""
+    def slow_fetch():
+        raise modelprobe.ProbeStop("DOWNLOAD_TIMEOUT", "61.00GiB in 990s (63.1 MiB/s)")
+
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.run(probe_job("wan22-i2v-a14b"), rig["ref"], rig["out"],
+                       fetch=slow_fetch,
+                       load_pipeline=lambda local: fake_pipe(),
+                       torch=FakeTorch())
+    report = stop.value.report
+    assert report["failure"] == "DOWNLOAD_TIMEOUT"
+    assert report["detail"] == "61.00GiB in 990s (63.1 MiB/s)"
+    assert report["model"] == "wan22-i2v-a14b"
+    assert report["repo"] == "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    # Disk was read BEFORE the fetch, so it survives a fetch that never ended.
+    assert report["disk_free_bytes"] == 500 * 1024**3
+    assert report["disk_total_bytes"] > 0
+    # And the card it ran on, so a failure cannot be blamed on the wrong GPU.
+    assert report["gpu_name"] == "NVIDIA RTX A5000"
+    assert report["device"] == "cuda"
+    assert report["total_wall_ms"] >= 0
+
+
+def test_a_stop_before_the_disk_read_still_reports_the_stage(rig):
+    """spec() refuses an unknown key before anything is measured. The report
+    must still name what happened rather than raising a bare exception."""
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.run(probe_job("not-a-candidate"), rig["ref"], rig["out"],
+                       fetch=rig["fetch"], load_pipeline=lambda local: fake_pipe(),
+                       torch=FakeTorch())
+    assert stop.value.failure == "MODEL_ERROR"
+
+
+def test_an_oom_report_names_the_card_and_its_peak(rig):
+    def boom(local):
+        raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.run(probe_job("wan21-i2v-480p"), rig["ref"], rig["out"],
+                       fetch=rig["fetch"], load_pipeline=boom, torch=FakeTorch())
+    report = stop.value.report
+    assert report["failure"] == "VRAM_OOM"
+    assert report["vram_total_bytes"] == 24 * 1024**3
+    assert report["peak_allocated_bytes"] > 0
+    assert report["download_ms"] >= 0, "the fetch that DID finish is still timed"
+
+
+def test_a_failed_probes_report_survives_the_output_filter(rig):
+    """The measurements are the deliverable; the filter must not eat them."""
+    def boom(local):
+        raise RuntimeError("CUDA out of memory")
+
+    with pytest.raises(modelprobe.ProbeStop) as stop:
+        modelprobe.run(probe_job("ltx-13b"), rig["ref"], rig["out"],
+                       fetch=rig["fetch"], load_pipeline=boom, torch=FakeTorch())
+    kept = contract.filter_output({
+        "ok": False, "code": stop.value.failure, "error": stop.value.detail,
+        **stop.value.report,
+    })
+    for field in ("failure", "detail", "download_ms", "disk_free_bytes",
+                  "vram_total_bytes", "peak_allocated_bytes", "repo", "revision"):
+        assert field in kept, field
+
+
+def test_the_handler_returns_the_failed_probes_numbers(monkeypatch):
+    """The generic branch answers "unexpected-exception: ProbeStop" —
+    the stage, the detail and every measurement discarded, on a GPU that was
+    billed regardless."""
+    import handler
+    import storage
+
+    monkeypatch.setattr(handler.storage, "require_configured", lambda: None)
+    monkeypatch.setattr(handler.storage, "download", lambda k, p, l: open(p, "wb").write(b"x"))
+    monkeypatch.setattr(
+        modelprobe, "run",
+        lambda *a, **k: (_ for _ in ()).throw(modelprobe.ProbeStop(
+            "DOWNLOAD_TIMEOUT", "61.00GiB in 990s",
+            {"failure": "DOWNLOAD_TIMEOUT", "download_ms": 990_000,
+             "disk_free_bytes": 7, "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers"},
+        )),
+    )
+    result = handler.handle({"input": {
+        "op": "model_probe", "model": "wan22-i2v-a14b",
+        "input_key": "out/ref.png", "output_key": "out/probe.mp4",
+        "params": {"prompt": "the woman turns toward the camera"},
+    }})
+    assert result["ok"] is False
+    assert result["code"] == "DOWNLOAD_TIMEOUT"
+    assert result["download_ms"] == 990_000
+    assert result["repo"] == "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+    assert "unexpected-exception" not in str(result)

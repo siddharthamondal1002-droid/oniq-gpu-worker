@@ -1807,3 +1807,117 @@ def test_the_probe_watch_outlasts_the_window_it_authorised():
 
     src = inspect.getsource(spend_run.one_job)
     assert "watch_s = contract_probe_ceiling_ms() // 1000 + 900" in src
+
+
+# ------------------- a named probe failure is a result, not a broken run
+
+
+def _probe_failure_status(code="DOWNLOAD_TIMEOUT", execution_ms=990_000):
+    return {
+        "status": "COMPLETED",
+        "executionTime": execution_ms,
+        "output": {
+            "ok": False,
+            "code": code,
+            "error": "61.00GiB fetched in 990s (63.1 MiB/s)",
+            "failure": code,
+            "model": "wan22-i2v-a14b",
+            "repo": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
+            "download_ms": 990_000,
+            "download_bytes": 65_498_251_264,
+            "disk_free_bytes": 180 * 1024**3,
+            "disk_total_bytes": 200 * 1024**3,
+            "device": "cuda",
+            "gpu_name": "NVIDIA RTX A5000",
+        },
+    }
+
+
+def test_a_named_probe_failure_is_recorded_rather_than_raised():
+    """Owner directive: if a candidate OOMs, record the OOM and stop that
+    candidate. The GPU was rented and the failure was measured; refusing to
+    write it down leaves a gap where an answer belongs."""
+    client = FakeClient(job_statuses=[_probe_failure_status()])
+    facts = _preflight(client)
+    row = spend_run.one_job(
+        client, facts, output_key="out/probe-wan22.mp4", op="model_probe",
+        prompt="turn", input_key="out/ref.png", model="wan22-i2v-a14b",
+        preview=True, sleep=lambda s: None, clock=FakeTime().clock,
+    )
+    assert row["failure"] == "DOWNLOAD_TIMEOUT"
+    assert row["download_ms"] == 990_000
+    assert row["repo"] == "Wan-AI/Wan2.2-I2V-A14B-Diffusers"
+
+
+def test_a_recorded_failure_can_never_read_as_a_success():
+    client = FakeClient(job_statuses=[_probe_failure_status("VRAM_OOM")])
+    facts = _preflight(client)
+    row = spend_run.one_job(
+        client, facts, output_key="out/probe-wan21.mp4", op="model_probe",
+        prompt="turn", input_key="out/ref.png", model="wan21-i2v-480p",
+        sleep=lambda s: None, clock=FakeTime().clock,
+    )
+    assert row["failure"] == "VRAM_OOM"
+    assert row["failure"] != "SUCCESS"
+
+
+def test_an_unnamed_failure_still_stops_the_harness():
+    """Only modelprobe's own vocabulary counts. An arbitrary error code is
+    a broken run, not a candidate that was evaluated."""
+    broken = _probe_failure_status("some-other-error")
+    client = FakeClient(job_statuses=[broken])
+    facts = _preflight(client)
+    with pytest.raises(spend_run.SpendStop) as stop:
+        spend_run.one_job(
+            client, facts, output_key="out/probe.mp4", op="model_probe",
+            prompt="turn", input_key="out/ref.png", model="ltx-13b",
+            sleep=lambda s: None, clock=FakeTime().clock,
+        )
+    assert stop.value.code == "job-not-ok"
+
+
+def test_quality_fail_is_not_a_code_the_harness_will_ever_record():
+    """This path cannot see frames, so it can never record a verdict about
+    them — whatever a worker sends."""
+    assert spend_run.probe_failure({"ok": False, "code": "QUALITY_FAIL"}) == ""
+    assert spend_run.probe_failure({"ok": True, "code": "VRAM_OOM"}) == ""
+    assert spend_run.probe_failure(None) == ""
+    assert spend_run.probe_failure({"ok": False, "code": "VRAM_OOM"}) == "VRAM_OOM"
+
+
+def test_the_probe_reserves_its_own_window_not_productions():
+    """The reservation is checked AFTER the run. Reserving 900s for a job
+    allowed 1800 would refuse a measurement already paid for — which is how
+    this was found, by a probe that ran 990s and was then rejected."""
+    import contract
+
+    client = FakeClient()
+    production = spend_run.requote(client)
+    probe = spend_run.requote(
+        client, ceiling_seconds=contract.PROBE_RUNTIME_CEILING_SECONDS
+    )
+    assert probe["reservation"] > production["reservation"]
+    assert probe["price"] == production["price"], "same live rate, wider window"
+
+
+def test_the_wider_probe_window_still_has_to_clear_the_job_cap():
+    """A wider window is not an exemption from the cap; it is a bigger
+    number checked against the same one."""
+    from validation import admission
+
+    with pytest.raises(admission.AdmissionRefused) as exc:
+        admission.admit(
+            gpu_name=admission.TARGET_GPU, vram_gb=24,
+            runtime_seconds=1800, price_per_hour=5.00, ceiling_seconds=1800,
+        )
+    assert exc.value.code == "over-job-cap"
+
+
+def test_production_admission_is_untouched_by_the_probe_parameter():
+    from validation import admission
+
+    default = admission.admit(
+        gpu_name=admission.TARGET_GPU, vram_gb=24,
+        runtime_seconds=admission.RUNTIME_CEILING_SECONDS, price_per_hour=0.27,
+    )
+    assert default.runtime_seconds == admission.RUNTIME_CEILING_SECONDS == 900

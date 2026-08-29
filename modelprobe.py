@@ -236,12 +236,20 @@ FAILURES = (
 
 
 class ProbeStop(Exception):
-    """A probe ended at a named stage. Carries the stage, never a verdict."""
+    """A probe ended at a named stage. Carries the stage, never a verdict.
 
-    def __init__(self, failure: str, detail: str):
+    `report` is everything that HAD been measured when it stopped, attached
+    on the way out by run(). A failed probe is not a wasted rental: which
+    stage broke, how long the download had run, how many bytes had landed and
+    what the card was holding are the answer for that candidate, and throwing
+    them away would leave a paid job reporting only the word that it failed.
+    """
+
+    def __init__(self, failure: str, detail: str, report: dict | None = None):
         super().__init__(f"{failure}: {detail}")
         self.failure = failure
         self.detail = detail
+        self.report = report or {}
 
 
 def classify(exc: Exception) -> str:
@@ -512,20 +520,48 @@ def run(job: dict, input_path: str, output_path: str,
     model_key = job.get("model")
     spec_row = spec(model_key)
     phases = Phases()
+    disk: dict = {}
+    before: dict = {}
 
     if torch is None:  # pragma: no cover - real path only
         import torch
 
+    try:
+        return _measure(
+            job, input_path, output_path, model_key, spec_row, phases,
+            disk, before, load_pipeline, torch, fetch,
+        )
+    except ProbeStop as stop:
+        # THE MEASUREMENTS SURVIVE THE FAILURE. Everything measured up to the
+        # stage that broke is attached here and travels back with the error,
+        # because "wan22 fetched 61 GiB in 990s and ran out of budget" is the
+        # answer for that candidate, while "it failed" is not — and the GPU
+        # was rented either way.
+        stop.report = probe_report(
+            model_key, spec_row, phases,
+            before=before, peaks=cuda_peaks(torch),
+            failure=stop.failure, detail=stop.detail,
+            identity=cuda_identity(torch),
+        )
+        stop.report.update(disk)
+        raise
+
+
+def _measure(job, input_path, output_path, model_key, spec_row, phases,
+             disk, before, load_pipeline, torch, fetch) -> dict:
+    """The probe itself. Mutates `disk` and `before` in place so that a stop
+    at any stage still carries whatever had been measured before it."""
+
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    before = cuda_snapshot(torch)
+    before.update(cuda_snapshot(torch))
 
     # DISK FIRST. Cheapest possible refusal, and it distinguishes "this card
     # cannot hold the model" from "this worker had nowhere to put it" — two
     # findings that would otherwise both arrive as a failed probe.
     where = PROBE_CACHE if os.path.isdir(PROBE_CACHE) else "/tmp"
     free = free_disk_bytes(where)
-    disk = {"disk_free_bytes": free, "disk_total_bytes": total_disk_bytes(where)}
+    disk.update({"disk_free_bytes": free, "disk_total_bytes": total_disk_bytes(where)})
     if not fits_disk(model_key, free):
         raise ProbeStop(
             "LOAD_FAILED",

@@ -118,7 +118,22 @@ def handle(event) -> dict:
                 # folding it into "model load" would misreport every row.
                 import modelprobe
 
-                metrics = modelprobe.run(job, input_path, output_path)
+                try:
+                    metrics = modelprobe.run(job, input_path, output_path)
+                except modelprobe.ProbeStop as stop:
+                    # A FAILED PROBE IS STILL A MEASUREMENT. The generic
+                    # handler below would answer "unexpected-exception:
+                    # ProbeStop" — the stage, the detail and every timing and
+                    # byte count taken before it broke, all discarded, on a
+                    # GPU that was rented and billed regardless. For a
+                    # benchmark that is the one thing that must not happen,
+                    # so the partial report comes back with the failure.
+                    return contract.filter_output({
+                        "ok": False,
+                        "code": stop.failure,
+                        "error": stop.detail,
+                        **stop.report,
+                    })
             elif job["op"] == "audio_mux":
                 metrics = audio.run(job, input_path, output_path)
             else:

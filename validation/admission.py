@@ -118,10 +118,21 @@ def admit(
     runtime_seconds: int,
     price_per_hour,
     min_vram_gb: int = WORKLOAD_MIN_VRAM_GB,
+    ceiling_seconds: int = RUNTIME_CEILING_SECONDS,
 ) -> Reservation:
     """The caller cannot choose what it costs. Refuses in a fixed order,
     VRAM before price; a runtime above the ceiling is refused, not
-    clamped."""
+    clamped.
+
+    `ceiling_seconds` DEFAULTS to production's and is passed explicitly by
+    exactly one caller: the model_probe path, whose jobs download a
+    checkpoint before they start and so run in a wider window (see
+    contract.PROBE_RUNTIME_CEILING_SECONDS). Reserving 900s for an
+    1800s-capable job is not conservative — it is wrong in the expensive
+    direction, because the reservation check fires AFTER the job has run and
+    would refuse a measurement already paid for. The cap is untouched: a
+    wider window still has to clear JOB_CAP_USD, and it does.
+    """
     if gpu_name not in ALLOWED_GPUS:
         raise AdmissionRefused(
             "gpu-type-not-allowed",
@@ -132,15 +143,15 @@ def admit(
             "insufficient-vram",
             f"workload needs >= {min_vram_gb}GB",
         )
-    if runtime_seconds > RUNTIME_CEILING_SECONDS:
+    if runtime_seconds > ceiling_seconds:
         raise AdmissionRefused(
             "runtime-exceeds-ceiling",
             f"runtime {runtime_seconds}s exceeds the "
-            f"{RUNTIME_CEILING_SECONDS}s ceiling (refused, not clamped)",
+            f"{ceiling_seconds}s ceiling (refused, not clamped)",
         )
     # The reservation is a TIME budget: charge the full ceiling window,
     # never the caller's expectation of how long the job should take.
-    reserved = reserve_usd(price_per_hour, RUNTIME_CEILING_SECONDS)
+    reserved = reserve_usd(price_per_hour, ceiling_seconds)
     if reserved > JOB_CAP_USD:
         raise AdmissionRefused(
             "over-job-cap",
@@ -148,7 +159,7 @@ def admit(
         )
     return Reservation(
         gpu=gpu_name,
-        runtime_seconds=RUNTIME_CEILING_SECONDS,
+        runtime_seconds=ceiling_seconds,
         price_per_hour_usd=Decimal(str(price_per_hour)),
         reserved_usd=reserved,
     )

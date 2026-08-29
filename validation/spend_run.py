@@ -448,15 +448,26 @@ def preflight(
 # ------------------------------------------------------------ one real job
 
 
-def requote(client) -> dict:
-    """Phase 12: immediately before provisioning, quote again."""
+def requote(client, *, ceiling_seconds: int | None = None) -> dict:
+    """Phase 12: immediately before provisioning, quote again.
+
+    `ceiling_seconds` is the window this job may occupy, and the reservation
+    is that window at the live rate. It defaults to production's; only the
+    probe passes a wider one, because a probe downloads its checkpoint before
+    it starts. Reserving 900s for a job allowed 1800 is not caution — the
+    reservation is checked AFTER the run, so it would refuse a measurement
+    that had already been paid for. The job cap is unchanged and still has to
+    clear.
+    """
+    ceiling = ceiling_seconds or admission.RUNTIME_CEILING_SECONDS
     _, catalogue = client.gpu_catalogue()
     target = admission.require_available(catalogue)
     reservation = admission.admit(
         gpu_name=target["id"],
         vram_gb=target["memory_gb"],
-        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+        runtime_seconds=ceiling,
         price_per_hour=target["secure_price"],
+        ceiling_seconds=ceiling,
     )
     return {"price": Decimal(str(target["secure_price"])), "reservation": reservation.reserved_usd}
 
@@ -1071,6 +1082,23 @@ def save_previews(output, output_key: str, out_dir: str = PREVIEW_DIR) -> list:
     return written
 
 
+def probe_failure(output) -> str:
+    """The named stage a probe stopped at, or "" if this is not one.
+
+    Only the vocabulary modelprobe can emit counts. An arbitrary error code
+    is NOT a probe result — it is a broken run, and it must still stop the
+    harness rather than being written down as though the candidate had been
+    evaluated. QUALITY_FAIL is not in that vocabulary and never will be:
+    this path cannot see frames.
+    """
+    if not isinstance(output, dict) or output.get("ok") is not False:
+        return ""
+    import modelprobe
+
+    code = str(output.get("code") or "")
+    return code if code in modelprobe.FAILURES else ""
+
+
 def one_job(
     client,
     facts: dict,
@@ -1090,7 +1118,12 @@ def one_job(
     (VIDEO_PROMPT, PLATE_A_PROMPT/PLATE_B_PROMPT, or an ACTION_BATTERY
     shot's stored prompt) — no caller input reaches it, because the
     workflow exposes no prompt field at all."""
-    quote = requote(client)
+    quote = requote(
+        client,
+        ceiling_seconds=(
+            contract_probe_ceiling_ms() // 1000 if op == "model_probe" else None
+        ),
+    )
     payload = {
         "op": op,
         # Per-shot conditioning (owner directive 2026-08-29): a shot that
@@ -1152,6 +1185,21 @@ def one_job(
         raise SpendStop("job-failed", f"terminal status {status.get('status')}")
     if op == "audio_mux":
         verify_audio_success(status.get("output"))
+    elif op == "model_probe" and probe_failure(status.get("output")):
+        # A NAMED PROBE FAILURE IS A RESULT, NOT A BROKEN RUN. Owner
+        # directive 2026-08-29: "if a candidate OOMs, record the OOM, stop
+        # that candidate." verify_gpu_success would raise job-not-ok here and
+        # take the row down with it — the GPU was rented, the failure was
+        # measured, and refusing to write it down would leave the benchmark
+        # with a gap where an answer belongs.
+        #
+        # The guard it replaces is not weakened: the row still carries the
+        # stage that broke, so a failed candidate can never read as SUCCESS,
+        # and an UNNAMED failure still raises below.
+        print(
+            f"probe FAILED at {status['output'].get('code')} — recorded as a "
+            "result for this candidate, not retried and not escalated"
+        )
     else:
         verify_gpu_success(status.get("output"))
     if op == "video_generate":
