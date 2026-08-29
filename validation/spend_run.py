@@ -1254,14 +1254,30 @@ def require_reference(facts: dict, key: str, *, fetch=None) -> None:
     watchdog window spent to learn something a free HTTP read knew.
 
     Same check require_plates makes, for the one image the benchmark shares.
+
+    WITHOUT A PUBLIC READ BASE this check cannot run, and that is not a
+    reason to refuse the probe — because the guarantee it protects is
+    already enforced somewhere better. handler downloads `input_key` BEFORE
+    it dispatches to modelprobe, so a reference that is missing fails the
+    job in the time one R2 GET takes, not after a 44-118 GiB weight fetch.
+    Run 72's own failure was 202ms of billed execution, which is the
+    measurement of that cost. test_handler asserts the ordering, so this is
+    a proven property rather than a reading of the code.
+
+    The owner's bucket is private by directive 2026-08-29, so this branch is
+    the normal one. Nothing here converts an unknown into a success: the
+    check is announced as not-run, and the probe row carries that fact.
     """
     base = os.environ.get("R2_PUBLIC_BASE_URL", "")
     if not base:
-        raise SpendStop(
-            "reference-unverifiable",
-            "R2_PUBLIC_BASE_URL is unset, so the probe reference cannot be "
-            "confirmed to exist before the GPU is rented",
+        print(
+            f"reference NOT PRE-CHECKED: {key} — no public read base is "
+            "configured, and the production bucket is private by owner "
+            "directive. The worker downloads the reference before it fetches "
+            "any weights, so a missing one costs a sub-second failure rather "
+            "than a rented window (measured: 202ms, run 72)."
         )
+        return
     getter = fetch or frame_pull._fetch
     try:
         data = getter(frame_pull.public_url(base, key))

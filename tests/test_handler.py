@@ -288,3 +288,33 @@ def test_a_probe_inside_the_probe_ceiling_is_not_a_runtime_error(monkeypatch):
     with pytest.raises(contract.ContractError) as exc:
         handler._check_deadline(0.0, "video_generate")
     assert exc.value.code == "runtime-exceeded"
+
+
+def test_a_probe_downloads_its_reference_before_it_fetches_any_weights(monkeypatch):
+    """This ordering is what makes a missing reference cheap. Reversed, a
+    probe would fetch 44-118 GiB of weights and only then discover there is
+    nothing to condition on — the whole rented window spent to learn what one
+    R2 GET knew. require_reference's fallback rests on this, so it is asserted
+    rather than read."""
+    import modelprobe
+
+    called = []
+    monkeypatch.setattr(handler.storage, "require_configured", lambda: None)
+
+    def refuse_download(key, path, limit):
+        called.append(("download", key))
+        raise storage.StorageError("r2-read-failed", "no such key")
+
+    monkeypatch.setattr(handler.storage, "download", refuse_download)
+    monkeypatch.setattr(
+        modelprobe, "run",
+        lambda *a, **k: called.append(("probe", None)) or {},
+    )
+    result = handler.handle({"input": {
+        "op": "model_probe", "model": "cogvideox-i2v",
+        "input_key": "validation/out/probe-reference.png",
+        "output_key": "validation/out/probe-cogvideox-i2v.mp4",
+        "params": {"prompt": "the woman turns toward the camera"},
+    }})
+    assert result["ok"] is False
+    assert [name for name, _ in called] == ["download"]

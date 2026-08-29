@@ -1694,11 +1694,31 @@ def test_only_model_probe_ever_sets_the_model_field():
     assert "model: str | None = None" in src
 
 
-def test_the_reference_precheck_refuses_without_a_public_base(monkeypatch):
+def test_without_a_public_base_the_precheck_announces_that_it_did_not_run(
+    monkeypatch, capsys
+):
+    """The production bucket is private by owner directive, so this is the
+    normal path. It must not silently pass, and it must not block the probe
+    either: the guarantee is enforced by the worker's own download ordering,
+    which test_handler asserts."""
     monkeypatch.delenv("R2_PUBLIC_BASE_URL", raising=False)
+    spend_run.require_reference({"output_prefix": "validation/out"}, "x.png")
+    out = capsys.readouterr().out
+    assert "NOT PRE-CHECKED" in out
+    assert "before it fetches" in out or "before any weights" in out
+
+
+def test_a_configured_public_base_still_makes_the_precheck_a_hard_gate(monkeypatch):
+    """Where the check CAN run, a missing reference still stops the run —
+    degrading to a notice when it cannot is not the same as never checking."""
+    monkeypatch.setenv("R2_PUBLIC_BASE_URL", "https://pub-x.r2.dev")
+
+    def boom(url):
+        raise OSError("404")
+
     with pytest.raises(spend_run.SpendStop) as stop:
-        spend_run.require_reference({"output_prefix": "validation/out"}, "x.png")
-    assert stop.value.code == "reference-unverifiable"
+        spend_run.require_reference({}, "probe-reference.png", fetch=boom)
+    assert stop.value.code == "reference-missing"
 
 
 def test_the_reference_precheck_refuses_a_missing_object(monkeypatch):
