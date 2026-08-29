@@ -685,6 +685,39 @@ IMAGE_PROMPT = (
 # and each plate prompt stays inside the two-to-three-element adherence
 # budget the failures measured. POSITIVE DESCRIPTIONS ONLY: exclusions
 # demonstrably backfire on this model, so there are none.
+# PLATE A, MEASURED 2026-08-29 — GATE FAILED, prompt left as the owner
+# specified it. Job b1971009-4b48-46b2-b7b1-5e3905d56d7e-u1, A5000,
+# 489,326 bytes at validation/out/plate-a.png, $0.01. Retrieved and
+# looked at; the byte count matches output_bytes exactly, so these are
+# the pixels LTX produced.
+#
+#   Maya clearly identifiable ........ PASS
+#   girl clearly identifiable ........ FAIL  no face, no legs; the lower
+#                                            body is translucent and
+#                                            dissolves into the sleepers
+#   girl properly positioned ......... FAIL  beside Maya, but both stand
+#                                            in the track bed, not on the
+#                                            platform, and she has no
+#                                            ground contact
+#   red balloon unmistakable ......... FAIL  no balloon exists anywhere
+#   no significant deformation ....... FAIL  (the girl, above)
+#   no unwanted character ............ PASS  exactly two figures
+#
+# The balloon did not come out faint, it came out as something else.
+# Saturated red totals 42 px in a 34x9 box (0.01% of frame); loosening
+# the threshold grows it to a 66x10 streak ~10 px thick, aspect 6.6. A
+# balloon is a compact blob with aspect near 1; every threshold measures
+# a CORD. The model kept the hand-holds-string relation, dropped the
+# object on the end of it, and resolved the leftover woman + cord +
+# small figure into the likeliest scene that fits: walking a dog. The
+# second figure even wears a harness.
+#
+# So the split into two plates did not go far enough. This prompt still
+# carries two characters plus a prop plus staging plus weather, which is
+# past the ~2-3 element adherence ceiling measured on plate-001 and
+# plate-002. Splitting the MOVIE across plates fixed the plate count; it
+# did not reduce what any one plate is asked to hold. Fixing that is a
+# spec change and belongs to the owner, not to this file.
 PLATE_A_PROMPT = (
     "Maya, a young adult woman in a dark coat, stands on an abandoned "
     "railway station platform in the rain. A small girl stands a few "
