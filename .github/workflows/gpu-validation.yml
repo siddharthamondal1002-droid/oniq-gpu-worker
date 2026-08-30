@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-setup = create ONE network volume and attach it to ONE endpoint (literal token required). Storage spend, measured at $0.07/GB-month from this account's own billing; reversible by detaching. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -55,6 +55,22 @@ on:
         description: "RunPod run id for queue-probe / stale-cancel."
         type: string
         default: ""
+      volume_token:
+        description: "Type CREATE-AND-ATTACH-VOLUME (exactly) to allow volume-setup."
+        type: string
+        default: ""
+      volume_name:
+        description: "Name for the network volume (volume-setup)."
+        type: string
+        default: "oniq-models"
+      datacenter_id:
+        description: "Datacenter for the network volume, e.g. US-MO-2. A volume PINS the endpoint to its datacenter."
+        type: string
+        default: ""
+      volume_size_gb:
+        description: "Volume size in GB (volume-setup). 50 holds Hunyuan's 32.26 GiB with headroom."
+        type: string
+        default: "50"
       timeout_token:
         description: "Type SET-EXECUTION-TIMEOUT (exactly) to allow the endpoint ceiling change."
         type: string
@@ -613,6 +629,36 @@ jobs:
           python-version: "3.11"
       - name: "Every gate that costs nothing"
         run: python -m validation.hunyuan_preflight "${{ inputs.endpoint_id }}"
+
+  volume_setup:
+    # Owner directive 2026-08-30 section 3. Creates ONE network volume and
+    # attaches it to ONE endpoint, behind a literal token. It sends
+    # networkVolumeId alone and refuses if the PATCH moved a worker bound,
+    # a template or the execution ceiling with it.
+    #
+    # Storage is SPEND, and it is measured rather than estimated: $0.07 per
+    # GB-month, derived from this account's own /billing/networkvolumes
+    # line. 50 GB is $3.50/month.
+    name: "network volume - create ONE, attach to ONE endpoint"
+    if: inputs.mode == 'volume-setup' && inputs.volume_token == 'CREATE-AND-ATTACH-VOLUME'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Create, attach, then read both back"
+        run: |
+          python -m validation.volume_setup \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.volume_name }}" \
+            "${{ inputs.datacenter_id }}" \
+            "${{ inputs.volume_size_gb }}"
 
   stale_cancel:
     # Cancels ONE run on ONE endpoint, both named on the dispatch, and

@@ -599,6 +599,51 @@ def cancel_job(endpoint_id: str, job_id: str):
     return status, raw
 
 
+def create_network_volume(name: str, size_gb: int, datacenter_id: str):
+    """POST /networkvolumes. Required fields read from the spec, not guessed.
+
+    Owner directive 2026-08-30: persistent model storage, "the smallest
+    volume that safely accommodates Hunyuan and future candidate
+    hydration", and "Do not assume storage is free". The rate is MEASURED
+    at $0.07/GB-month from this account's own /billing/networkvolumes line
+    (amount x 720h / diskSpaceBilledGb), so the caller can state a cost
+    rather than an estimate.
+    """
+    if not isinstance(size_gb, int) or size_gb <= 0:
+        raise RunPodApiError(f"refusing a non-positive volume size: {size_gb!r}")
+    status, raw = _request(
+        f"{REST_BASE}/networkvolumes",
+        method="POST",
+        body={"name": name, "size": size_gb, "dataCenterId": datacenter_id},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(
+            f"POST /networkvolumes -> {status} (body: {raw[:300]!r})"
+        )
+    return json.loads(raw)
+
+
+def attach_network_volume(endpoint_id: str, volume_id: str):
+    """PATCH the endpoint's networkVolumeId. Nothing else is sent.
+
+    Read-before and read-after, for the reason the template retarget
+    taught on 2026-08-30: a PATCH that sends one field and silently drops
+    another leaves an endpoint nothing printed will show is broken.
+    """
+    _, before = get_endpoint(endpoint_id)
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"networkVolumeId": volume_id},
+    )
+    if status not in (200, 201, 202):
+        raise RunPodApiError(
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:300]!r})"
+        )
+    _, after = get_endpoint(endpoint_id)
+    return before, after
+
+
 def endpoint_billing():
     """What every endpoint on the account has actually accrued. Read-only.
 

@@ -520,6 +520,12 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # like frames-pull and model-bench it is a $0 mode that cannot
         # become a paid one.
         "hunyuan-preflight",
+        # volume-setup joined 2026-08-30 as the fifth job-level mutation and
+        # the first that creates recurring SPEND. Token-gated, one volume,
+        # one endpoint, one field on the PATCH, and reversible by
+        # detaching. The rate it reports is measured from this account's
+        # own billing, never recalled.
+        "volume-setup",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
