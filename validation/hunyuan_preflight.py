@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.request
 
 import runpod_client as rp
 from validation import probe_settings
@@ -83,12 +84,32 @@ def choose_frames(candidates: list) -> dict:
     return candidates[0]
 
 
+def _read_raw(url: str, token=None):
+    """Fetch one raw config file. None when it does not answer.
+
+    read_ref takes a ROW and returns a ref, not a URL — I called it as a
+    fetcher and the preflight died on 'str has no attribute get' before it
+    checked a single gate. Free to find, but it is the reason this reader
+    is written out rather than borrowed from a module whose signature I
+    had not read.
+    """
+    request = urllib.request.Request(url)
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            return resp.read().decode("utf-8")
+    except Exception:
+        return None
+
+
 def read_checkpoint_facts(fetcher=None) -> dict:
     """The configs that decide the shape, from the pinned revision."""
     import modelroot
 
     spec = modelroot.EXPERIMENTAL[MODEL_ID]
-    fetcher = fetcher or probe_settings.read_ref
+    token = os.environ.get("HF_TOKEN") or None
+    fetcher = fetcher or (lambda url: _read_raw(url, token))
     facts = {"repo": spec["repo"], "revision": spec["revision"]}
     for path in ("vae/config.json", "transformer/config.json",
                  "model_index.json"):
