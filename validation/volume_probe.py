@@ -117,29 +117,76 @@ def volume_datacenters(doc: dict, raw: str) -> list[str] | None:
     return None
 
 
-def datacenters():
-    """Every datacenter RunPod exposes, with whatever each row says about
-    storage support and GPU availability.
+DATACENTER_QUERY = """
+query DataCenters {
+  dataCenters {
+    id
+    name
+    storageSupport
+    gpuAvailability(input: {gpuTypeId: "NVIDIA RTX A5000"}) {
+      gpuTypeId
+      available
+      stockStatus
+    }
+  }
+}
+"""
 
-    Read rather than assumed, and the RAW shape is returned alongside the
-    parse. The first version of this probe called gpu_catalogue() as if it
-    returned a dict; it returns a (raw, parsed) tuple, so the lookup fell
-    through to "catalogue shape unrecognised" and answered nothing. A
-    parser that cannot see the document it failed on costs a second run to
-    say what one should have said.
+
+def spec_paths(doc: dict) -> list[str] | None:
+    """Every path the REST spec declares.
+
+    Printed because the last two runs each spent a round trip discovering
+    that a path guessed from documentation is not there. rest.runpod.io is
+    unreachable from the dev container, so every guess costs a CI run; the
+    document names its own paths, and reading them is one run instead of
+    however many guesses it would have taken.
     """
+    paths = doc.get("paths") if isinstance(doc, dict) else None
+    return sorted(paths) if isinstance(paths, dict) else None
+
+
+def datacenters():
+    """Datacenter rows, from whichever source actually has them.
+
+    REST first, then GraphQL. Returns (rows, keys, note) — the note says
+    which source answered, or, when neither did, what each one said. An
+    unexplained None is what made the previous run worthless.
+    """
+    tried = []
     for path in ("/datacenters", "/datacenter"):
         try:
-            raw, doc = rp._get_json(f"{rp.REST_BASE}{path}")
-        except rp.RunPodApiError:
+            _, doc = rp._get_json(f"{rp.REST_BASE}{path}")
+        except rp.RunPodApiError as exc:
+            tried.append(f"REST {path}: {exc}")
             continue
         rows = doc if isinstance(doc, list) else (
             doc.get("datacenters") or doc.get("dataCenters") or doc.get("data") or []
         )
-        if not isinstance(rows, list) or not rows:
-            continue
-        return rows, sorted(set().union(*(set(r) for r in rows if isinstance(r, dict))))
-    return None, None
+        if isinstance(rows, list) and rows:
+            keys = sorted(set().union(*(set(r) for r in rows if isinstance(r, dict))))
+            return rows, keys, f"REST {path}"
+        tried.append(f"REST {path}: 200 but no rows")
+
+    status, raw = rp._request(rp.GRAPHQL_URL, method="POST",
+                              body={"query": DATACENTER_QUERY})
+    if status == 200:
+        doc = json.loads(raw)
+        if doc.get("errors"):
+            # The schema refusing a field is a FINDING — it names the
+            # fields that do exist. Carry the message rather than a None.
+            tried.append("GraphQL: " + "; ".join(
+                e.get("message", "?") for e in doc["errors"])[:400])
+        else:
+            rows = (doc.get("data") or {}).get("dataCenters") or []
+            if rows:
+                keys = sorted(set().union(
+                    *(set(r) for r in rows if isinstance(r, dict))))
+                return rows, keys, "GraphQL dataCenters"
+            tried.append("GraphQL: 200, empty dataCenters")
+    else:
+        tried.append(f"GraphQL: HTTP {status} {raw[:200]!r}")
+    return None, None, " | ".join(tried)
 
 
 def _row_id(row: dict):
@@ -215,7 +262,7 @@ def storage_rate(raw_spec: str):
 def survey() -> dict:
     url, doc, raw = _spec()
     vols, vol_err = existing_volumes()
-    rows, row_keys = datacenters()
+    rows, row_keys, dc_note = datacenters()
     dcs = volume_capable(rows)
     if dcs is None and doc:
         dcs = volume_datacenters(doc, raw)
@@ -227,6 +274,8 @@ def survey() -> dict:
         "existing_volumes": vols,
         "existing_volumes_error": vol_err,
         "datacenter_row_keys": row_keys,
+        "datacenter_source": dc_note,
+        "rest_paths": spec_paths(doc) if doc else None,
         "datacenter_count": len(rows) if rows else None,
         "volume_datacenters": dcs,
         "a5000_datacenters": a5000_dcs,
@@ -257,6 +306,8 @@ def report() -> int:
     print(f"  volumes offered in : {s['volume_datacenters']}")
     print(f"  A5000 available in : {s['a5000_datacenters']}  ({s['a5000_datacenter_note']})")
     print(f"  datacenter rows    : {s['datacenter_count']}, keys={s['datacenter_row_keys']}")
+    print(f"  datacenter source  : {s['datacenter_source']}")
+    print(f"  REST paths declared: {s['rest_paths']}")
     print(f"  overlap            : {s['datacenter_overlap']}")
     if s["datacenter_overlap"] == []:
         print("  VERDICT: NO OVERLAP. Mounting a volume would strand the endpoint")

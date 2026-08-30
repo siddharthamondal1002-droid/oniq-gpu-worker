@@ -550,13 +550,23 @@ def test_the_volume_probe_can_only_read():
 
     with open(os.path.join(ROOT, "validation", "volume_probe.py"), encoding="utf-8") as fh:
         module = fh.read()
-    # Every RunPod call it makes is a GET. These are the verbs that are not.
+    # No mutating client call, and no mutating HTTP method.
     for forbidden in ("submit_job", "create_template", "retarget_template",
                       "set_template_env", "attach_template",
                       "set_workers_standby_zero", "purge_queue",
-                      "cancel_job", 'method="POST"', 'method="PATCH"',
-                      'method="DELETE"', 'method="PUT"'):
+                      "cancel_job", 'method="PATCH"', 'method="DELETE"',
+                      'method="PUT"'):
         assert forbidden not in module, forbidden
+    # POST is admitted for exactly one reason: GraphQL sends READS over
+    # POST, and the datacenter document lives there — the REST API does
+    # not declare a datacenters path at all. So the guard is on the verb
+    # the payload carries, not on the HTTP method: a GraphQL mutation is
+    # what must never appear, and every POST must go to GRAPHQL_URL.
+    assert "mutation" not in module.lower()
+    for line in module.splitlines():
+        if 'method="POST"' in line:
+            assert "GRAPHQL_URL" in line, line
+    assert module.count('method="POST"') == 1
     # The feasibility answer the probe exists to produce.
     assert "datacenter_overlap" in module
     assert "a5000_datacenters" in module
