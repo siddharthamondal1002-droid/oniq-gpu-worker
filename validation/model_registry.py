@@ -197,6 +197,39 @@ CANDIDATES: tuple[Candidate, ...] = (
         note="SEPARATE CANDIDATE from Wan2.1 — mixture-of-experts, expect "
         "transformer/ AND transformer_2/",
     ),
+    # THE VARIANT WAN THEMSELVES POINT AT CONSUMER HARDWARE. Owner directive
+    # 2026-08-30 asks for Wan2.2 I2V on the A5000, and the reference
+    # implementation (wlsdml1114/generate_video) runs I2V-A14B: two experts
+    # measuring 53.23 GiB EACH on this account's own registry read. The
+    # publisher's card names the alternative in its own words — "a 5B model
+    # ... supports both text-to-video and image-to-video generation at 720P
+    # resolution with 24fps and can also run on consumer-grade graphics cards
+    # like 4090".
+    #
+    # Three things make it the right row to measure rather than a downgrade
+    # accepted for convenience:
+    #
+    #   - Wan2.2-VAE compresses 16x16x4, so its TEMPORAL ratio is 4 — the
+    #     same 4k+1 legal-frame rule ONIQ's production policy already uses,
+    #     and the same rule the Hunyuan preflight derives.
+    #   - 24fps is ONIQ's established rate. The reference ComfyUI workflow
+    #     renders at 16 (VHS_VideoCombine frame_rate=16), which would have
+    #     silently changed the production frame policy.
+    #   - It is ONE transformer, not a two-expert mixture, so there is no
+    #     second 53 GiB component to swap through a 24 GiB card.
+    #
+    # Measured here rather than argued: the bytes decide, not the label.
+    Candidate(
+        key="wan22-ti2v-5b",
+        decision="WAN2_2_TI2V_5B",
+        label="Wan2.2 TI2V-5B",
+        authors=("Wan-AI",),
+        must=("wan2.2", "ti2v", "5b"),
+        must_not=("gguf",),
+        target_shape=ONIQ_SHAPE,
+        note="the publisher's own consumer-card variant: single transformer, "
+        "24fps, Wan2.2-VAE at 16x16x4 (temporal ratio 4, so 4k+1 frames)",
+    ),
     Candidate(
         key="hunyuanvideo-1.5-i2v",
         decision="HUNYUAN_VIDEO_1_5_I2V",

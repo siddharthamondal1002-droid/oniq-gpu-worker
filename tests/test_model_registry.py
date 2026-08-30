@@ -58,9 +58,19 @@ def test_every_candidate_carries_a_decision_token():
         "WAN2_2_I2V_A14B",
         "HUNYUAN_VIDEO_1_5_I2V",
         "COGVIDEOX_I2V",
+        # Owner directive 2026-08-30 (Wan2.2 LoRA production integration).
+        # The reference implementation runs I2V-A14B, whose two experts
+        # measure 53.23 GiB EACH on this account's own registry read; the
+        # publisher names the 5B as the variant that "can also run on
+        # consumer-grade graphics cards like 4090". Measuring it is the only
+        # way to answer whether the A5000 can carry this feature at all.
+        "WAN2_2_TI2V_5B",
     }
     assert {c.decision for c in mr.CANDIDATES} <= allowed
-    assert len(mr.CANDIDATES) == 9, "the owner named nine rows"
+    assert len(mr.CANDIDATES) == 10, (
+        "nine from the 2026-08-29 brief, plus Wan2.2 TI2V-5B added "
+        "2026-08-30 when the Wan2.2 directive landed"
+    )
 
 
 def test_resolve_and_preferred_favour_the_loadable_layout():

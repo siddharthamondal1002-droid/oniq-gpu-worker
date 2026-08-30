@@ -1,4 +1,4 @@
-"""The benchmark's free half: measure all nine candidates, project the matrix.
+"""The benchmark's free half: measure every candidate, project the matrix.
 
 Runs where HF_TOKEN lives (CI), costs nothing, and touches no GPU. What it
 produces is the evidence the owner's questions 1-7 actually require:
