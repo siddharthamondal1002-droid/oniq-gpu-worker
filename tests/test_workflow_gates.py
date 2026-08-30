@@ -575,6 +575,13 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # standby-zero does: the writer it calls takes no value, so there
         # is no argument by which a spend reduction becomes an increase.
         "workers-min-zero",
+        # volume-detach joined 2026-08-30 as the REVERSIBLE DIAGNOSTIC for
+        # an endpoint reporting a queued job and zero workers. It is a
+        # mutation, so it is token-gated; it is non-destructive, so a test
+        # walks its call graph and asserts it can reach no delete verb at
+        # all — detach is not delete, and the volume must survive being
+        # looked at.
+        "volume-detach",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
