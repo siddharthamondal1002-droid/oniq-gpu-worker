@@ -210,6 +210,16 @@ def endpoint_locations():
             "dataCenterIds": e.get("dataCenterIds"),
             "networkVolumeId": e.get("networkVolumeId"),
             "gpuTypeIds": e.get("gpuTypeIds"),
+            # The Hunyuan probe downloads a 32.26 GiB checkpoint INSIDE
+            # the paid job — the first probe that does. If that download
+            # outlasts executionTimeoutMs the job is killed with the money
+            # spent and nothing produced, so the ceiling is read before
+            # the job is dispatched rather than discovered by it.
+            "executionTimeoutMs": e.get("executionTimeoutMs"),
+            "idleTimeout": e.get("idleTimeout"),
+            "workersMin": e.get("workersMin"),
+            "workersMax": e.get("workersMax"),
+            "workersStandby": e.get("workersStandby"),
         })
     return out, None
 
