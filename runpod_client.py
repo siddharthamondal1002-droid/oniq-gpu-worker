@@ -599,6 +599,55 @@ def cancel_job(endpoint_id: str, job_id: str):
     return status, raw
 
 
+def endpoint_billing():
+    """What every endpoint on the account has actually accrued. Read-only.
+
+    Owner directive 2026-08-30: endpoint ynysmj3dm92cwp appeared on the
+    account holding workersMin=1 and workersStandby=2 on A5000s, having
+    never run a job. The owner chose to leave it and be told the cost, so
+    the cost is READ rather than estimated from a per-hour rate and a
+    guess at how long it has been up.
+    """
+    try:
+        raw, doc = _get_json(f"{REST_BASE}/billing/endpoints")
+    except RunPodApiError as exc:
+        return None, str(exc)
+    return doc, None
+
+
+def set_execution_timeout(endpoint_id: str, timeout_ms: int):
+    """PATCH executionTimeoutMs on ONE endpoint. Nothing else is sent.
+
+    Owner authorization 2026-08-30: raise the ceiling to 45 minutes so the
+    Hunyuan probe's 32.26 GiB checkpoint download can finish inside the
+    job. The worst case is one job holding the card for 45 minutes; at the
+    LIVE secure rate the discovery step reads, that stays inside the
+    job cap. The rate is not written here — a price copied into a
+    comment is a price that goes stale silently, which is why the
+    admission gate refuses one.
+
+    Read-before and read-after are not ceremony. The 2026-08-30 template
+    retarget sent a field it meant to change and silently dropped
+    containerRegistryAuthId, which the endpoint then could not pull with;
+    that cost hours and was invisible in everything the template printed.
+    So this returns both documents and the caller compares them.
+    """
+    if not isinstance(timeout_ms, int) or timeout_ms <= 0:
+        raise RunPodApiError(f"refusing a non-positive timeout: {timeout_ms!r}")
+    _, before = get_endpoint(endpoint_id)
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"executionTimeoutMs": timeout_ms},
+    )
+    if status not in (200, 201, 202):
+        raise RunPodApiError(
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:300]!r})"
+        )
+    _, after = get_endpoint(endpoint_id)
+    return before, after
+
+
 def endpoint_health(endpoint_id: str):
     return _get_json(f"{SERVERLESS_BASE}/{endpoint_id}/health")
 

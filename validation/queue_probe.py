@@ -145,11 +145,36 @@ def endpoint_ids(client) -> list:
     return [e.get("id") for e in ep_list if e.get("id")]
 
 
+def billing_lines(client) -> list:
+    """What each endpoint has actually accrued, or a one-line reason why
+    that could not be read.
+
+    Owner directive 2026-08-30: endpoint ynysmj3dm92cwp appeared holding
+    workersMin=1 and workersStandby=2 on A5000s, having never run a job.
+    The owner chose to leave it running and be told what it costs — so
+    this reports a READ figure. An estimate from a per-hour rate times a
+    guess at uptime is exactly the kind of invented number that has no
+    place in a spend report.
+    """
+    try:
+        doc, err = client.endpoint_billing()
+    except Exception as exc:
+        return [f"billing unreadable: {type(exc).__name__}: {exc}"]
+    if err:
+        return [f"billing unreadable: {err}"]
+    rows = doc if isinstance(doc, list) else (doc or {}).get("endpoints") or []
+    if not rows:
+        return ["billing returned no rows (not the same as zero cost)"]
+    return [json.dumps(r, sort_keys=True) for r in rows]
+
+
 def report(client, job_id: str) -> tuple:
     """Exit code and rows. 0 ONLY when the run provably cannot execute."""
     ids = endpoint_ids(client)
     print(f"endpoints seen: {ids}")
     rows = [probe_endpoint(client, ep, job_id) for ep in ids]
+    for line in billing_lines(client):
+        print(f"billing: {line}")
     for row in rows:
         print(json.dumps(row, sort_keys=True))
     answer = verdict(rows)

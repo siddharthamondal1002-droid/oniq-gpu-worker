@@ -452,6 +452,14 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # GET and the module has no write path at all, so like
         # frames-pull and model-bench it cannot become a paid mode.
         "volume-probe",
+        # endpoint-timeout joined 2026-08-30 with the owner's authorization
+        # to raise the execution ceiling. It is the fourth job-level
+        # mutation and the narrowest: ONE endpoint, ONE field, and the
+        # module refuses the run if the PATCH moved a worker bound, a
+        # template or a volume alongside it — the failure the template
+        # retarget hit the same day, where a write that was not read back
+        # dropped a registry credential nobody could see was gone.
+        "endpoint-timeout",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

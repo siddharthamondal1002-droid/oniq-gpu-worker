@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -53,6 +53,14 @@ on:
         default: ""
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
+      timeout_token:
+        description: "Type SET-EXECUTION-TIMEOUT (exactly) to allow the endpoint ceiling change."
+        required: false
+        default: ""
+      timeout_ms:
+        description: "New executionTimeoutMs for endpoint-timeout mode."
+        required: false
+        default: ""
         type: string
         default: ""
       cancel_token:
@@ -560,6 +568,29 @@ jobs:
           python-version: "3.11"
       - name: "What the API offers, and whether the A5000 lives there"
         run: python -m validation.volume_probe
+
+  endpoint_timeout:
+    # Owner authorization 2026-08-30. The Hunyuan probe downloads a 32.26
+    # GiB checkpoint inside the paid job, and the endpoint ceiling is 10
+    # minutes — a job killed against it is billed in full and produces
+    # nothing. This raises the ceiling and NOTHING else: the module sends
+    # one field, and refuses the run if the PATCH moved any worker bound,
+    # template or volume alongside it.
+    name: "endpoint execution ceiling - ONE endpoint, ONE field, $0"
+    if: inputs.mode == 'endpoint-timeout' && inputs.timeout_token == 'SET-EXECUTION-TIMEOUT'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Raise the ceiling, then read it back"
+        run: python -m validation.endpoint_timeout "${{ inputs.endpoint_id }}" "${{ inputs.timeout_ms }}"
 
   stale_cancel:
     # Cancels ONE run on ONE endpoint, both named on the dispatch, and
