@@ -135,7 +135,15 @@ def retarget(client, endpoint_id: str, template_id: str, image: str,
             "it is not what this was authorized for",
         )
 
-    client.retarget_template(template_id, image, disk_gb)
+    # The credential that makes the image PULLABLE is part of the
+    # configuration being preserved, exactly like env. It is read before the
+    # write, sent back with it, and checked after — because a template that
+    # silently loses it still looks correct in every field anyone prints,
+    # and only shows up as a worker pulling anonymously until the registry
+    # rate-limits it into an hours-long retry loop.
+    was_auth = before.get("containerRegistryAuthId") or ""
+    client.retarget_template(template_id, image, disk_gb,
+                             container_registry_auth_id=was_auth or None)
 
     # VERIFY BY RE-READING. The PATCH's own response is the write claiming it
     # worked; the template read is the template saying so.
@@ -158,11 +166,21 @@ def retarget(client, endpoint_id: str, template_id: str, image: str,
             f"the disk reads back as {after.get('containerDiskInGb')!r}, "
             f"not {disk_gb}",
         )
+    now_auth = after.get("containerRegistryAuthId") or ""
+    if now_auth != was_auth:
+        raise Refused(
+            "credential-changed",
+            f"the registry credential read back as {now_auth!r}, not "
+            f"{was_auth!r}. The image is already repointed; re-attach the "
+            "credential before starting a worker, or the pull falls back to "
+            "anonymous and the registry will throttle it",
+        )
     env = after.get("env")
     return {
         "template_id": template_id,
         "image": image,
         "container_disk_gb": disk_gb,
+        "registry_auth_id": now_auth,
         "replaced": {
             "image": before.get("imageName"),
             "container_disk_gb": was_disk,
@@ -189,6 +207,14 @@ def report(client, endpoint_id: str, template_id: str, image: str,
     # NAMES ONLY. Whether the storage variables survived the write is the
     # question that decides whether the next job can upload anything at all.
     print(f"  env keys still present: {', '.join(result['env_keys']) or '(none)'}")
+    # The credential is what makes the image PULLABLE. An absent one is not
+    # an error the template reports — it surfaces only as a worker pulling
+    # anonymously until the registry throttles it, which on 2026-08-30 read
+    # as hours of "initializing" with no cause on the RunPod side.
+    credential = result["registry_auth_id"] or (
+        "NONE — pulls will be anonymous and the registry may throttle them"
+    )
+    print(f"  registry credential: {credential}")
     print(
         "RESTORE, if needed: retarget the same template back to the image and "
         "disk printed above."

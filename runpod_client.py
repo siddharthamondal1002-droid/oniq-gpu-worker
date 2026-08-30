@@ -665,7 +665,8 @@ def attach_template(endpoint_id: str, template_id: str):
     return raw, json.loads(raw) if raw.strip().startswith("{") else {}
 
 
-def retarget_template(template_id: str, image_name: str, container_disk_gb: int):
+def retarget_template(template_id: str, image_name: str, container_disk_gb: int,
+                      container_registry_auth_id: str | None = None):
     """Point an EXISTING template at a new image and disk. Two fields, named.
 
     The one-field rule that governs set_template_env and attach_template is
@@ -682,10 +683,22 @@ def retarget_template(template_id: str, image_name: str, container_disk_gb: int)
     way to a bigger disk, and there is no window in which the endpoint runs a
     template that cannot write its output.
     """
+    # THE REGISTRY CREDENTIAL RIDES ALONG, when the caller read one off the
+    # template first. A narrow PATCH should leave unnamed fields alone, and
+    # this one names only what it means to change — but "should" is the word
+    # that cost 2026-08-30: after a retarget, workers went back to pulling
+    # ghcr.io anonymously and hitting toomanyrequests, which is what an
+    # absent credential looks like from the outside. Sending the id back
+    # explicitly makes preservation something the request states rather than
+    # something the provider is trusted to infer, and template_retarget then
+    # re-reads it to confirm.
+    body = {"imageName": image_name, "containerDiskInGb": container_disk_gb}
+    if container_registry_auth_id:
+        body["containerRegistryAuthId"] = container_registry_auth_id
     status, raw = _request(
         f"{REST_BASE}/templates/{template_id}",
         method="PATCH",
-        body={"imageName": image_name, "containerDiskInGb": container_disk_gb},
+        body=body,
     )
     if status not in (200, 201):
         raise RunPodApiError(f"PATCH /templates/{template_id} -> {status}: {raw[:200]}")

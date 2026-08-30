@@ -42,8 +42,10 @@ class Client:
             return "{}", self._after
         return "{}", self._template
 
-    def retarget_template(self, template_id, image_name, container_disk_gb):
-        self.writes.append(("retarget", template_id, image_name, container_disk_gb))
+    def retarget_template(self, template_id, image_name, container_disk_gb,
+                          container_registry_auth_id=None):
+        self.writes.append(("retarget", template_id, image_name, container_disk_gb,
+                            container_registry_auth_id))
         return "{}", {}
 
 
@@ -166,15 +168,23 @@ def test_exactly_two_fields_are_sent_and_nothing_else():
     import runpod_client
 
     src = inspect.getsource(runpod_client.retarget_template)
-    assert 'body={"imageName": image_name, "containerDiskInGb": container_disk_gb}' in src
+    # The body still names ONLY what it means to preserve or change: the
+    # image, the disk, and — when the template already had one — the
+    # registry credential that makes the image pullable. Nothing else.
+    assert 'body = {"imageName": image_name, "containerDiskInGb": container_disk_gb}' in src
+    assert 'body["containerRegistryAuthId"] = container_registry_auth_id' in src
+    assert "if container_registry_auth_id:" in src
     assert '"env"' not in src.split("body=")[1].split("\n")[0]
-    assert '"name"' not in src.split("body=")[1].split("\n")[0]
+    assert '"name"' not in src.split("body = ")[1].split("\n")[0]
 
 
 def test_an_authorized_retarget_writes_once_and_records_what_it_replaced():
     client = Client(after=_after())
     result = tr.retarget(client, ENDPOINT, TEMPLATE, GOOD, 200, tr.AUTHORIZED_TOKEN)
-    assert client.writes == [("retarget", TEMPLATE, GOOD, 200)]
+    # The credential travels with the write. This fixture's template has
+    # none, so None is what is sent — the field only appears in the request
+    # body when the template actually had one.
+    assert client.writes == [("retarget", TEMPLATE, GOOD, 200, None)]
     assert result["replaced"] == {"image": OLD, "container_disk_gb": 80}
     assert result["container_disk_gb"] == 200
 
@@ -225,3 +235,37 @@ def test_no_credential_can_travel_through_this_module():
     params = set(inspect.signature(tr.retarget).parameters)
     assert params == {"client", "endpoint_id", "template_id", "image",
                       "disk_gb", "token"}
+
+
+def test_the_registry_credential_is_preserved_across_the_write():
+    """The credential that makes the image PULLABLE is configuration, and
+    this module's whole discipline is that configuration survives a write
+    and is confirmed by re-reading.
+
+    It was NOT confirmed until 2026-08-30, and the gap was expensive: after
+    a retarget, workers pulled ghcr.io anonymously and the registry
+    answered toomanyrequests, which surfaces only as a worker stuck
+    'initializing' for hours with nothing wrong on the provider's side.
+    """
+    before = {"id": TEMPLATE, "imageName": OLD, "containerDiskInGb": 80,
+              "containerRegistryAuthId": "cred-123"}
+    after = dict(_after(), containerRegistryAuthId="cred-123")
+    client = Client(after=after, template=before)
+    result = tr.retarget(client, ENDPOINT, TEMPLATE, GOOD, 200, tr.AUTHORIZED_TOKEN)
+    # Sent back explicitly, not left to the provider to infer.
+    assert client.writes == [("retarget", TEMPLATE, GOOD, 200, "cred-123")]
+    assert result["registry_auth_id"] == "cred-123"
+
+
+def test_a_credential_lost_by_the_write_is_refused_not_reported_as_success():
+    """If it comes back different, the write already happened — so this
+    cannot prevent the loss, only refuse to call it a success. A retarget
+    that silently dropped the credential would hand back a green run and an
+    endpoint that cannot pull its own image."""
+    before = {"id": TEMPLATE, "imageName": OLD, "containerDiskInGb": 80,
+              "containerRegistryAuthId": "cred-123"}
+    client = Client(after=_after(), template=before)  # _after() has no credential
+    with pytest.raises(tr.Refused) as refusal:
+        tr.retarget(client, ENDPOINT, TEMPLATE, GOOD, 200, tr.AUTHORIZED_TOKEN)
+    assert refusal.value.code == "credential-changed"
+    assert "anonymous" in refusal.value.detail
