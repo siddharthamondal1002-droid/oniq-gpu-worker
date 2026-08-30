@@ -2061,3 +2061,68 @@ def test_every_probe_row_has_a_sayable_shape_line():
             assert f"{row['width']}x{row['height']}" in line, key
         else:
             assert "derived from the reference image" in line, key
+
+
+# ------------------------------- names the dispatch branches actually have
+
+
+def test_no_dispatch_branch_uses_a_name_that_is_never_bound():
+    """Three dispatches were burned on NameErrors in main().
+
+    model_hydrate's branch passed output_key, sleep and clock — all copied
+    from a helper's signature, none of them bound in main. Python does not
+    complain until the branch RUNS, so the error only appeared after a
+    workflow had spun up, and it surfaced as a silent death with no STOP
+    line: the driver's SpendStop handlers do not catch NameError, so
+    nothing printed the reason.
+
+    The suite cannot execute those branches without a RunPod credential,
+    so the check is static: every name loaded in main() must be bound
+    somewhere in main() or at module level. It would have caught all three
+    in under a second.
+    """
+    import ast
+    import builtins
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "validation", "spend_run.py"),
+              encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+
+    module_level = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            module_level.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    module_level.add(target.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                module_level.add((alias.asname or alias.name).split(".")[0])
+
+    main = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    bound = {a.arg for a in main.args.args}
+    for node in ast.walk(main):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            bound.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+
+    loaded = {
+        n.id for n in ast.walk(main)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+    }
+    unbound = sorted(loaded - bound - module_level - set(dir(builtins)))
+    assert not unbound, (
+        f"main() loads {unbound} without binding them — a dispatch reaching "
+        "that branch dies with NameError, and the SpendStop handlers do not "
+        "catch it, so nothing prints why"
+    )

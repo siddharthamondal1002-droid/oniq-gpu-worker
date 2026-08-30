@@ -1891,13 +1891,15 @@ def main(argv) -> int:
                 )
             rows = [
                 one_job(
-                    client,
+                    rp,
                     facts,
-                    output_key=output_key,
+                    # A hydration writes NO artifact, and the contract
+                    # refuses an output_key on this op — one_job drops it
+                    # when building the payload. It is passed empty rather
+                    # than omitted because the signature requires it.
+                    output_key="",
                     op="model_hydrate",
                     model=target,
-                    sleep=sleep,
-                    clock=clock,
                 )
             ]
             print(f"PHASE 13-16 PASS — {target} hydrated onto the volume")
