@@ -486,13 +486,35 @@ def rest_schema_probe():
 # ASKING: each selection is tried in turn and a rejection names the field
 # it did not like. The last entry is the one every GraphQL server can
 # answer, so the walk always terminates on something real.
-_WORKER_SELECTIONS = (
-    "id status version uptimeInSeconds lastStatusChange",
-    "id status version uptimeInSeconds",
-    "id status version",
-    "id status",
-    "id",
+# The wrapper field, not the leaf fields, is what "Cannot query field
+# \"workers\" on type \"Endpoint\"" rejected (measured 2026-08-30, run 166).
+# So the walk varies the WRAPPER first and the selection second — varying
+# only the leaves re-sent the same broken wrapper five times and learned
+# nothing five times.
+_WORKER_SHAPES = (
+    ("myself { endpoints { id workers { %s } } }", "id status"),
+    ("myself { serverlessEndpoints { id workers { %s } } }", "id status"),
+    ("myself { endpoints { id machines { %s } } }", "id status"),
+    ("myself { pods { %s } }", "id desiredStatus"),
 )
+
+
+def _graphql_field_hint(selection: str) -> str:
+    """Ask for a field that cannot exist, and keep what the server says.
+
+    Apollo answers an unknown field with 'Cannot query field "x" on type
+    "T". Did you mean ...?' — and those suggestions are real field names.
+    With introspection disabled (RunPod returns INTROSPECTION_DISABLED)
+    this is the only way left to learn a schema without guessing, and a
+    guess costs a CI round trip because rest.runpod.io and api.runpod.io
+    are both unreachable from the dev container.
+    """
+    query = "{ %s }" % (selection % "oniqFieldThatCannotExist")
+    try:
+        status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+    except RunPodApiError as exc:
+        return f"hint request failed: {exc}"
+    return raw[:400]
 
 
 def worker_detail_graphql(endpoint_id: str):
@@ -501,28 +523,34 @@ def worker_detail_graphql(endpoint_id: str):
     Answers what the health counts cannot: a worker that has said
     "initializing" for an hour may be downloading steadily, or may be
     dying and being recreated. Both render as {"initializing": 1}. A
-    worker id that is unchanged between two reads is progress; a new id
-    means the pull restarted from zero, which on a 25 GiB image is the
-    failure that cost 2026-08-29 and most of 2026-08-30.
+    worker id unchanged between two reads is progress; a new id means the
+    pull restarted from zero, which on a 25 GiB image is the failure that
+    cost 2026-08-29 and most of 2026-08-30.
     """
     notes = []
-    for selection in _WORKER_SELECTIONS:
-        query = "{ myself { endpoints { id workers { %s } } } }" % selection
+    for shape, selection in _WORKER_SHAPES:
+        query = "{ %s }" % (shape % selection)
         status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
         if status != 200:
-            notes.append(f"[{selection}] HTTP {status} {raw[:160]}")
+            notes.append(f"[{shape.split('{')[1].strip()}] {raw[:120]}")
             continue
         doc = json.loads(raw)
         if doc.get("errors"):
-            notes.append("[%s] %s" % (selection, "; ".join(
-                e.get("message", "?") for e in doc["errors"])[:200]))
+            notes.append("[%s] %s" % (shape[:40], "; ".join(
+                e.get("message", "?") for e in doc["errors"])[:160]))
             continue
-        endpoints = ((doc.get("data") or {}).get("myself") or {}).get("endpoints") or []
-        for ep in endpoints:
-            if ep.get("id") == endpoint_id:
-                return ep.get("workers") or [], f"selection: {selection}"
-        return None, f"endpoint {endpoint_id} not in myself.endpoints"
-    return None, " | ".join(notes)[:600]
+        data = (doc.get("data") or {}).get("myself") or {}
+        for key in ("endpoints", "serverlessEndpoints"):
+            for ep in data.get(key) or []:
+                if ep.get("id") == endpoint_id:
+                    rows = ep.get("workers") or ep.get("machines") or []
+                    return rows, f"shape: {shape}"
+        notes.append(f"[{shape[:40]}] 200 but endpoint {endpoint_id} absent")
+
+    # Nothing worked. Harvest the server's own suggestions so the NEXT
+    # run has field names instead of another guess.
+    notes.append("HINT " + _graphql_field_hint("myself { endpoints { id %s } }"))
+    return None, " | ".join(notes)[:900]
 
 
 def parse_endpoint(doc: dict) -> dict:

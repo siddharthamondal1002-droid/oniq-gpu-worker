@@ -163,6 +163,28 @@ def introspect(type_name: str):
     return sorted(names), None
 
 
+def _patch_properties(doc: dict):
+    """What PATCH /endpoints/{endpointId} accepts.
+
+    The endpoint document carries networkVolumeId (empty today), so
+    attaching a volume looks like a one-field patch. Whether the API will
+    ACCEPT that field is a different question from whether it reports it,
+    and run #34's "not in input schema" refusal is the standing reminder
+    to read the input schema rather than assume symmetry.
+    """
+    try:
+        schema = doc["paths"]["/endpoints/{endpointId}"]["patch"][
+            "requestBody"]["content"]["application/json"]["schema"]
+    except (KeyError, TypeError):
+        return None
+    ref = schema.get("$ref")
+    if ref and ref.startswith("#/components/schemas/"):
+        schema = doc.get("components", {}).get("schemas", {}).get(
+            ref.rsplit("/", 1)[1], {})
+    props = schema.get("properties")
+    return sorted(props) if isinstance(props, dict) else None
+
+
 def endpoint_locations():
     """Any location or datacenter the ENDPOINT document itself names.
 
@@ -371,6 +393,7 @@ def survey() -> dict:
         "introspection_note": introspect("GpuAvailabilityInput")[1],
         "endpoint_locations": endpoint_locations()[0],
         "derived_rate": derived_rate(volume_billing()[0]),
+        "endpoint_patch_properties": _patch_properties(doc) if doc else None,
     }
 
 
@@ -411,12 +434,19 @@ def report() -> int:
     print(f"introspection : {s['introspection_note']}")
     print(f"ENDPOINTS    : {s['endpoint_locations']}")
     print(f"DERIVED RATE : {s['derived_rate']}")
+    print(f"ENDPOINT PATCH accepts: {s['endpoint_patch_properties']}")
     print()
-    if s["storage_rate_fields_in_spec"]:
-        print(f"RATE: spec carries {s['storage_rate_fields_in_spec']}")
+    rate = s["derived_rate"]
+    if rate:
+        usd = rate["usd_per_gb_month_720h"]
+        print(f"RATE: ${usd}/GB/month, DERIVED from a real charge on this")
+        print(f"      account: {rate['measured_from']}")
+        print("      (amount x 720h / diskSpaceBilledGb). Not recalled.")
+        for size in (50, 60, 100):
+            print(f"        {size:3d} GB -> ${size * usd:.2f}/month")
     else:
-        print("RATE: the API states no storage price. NOT INVENTED HERE -")
-        print("      the owner is told to read it off the RunPod console.")
+        print("RATE: no charge to derive one from, and the spec states no")
+        print("      price. NOT INVENTED HERE - read it off the console.")
     print("=" * 68)
     print("$0 - every call above was a GET. Nothing was created.")
     return 0
