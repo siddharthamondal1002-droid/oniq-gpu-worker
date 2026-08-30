@@ -576,6 +576,8 @@ def vae_temporal_ratio(local_dir: str):
     revision is pinned, so the config on the volume IS the authority, and a
     number copied into a row here could drift from it silently.
     """
+    import json
+
     try:
         with open(os.path.join(local_dir, "vae", "config.json"),
                   encoding="utf-8") as fh:
@@ -833,6 +835,8 @@ def _measure(job, input_path, output_path, model_key, spec_row, phases,
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop("LOAD_FAILED", f"{type(exc).__name__}: {exc}") from exc
     disk["download_bytes"] = dir_bytes(cache_dir)
+    disk["weights_source"] = spec_row.get("_weights_source") or "download"
+    disk["weights_path"] = local
 
     # THE SHAPE CHECK, before the weights become resident. A frame count the
     # VAE cannot encode is a shape error that would otherwise surface after
@@ -1011,7 +1015,13 @@ def _real_fetch(spec_row: dict):  # pragma: no cover - needs the network
     def fetch():
         hydrated = volume_path(spec_row)
         if hydrated:
+            # Read, not fetched. The caller records this so a run with
+            # download_bytes 0 reads as "the weights were already here"
+            # rather than "the download silently did nothing" — two very
+            # different facts that look identical in a byte count.
+            spec_row["_weights_source"] = "volume"
             return hydrated
+        spec_row["_weights_source"] = "download"
 
         # Belt and braces: the module-level assignment above is the one that
         # matters, but these directories must EXIST and be ours before the

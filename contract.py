@@ -281,6 +281,11 @@ OUTPUT_WHITELIST = frozenset(
         # The ratio the hydrated checkpoint declared, so the report can
         # say WHY a frame count was legal rather than asserting it.
         "vae_temporal_ratio",
+        # Where the weights actually came from. A probe that read a
+        # hydrated volume reports download_bytes 0, which is
+        # indistinguishable from a download that did nothing unless
+        # the source is stated.
+        "weights_source", "weights_path",
         # Hydration record fields (model_hydrate, 2026-08-30). A model
         # that is on the volume must be able to prove it: revision,
         # bytes, file count and the manifest digest, or the READY it
