@@ -697,8 +697,14 @@ def attach_network_volume(endpoint_id: str, volume_id: str,
         body=body,
     )
     if status not in (200, 201, 202):
+        # THE BODY IS THE DIAGNOSIS, so it is not clipped to 300 characters
+        # here. RunPod's schema refusals name the offending constraint after
+        # a long preamble about which path and which operation; the 2026-08-30
+        # refusal of networkVolumeId + dataCenterIds was cut off exactly
+        # where it was about to say why. The body carries no credential —
+        # the key travels in a header.
         raise RunPodApiError(
-            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:300]!r})"
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:2000]!r})"
         )
     _, after = get_endpoint(endpoint_id)
     return before, after

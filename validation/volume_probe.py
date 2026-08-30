@@ -163,6 +163,36 @@ def introspect(type_name: str):
     return sorted(names), None
 
 
+def patch_schema(doc: dict):
+    """The ENDPOINT PATCH request body schema, whole.
+
+    MEASURED 2026-08-30: a PATCH carrying networkVolumeId AND dataCenterIds
+    together was refused 400 "does not meet the schema requirements", even
+    though both names appear in the property list. A list of property NAMES
+    cannot express that — only the schema can say whether two fields are
+    mutually exclusive, whether one implies the other, or what shape a
+    value must take. Printing names and calling that "what PATCH accepts"
+    is what sent that request.
+    """
+    try:
+        body = (doc["paths"]["/endpoints/{endpointId}"]["patch"]
+                ["requestBody"]["content"]["application/json"]["schema"])
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    out = {"keys": sorted(body)}
+    for key in ("required", "oneOf", "anyOf", "allOf", "not",
+                "additionalProperties", "dependentRequired",
+                "dependentSchemas", "$ref"):
+        if key in body:
+            out[key] = body[key]
+    props = body.get("properties") or {}
+    for name in ("networkVolumeId", "networkVolumeIds", "dataCenterIds",
+                 "workersMin", "workersMax", "templateId"):
+        if name in props:
+            out[f"prop:{name}"] = props[name]
+    return out
+
+
 def _patch_properties(doc: dict):
     """What PATCH /endpoints/{endpointId} accepts.
 
@@ -451,6 +481,7 @@ def survey() -> dict:
         "account_templates_error": account_templates()[1],
         "derived_rate": derived_rate(volume_billing()[0]),
         "endpoint_patch_properties": _patch_properties(doc) if doc else None,
+        "endpoint_patch_schema": patch_schema(doc) if doc else None,
     }
 
 
@@ -500,6 +531,8 @@ def report() -> int:
                   f"vol={t['volumeInGb']!r}GB at {t['volumeMountPath']!r}")
     print(f"DERIVED RATE : {s['derived_rate']}")
     print(f"ENDPOINT PATCH accepts: {s['endpoint_patch_properties']}")
+    print("ENDPOINT PATCH SCHEMA (names alone cannot express exclusivity):")
+    print(json.dumps(s["endpoint_patch_schema"], indent=1, sort_keys=True)[:6000])
     print()
     rate = s["derived_rate"]
     if rate:
