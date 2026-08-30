@@ -58,12 +58,26 @@ IMAGE_ONLY = {
 }
 
 
-def test_a_missing_template_is_named_a_dangling_reference(capsys):
+def test_a_template_outside_the_listing_is_not_called_dangling(capsys):
+    """CORRECTED 2026-08-30. This used to assert the words "MISSING" and
+    "dangling reference", and that conclusion was wrong.
+
+    list_templates_graphql returns what the console shows under "My
+    Templates". A template created inline while creating an endpoint never
+    appears there. Endpoint 7disu6my0mloco referenced xfmaf7n83n, absent
+    from the listing, and was demonstrably working — three workers
+    initializing against it. Calling that "dangling" would have justified
+    overwriting a template that was doing its job.
+
+    Absence from the listing is now reported as exactly that, and the REST
+    read is what settles whether the template resolves.
+    """
     client = Client([{"id": "other", "name": "stock", "imageName": "x"}], IMAGE_ONLY)
     tp.report(client, "hhhdwtjw0y")
     out = capsys.readouterr().out
-    assert "MISSING: hhhdwtjw0y" in out
-    assert "dangling reference" in out
+    assert "NOT LISTED: hhhdwtjw0y" in out
+    assert "NOT the same as dangling" in out
+    assert "dangling reference" not in out
 
 
 def test_a_present_template_is_not_reported_missing(capsys):
@@ -101,9 +115,16 @@ def test_unreadable_templates_are_unknown_never_none_exist(capsys):
 
 
 def test_the_probe_only_reads(capsys):
+    """get_template joined the sequence 2026-08-30 and is still a GET. The
+    property this test protects is that every call here is a read — the
+    exact list is pinned so a mutation cannot join it unnoticed."""
     client = Client([], IMAGE_ONLY)
     tp.report(client, "hhhdwtjw0y")
-    assert client.calls == ["list_templates_graphql", "rest_template_surface"]
+    assert client.calls == [
+        "get_template",
+        "list_templates_graphql",
+        "rest_template_surface",
+    ]
 
 
 def test_a_blank_id_refuses_rather_than_printing_a_trivially_true_missing(capsys):
@@ -179,6 +200,10 @@ def test_the_probe_still_only_reads_when_it_checks_storage():
     client = Client(HERE, IMAGE_ONLY, env=R2)
     tp.report(client, "aqa3wkdf8g")
     assert client.calls == [
+        # The unconditional REST read now comes first: what a template
+        # DECLARES is a different question from whether it is listed, and
+        # only the first one decides if an endpoint can run ONIQ's worker.
+        "get_template",
         "list_templates_graphql",
         "template_env_names_graphql",
         "get_template",

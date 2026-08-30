@@ -52,6 +52,61 @@ def _rest_env_names(client, template_id: str):
     return None
 
 
+def rest_detail(client, template_id: str) -> dict:
+    """What a template ACTUALLY declares, read over REST by id.
+
+    THE LISTING IS NOT THE ACCOUNT. list_templates_graphql returns the
+    templates the console shows under "My Templates"; one created inline
+    while creating an endpoint does not appear there. Twice now an
+    endpoint has referenced an id absent from that listing — ei22bjog46
+    and xfmaf7n83n — and the second was demonstrably working, with three
+    workers initializing against it.
+
+    So "absent from the listing" was being printed as if it meant
+    "dangling", and the REST read that could have settled it only ran when
+    the listing already said the template was there. It runs
+    unconditionally now.
+
+    The image name is the whole question this answers: whether an endpoint
+    runs ONIQ's worker, which speaks contract.py's job schema, or
+    something else entirely.
+
+    ENV NAMES ONLY, never values — the same discipline _rest_env_names
+    keeps. dockerStartCmd is reported as set/unset and never printed: it
+    is a place a credential can end up, and this output goes to a log.
+    """
+    try:
+        _, doc = client.get_template(template_id)
+    except Exception as exc:
+        return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(doc, dict):
+        return {"readable": False, "error": f"unexpected shape: {type(doc).__name__}"}
+
+    env = doc.get("env")
+    if isinstance(env, dict):
+        names = sorted(env)
+    elif isinstance(env, list):
+        names = sorted(e.get("key") for e in env
+                       if isinstance(e, dict) and e.get("key"))
+    else:
+        names = [] if env is None else None
+
+    return {
+        "readable": True,
+        "id": doc.get("id"),
+        "name": doc.get("name"),
+        "imageName": doc.get("imageName"),
+        "containerDiskInGb": doc.get("containerDiskInGb"),
+        "volumeInGb": doc.get("volumeInGb"),
+        "volumeMountPath": doc.get("volumeMountPath"),
+        "isServerless": doc.get("isServerless"),
+        "registry_auth_set": bool(doc.get("containerRegistryAuthId")),
+        "docker_start_cmd_set": bool(doc.get("dockerStartCmd")),
+        "docker_entrypoint_set": bool(doc.get("dockerEntrypoint")),
+        "env_names": names,
+    }
+
+
 def _report_storage(client, template_id: str):
     """Which storage variables are set on the template. NAMES ONLY.
 
@@ -120,6 +175,39 @@ def report(client, expected_template_id: str) -> tuple:
         print("NO TEMPLATE ID GIVEN: nothing to look for, so nothing is proven")
         return 2, {"templates": None, "surface": None}
 
+    # THE REST READ FIRST, and unconditionally. Whether a template is in
+    # the account listing is a different question from what it declares,
+    # and only the second one decides whether an endpoint can run ONIQ's
+    # worker.
+    detail = rest_detail(client, expected_template_id)
+    print(f"=== REST GET /templates/{expected_template_id} ===")
+    if not detail.get("readable"):
+        print(f"  UNREADABLE: {detail.get('error')}")
+    else:
+        print(f"  name       {detail['name']!r}")
+        print(f"  image      {detail['imageName']!r}")
+        print(f"  disk       containerDiskInGb={detail['containerDiskInGb']!r} "
+              f"volumeInGb={detail['volumeInGb']!r} "
+              f"mount={detail['volumeMountPath']!r}")
+        print(f"  serverless {detail['isServerless']!r}  "
+              f"registryAuth={'set' if detail['registry_auth_set'] else 'unset'}  "
+              f"startCmd={'set' if detail['docker_start_cmd_set'] else 'unset'}  "
+              f"entrypoint={'set' if detail['docker_entrypoint_set'] else 'unset'}")
+        names = detail["env_names"]
+        if names is None:
+            print("  env        UNREADABLE shape")
+        else:
+            print(f"  env        {len(names)} set - "
+                  f"{', '.join(names) or '(none)'}  (names only, never values)")
+            missing = [v for v in storage.REQUIRED_VARS if v not in names]
+            if missing:
+                print(f"  STORAGE    NOT READY: {', '.join(missing)} absent — "
+                      "every job against this template fails closed with "
+                      "storage-not-configured")
+            else:
+                print("  STORAGE    READY: every variable storage.py requires "
+                      "is set")
+
     storage_state = "unchecked"
     storage_line = None
     present = False
@@ -146,8 +234,10 @@ def report(client, expected_template_id: str) -> tuple:
             storage_state, storage_line = _report_storage(client, expected_template_id)
         else:
             print(
-                f"MISSING: {expected_template_id} is NOT among them — the endpoint's "
-                "templateId is a dangling reference"
+                f"NOT LISTED: {expected_template_id} is not among them. That "
+                "is NOT the same as dangling — a template created inline "
+                "with an endpoint never appears in this listing. The REST "
+                "read above is what settles whether it resolves."
             )
 
     surface = client.rest_template_surface()
@@ -186,7 +276,8 @@ def report(client, expected_template_id: str) -> tuple:
     if storage_line:
         print(storage_line)
 
-    facts = {"templates": templates, "surface": surface, "storage": storage_state}
+    facts = {"templates": templates, "surface": surface,
+             "storage": storage_state, "rest_detail": detail}
     if not surface or not surface.get("template_paths"):
         print(
             "NO TEMPLATE API: the spec exposes no template path, so creating one "
