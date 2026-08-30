@@ -77,9 +77,9 @@ on:
         options: ["16", "17", "18", "19"]
         default: "16"
       op:
-        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only). model_probe = ONE open-source video candidate named by probe_model, conditioned on the shared probe reference and measured on the A5000 (one candidate per dispatch, phase 16 only)."
+        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only). model_probe = ONE open-source video candidate named by probe_model, conditioned on the shared probe reference and measured on the A5000 (one candidate per dispatch, phase 16 only). model_hydrate = fetch ONE experimental checkpoint onto the persistent volume; no GPU inference, no artifact, and idempotent, so a model already READY downloads nothing."
         type: choice
-        options: [image_preprocess, image_generate, video_generate, audio_mux, model_probe]
+        options: [image_preprocess, image_generate, video_generate, audio_mux, model_probe, model_hydrate]
         default: image_preprocess
       endpoint_id:
         description: "Endpoint id (optional; must match the single live endpoint)."

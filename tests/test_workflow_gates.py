@@ -459,6 +459,13 @@ def test_op_input_defaults_to_the_image_workload():
         # what makes it different is that it downloads a checkpoint the image
         # does not carry, which is why it can never be a default.
         "model_probe",
+        # model_hydrate joined 2026-08-30 with the owner's "MODEL WEIGHTS
+        # ARE DATA" directive. It is the one op here that runs NO
+        # inference: it puts a checkpoint on the persistent volume so a
+        # later model change is a configuration edit rather than a rebuild.
+        # It still costs a booted worker, so it is an explicit choice like
+        # every other paid op and never the default.
+        "model_hydrate",
     ]
     assert "OP: ${{ inputs.op }}" in raw
 

@@ -1164,18 +1164,30 @@ def one_job(
             contract_probe_ceiling_ms() // 1000 if op == "model_probe" else None
         ),
     )
-    payload = {
-        "op": op,
-        # Per-shot conditioning (owner directive 2026-08-29): a shot that
-        # names its own reference passes it here; everything else keeps
-        # the run-wide test input. Both are server-derived — no caller
-        # path reaches this field.
-        "input_key": input_key or facts["input_ref"],
-        "output_key": output_key,
-    }
+    if op == "model_hydrate":
+        # Hydration reads no object and writes none: it puts a checkpoint on
+        # the persistent volume. The contract admits op + model ONLY, so
+        # sending an input_key or output_key here would be refused — which
+        # is the point, since a hydrate that quietly accepted keys would
+        # look like a generation that produced nothing.
+        payload = {"op": op, "model": model}
+    else:
+        payload = {
+            "op": op,
+            # Per-shot conditioning (owner directive 2026-08-29): a shot that
+            # names its own reference passes it here; everything else keeps
+            # the run-wide test input. Both are server-derived — no caller
+            # path reaches this field.
+            "input_key": input_key or facts["input_ref"],
+            "output_key": output_key,
+        }
     if model is not None:
-        # Only model_probe carries this, and the worker's contract admits it
-        # on no other op — a benchmark ROW id, never a repository or a path.
+        # model_probe and model_hydrate carry this, and the worker's contract
+        # admits it on no other op — an id into the worker's own table,
+        # never a repository or a path. Re-setting it for hydrate (whose
+        # payload already holds it) is a deliberate no-op: the assignment
+        # stays a single unconditional line so the gate that greps for it
+        # keeps meaning what it says.
         payload["model"] = model
     if preview:
         # The BENCHMARK asks; production never does. The bucket is private by
@@ -1259,7 +1271,30 @@ def one_job(
     _show("job status (raw, redacted)", status)
     if status.get("status") != "COMPLETED":
         raise SpendStop("job-failed", f"terminal status {status.get('status')}")
-    if op == "audio_mux":
+    if op == "model_hydrate":
+        # NOTHING WAS GENERATED, so verify_gpu_success cannot apply: it
+        # requires a CUDA device, a peak VRAM figure and an output artifact,
+        # and a hydration produces none of the three by design. What it must
+        # prove instead is that the checkpoint is on the volume and
+        # verifiable, which is exactly what the marker records.
+        out = status.get("output") or {}
+        if out.get("state") != "READY":
+            raise SpendStop(
+                "hydrate-not-ready",
+                f"hydration reported state {out.get('state')!r}; the model is "
+                "not usable and a probe against it would spend to find that "
+                "out on a rented card",
+            )
+        if not out.get("already_present") and not out.get("manifest_sha256"):
+            raise SpendStop(
+                "hydrate-unverified",
+                "a fresh hydration reported READY with no manifest digest; "
+                "READY without a manifest is a word, not a proof",
+            )
+        print(f"hydrate {out.get('model_id')} -> {out.get('state')} "
+              f"({out.get('bytes')} bytes, {out.get('file_count')} files, "
+              f"already_present={out.get('already_present')})")
+    elif op == "audio_mux":
         verify_audio_success(status.get("output"))
     elif op == "model_probe" and probe_failure(status.get("output")):
         # A NAMED PROBE FAILURE IS A RESULT, NOT A BROKEN RUN. Owner
@@ -1803,6 +1838,37 @@ def main(argv) -> int:
                 )
             ]
             print(f"PHASE 13-16 PASS — {label} drawn, verified and terminated")
+        elif op == "model_hydrate":
+            # NOT a generation. It puts one checkpoint on the persistent
+            # volume so every later change to that model is a configuration
+            # edit rather than a 25 GiB rebuild. Idempotent by construction:
+            # a model already READY downloads nothing and returns at once.
+            import modelroot
+
+            if through != 16:
+                raise SpendStop(
+                    "hydrate-through-phase",
+                    "model_hydrate supports through_phase 16 only",
+                )
+            target = os.environ.get("PROBE_MODEL", "").strip()
+            if target not in modelroot.EXPERIMENTAL:
+                raise SpendStop(
+                    "hydrate-unknown-model",
+                    f"{target!r} is not an experimental model; known ids are "
+                    + ", ".join(sorted(modelroot.EXPERIMENTAL)),
+                )
+            rows = [
+                one_job(
+                    client,
+                    facts,
+                    output_key=output_key,
+                    op="model_hydrate",
+                    model=target,
+                    sleep=sleep,
+                    clock=clock,
+                )
+            ]
+            print(f"PHASE 13-16 PASS — {target} hydrated onto the volume")
         elif op == "model_probe":
             # ONE candidate, ONE clip, on the A5000 — owner directive
             # 2026-08-29. Each dispatch names one benchmark row; there is no
