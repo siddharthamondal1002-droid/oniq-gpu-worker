@@ -730,10 +730,25 @@ def attach_network_volume(endpoint_id: str, volume_id: str,
     if status not in (200, 201, 202):
         # THE BODY IS THE DIAGNOSIS, so it is not clipped to 300 characters
         # here. RunPod's schema refusals name the offending constraint after
-        # a long preamble about which path and which operation; the 2026-08-30
-        # refusal of networkVolumeId + dataCenterIds was cut off exactly
-        # where it was about to say why. The body carries no credential —
-        # the key travels in a header.
+        # a long preamble about which path and which operation, and the
+        # 2026-08-30 refusal was cut off exactly where it was about to say
+        # why. The body carries no credential — the key travels in a header.
+        #
+        # WHAT THAT 400 ACTUALLY WAS, once the schema was resolved and read:
+        # `dataCenterIds` is an ENUM of 28 values, and US-MO-2 — where the
+        # volume had been created — is not among them. The two fields were
+        # never the problem; the VALUE was illegal. This comment recorded the
+        # opposite for a few hours, which is worse than recording nothing:
+        # "those fields cannot be combined" would send the next reader to
+        # rewrite a call that was already correct.
+        #
+        # THE TRAP GENERALISES. RunPod will create a network volume in a
+        # datacenter its serverless scheduler cannot place a worker in, and
+        # nothing warns you at creation time. A volume there can never be
+        # attached, because no legal dataCenterIds value pins an endpoint to
+        # it. Read the enum out of the PATCH schema BEFORE creating a volume
+        # — patch_schema() in validation/volume_probe.py resolves it — rather
+        # than after ninety minutes of an endpoint with zero workers.
         raise RunPodApiError(
             f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:2000]!r})"
         )
