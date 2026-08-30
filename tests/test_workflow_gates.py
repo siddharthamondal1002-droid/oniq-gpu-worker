@@ -562,7 +562,15 @@ def test_the_volume_probe_can_only_read():
     # not declare a datacenters path at all. So the guard is on the verb
     # the payload carries, not on the HTTP method: a GraphQL mutation is
     # what must never appear, and every POST must go to GRAPHQL_URL.
-    assert "mutation" not in module.lower()
+    # A GraphQL mutation would have to live in a STRING literal to be
+    # sent, so that is where the check belongs. Scanning the whole file
+    # matched the word in this module's own comment explaining the rule —
+    # a guard that fires on its own documentation is a guard that gets
+    # deleted rather than fixed.
+    import ast as _ast
+    for node in _ast.walk(_ast.parse(module)):
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            assert "mutation" not in node.value.lower(), node.value[:120]
     for line in module.splitlines():
         if 'method="POST"' in line:
             assert "GRAPHQL_URL" in line, line

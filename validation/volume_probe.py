@@ -117,76 +117,93 @@ def volume_datacenters(doc: dict, raw: str) -> list[str] | None:
     return None
 
 
-DATACENTER_QUERY = """
-query DataCenters {
-  dataCenters {
-    id
-    name
-    storageSupport
-    gpuAvailability(input: {gpuTypeId: "NVIDIA RTX A5000"}) {
-      gpuTypeId
-      available
-      stockStatus
-    }
-  }
-}
-"""
+# One POST, one place. GraphQL sends READS over POST, and the gate in
+# tests/test_workflow_gates.py asserts this is the only one and that it
+# goes to GRAPHQL_URL — so a mutation cannot be slipped in beside it.
+def _gql(query: str):
+    """Send a GraphQL READ. Returns (data, error_text)."""
+    status, raw = rp._request(rp.GRAPHQL_URL, method="POST",
+                              body={"query": query})
+    if status != 200:
+        return None, f"HTTP {status} {raw[:300]}"
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, f"unparseable body {raw[:200]!r}"
+    if doc.get("errors"):
+        # A schema refusing a field NAMES the field that exists. Run 162
+        # learned GpuAvailabilityInput has no "gpuTypeId" this way, which
+        # is more than a null would ever have said.
+        return None, "; ".join(e.get("message", "?") for e in doc["errors"])[:400]
+    return doc.get("data"), None
+
+
+def introspect(type_name: str):
+    """Field names on one GraphQL type. Read, so a query is written
+    against the schema that exists rather than the one documentation
+    describes — the difference cost run 162."""
+    data, err = _gql(
+        '{ __type(name: "%s") { fields { name } inputFields { name } } }'
+        % type_name
+    )
+    if err or not data or not data.get("__type"):
+        return None, err or f"{type_name} not in the schema"
+    node = data["__type"]
+    names = [f["name"] for f in (node.get("fields") or [])]
+    names += [f["name"] for f in (node.get("inputFields") or [])]
+    return sorted(names), None
 
 
 def spec_paths(doc: dict) -> list[str] | None:
     """Every path the REST spec declares.
 
-    Printed because the last two runs each spent a round trip discovering
-    that a path guessed from documentation is not there. rest.runpod.io is
-    unreachable from the dev container, so every guess costs a CI run; the
-    document names its own paths, and reading them is one run instead of
-    however many guesses it would have taken.
+    Printed because two runs each spent a round trip discovering that a
+    path guessed from documentation is not there — /datacenters is not a
+    REST path at all. rest.runpod.io is unreachable from the dev
+    container, so every guess costs a CI run; the document names its own
+    paths, and reading them is one run instead of however many guesses.
     """
     paths = doc.get("paths") if isinstance(doc, dict) else None
     return sorted(paths) if isinstance(paths, dict) else None
 
 
-def datacenters():
-    """Datacenter rows, from whichever source actually has them.
+def volume_billing():
+    """What the account is ACTUALLY charged for network volumes.
 
-    REST first, then GraphQL. Returns (rows, keys, note) — the note says
-    which source answered, or, when neither did, what each one said. An
-    unexplained None is what made the previous run worthless.
+    /billing/networkvolumes is declared by the spec, and a measured charge
+    against the 10 GB volume already on the account beats any per-GB rate
+    recalled from memory. Returns (rows, error).
     """
-    tried = []
-    for path in ("/datacenters", "/datacenter"):
-        try:
-            _, doc = rp._get_json(f"{rp.REST_BASE}{path}")
-        except rp.RunPodApiError as exc:
-            tried.append(f"REST {path}: {exc}")
-            continue
-        rows = doc if isinstance(doc, list) else (
-            doc.get("datacenters") or doc.get("dataCenters") or doc.get("data") or []
-        )
-        if isinstance(rows, list) and rows:
-            keys = sorted(set().union(*(set(r) for r in rows if isinstance(r, dict))))
-            return rows, keys, f"REST {path}"
-        tried.append(f"REST {path}: 200 but no rows")
+    try:
+        _, doc = rp._get_json(f"{rp.REST_BASE}/billing/networkvolumes")
+    except rp.RunPodApiError as exc:
+        return None, str(exc)
+    return doc, None
 
-    status, raw = rp._request(rp.GRAPHQL_URL, method="POST",
-                              body={"query": DATACENTER_QUERY})
-    if status == 200:
-        doc = json.loads(raw)
-        if doc.get("errors"):
-            # The schema refusing a field is a FINDING — it names the
-            # fields that do exist. Carry the message rather than a None.
-            tried.append("GraphQL: " + "; ".join(
-                e.get("message", "?") for e in doc["errors"])[:400])
-        else:
-            rows = (doc.get("data") or {}).get("dataCenters") or []
-            if rows:
-                keys = sorted(set().union(
-                    *(set(r) for r in rows if isinstance(r, dict))))
-                return rows, keys, "GraphQL dataCenters"
-            tried.append("GraphQL: 200, empty dataCenters")
-    else:
-        tried.append(f"GraphQL: HTTP {status} {raw[:200]!r}")
-    return None, None, " | ".join(tried)
+
+def datacenters():
+    """Datacenter rows from GraphQL, with the field list read first.
+
+    REST is not asked: its OpenAPI document declares no datacenters path,
+    which run 162 established by printing the paths rather than guessing
+    at two more.
+    """
+    fields, err = introspect("DataCenter")
+    if not fields:
+        return None, None, f"DataCenter introspection failed: {err}"
+    wanted = [f for f in ("id", "name", "storageSupport", "listed",
+                          "gpuAvailability") if f in fields]
+    if "id" not in wanted:
+        return None, None, f"DataCenter has no id field; has {fields}"
+    selection = " ".join(f for f in wanted if f != "gpuAvailability")
+    data, err = _gql("{ dataCenters { %s } }" % selection)
+    if err or not data:
+        return None, None, f"dataCenters query failed: {err}"
+    rows = data.get("dataCenters") or []
+    if not rows:
+        return None, None, "dataCenters returned no rows"
+    keys = sorted(set().union(*(set(r) for r in rows if isinstance(r, dict))))
+    return rows, keys, f"GraphQL dataCenters (fields available: {fields})"
 
 
 def _row_id(row: dict):
@@ -282,6 +299,9 @@ def survey() -> dict:
         "a5000_datacenter_note": a5000_note,
         "datacenter_overlap": overlap,
         "storage_rate_fields_in_spec": storage_rate(raw),
+        "volume_billing": volume_billing()[0],
+        "volume_billing_error": volume_billing()[1],
+        "gpu_availability_input_fields": introspect("GpuAvailabilityInput")[0],
     }
 
 
@@ -317,6 +337,9 @@ def report() -> int:
     else:
         print("  VERDICT: UNRESOLVED from the API. Neither side enumerates its")
         print("           datacenters here, so feasibility is not yet proven.")
+    print()
+    print(f"BILLING (/billing/networkvolumes): {s['volume_billing'] if s['volume_billing'] is not None else s['volume_billing_error']}")
+    print(f"GpuAvailabilityInput accepts: {s['gpu_availability_input_fields']}")
     print()
     if s["storage_rate_fields_in_spec"]:
         print(f"RATE: spec carries {s['storage_rate_fields_in_spec']}")
