@@ -935,8 +935,14 @@ jobs:
               print("STOP: cannot confirm zero orphans (sweep reports None, never 0)")
               raise SystemExit(1)
           print("pods:", result["pods"], "endpoint min workers:", result["endpoint_min_workers"])
+          # Owner-accepted always-on capacity is REPORTED on every run, never
+          # silently dropped: the owner asked to be told what it costs.
+          if result.get("accepted_min_workers"):
+              print("accepted always-on (owner decision, not an alarm):",
+                    result.get("accepted_endpoints"),
+                    "=", result["accepted_min_workers"], "min worker(s)")
           if result["pods"] != 0 or result["endpoint_min_workers"] != 0:
               print("ORPHAN ALARM: something can still bill")
               raise SystemExit(1)
-          print("orphan count = 0, confirmed")
+          print("orphan count = 0 outside owner-accepted capacity, confirmed")
           EOF

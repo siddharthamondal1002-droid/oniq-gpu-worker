@@ -707,11 +707,34 @@ def purge_queue(endpoint_id: str):
 # ---------------------------------------------------------------- sweep
 
 
+# Endpoints the OWNER has accepted as always-on. Their minimum workers are
+# still counted and still reported — they are simply not an alarm.
+#
+# ynysmj3dm92cwp appeared on the account on 2026-08-30 holding
+# workersMin=1 and workersStandby=2 on A5000s, having never run a job.
+# Nothing in this repository can create an endpoint. The owner chose to
+# leave it running and be told the cost (recorded decision, 2026-08-30).
+#
+# WHY IT IS RECORDED HERE RATHER THAN TOLERATED. Once workersMin never
+# returns to zero, this sweep fires on every run forever. A guard that is
+# permanently red is a guard people learn to scroll past, and the day a
+# REAL orphan appears it would be one more red line among many. Naming the
+# exception keeps the alarm meaningful: anything not on this list still
+# takes the run down.
+ACCEPTED_ALWAYS_ON = {
+    "ynysmj3dm92cwp": "owner-accepted 2026-08-30; workersMin=1, never ran a job",
+}
+
+
 def sweep_orphans():
     """Count anything that could still be billing: pods + endpoint workers.
 
     Returns a dict of counts, or None when the API cannot be reached —
     None is 'cannot confirm', which must never be converted to 0.
+
+    `endpoint_min_workers` counts only endpoints that are NOT owner-accepted;
+    `accepted_min_workers` carries the rest, so the accepted capacity is
+    visible in every report rather than silently dropped.
     """
     try:
         _, pods = get_pods()
@@ -723,12 +746,25 @@ def sweep_orphans():
         endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     )
     workers = 0
+    accepted = 0
+    accepted_seen = {}
     for ep in ep_list:
         parsed = parse_endpoint(ep)
         min_w = parsed["min_workers"]
-        if isinstance(min_w, int):
-            workers += min_w
-    return {"pods": len(pod_list), "endpoint_min_workers": workers}
+        if not isinstance(min_w, int):
+            continue
+        if parsed["id"] in ACCEPTED_ALWAYS_ON:
+            accepted += min_w
+            if min_w:
+                accepted_seen[parsed["id"]] = min_w
+            continue
+        workers += min_w
+    return {
+        "pods": len(pod_list),
+        "endpoint_min_workers": workers,
+        "accepted_min_workers": accepted,
+        "accepted_endpoints": accepted_seen,
+    }
 
 
 # ---------------------------------------------------------------- discover
