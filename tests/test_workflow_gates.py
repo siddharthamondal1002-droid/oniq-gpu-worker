@@ -1114,9 +1114,15 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
 
     # Only read-only modules, and only the three read-only modes.
     mode = _triggers(doc)["workflow_dispatch"]["inputs"]["mode"]
-    assert mode["options"] == ["queue-probe", "template-probe", "volume-probe"]
+    assert mode["options"] == [
+        "queue-probe", "template-probe", "volume-probe",
+        # model-bench joined 2026-08-30. It holds no RunPod credential at
+        # all — only HF_TOKEN — and reads a public registry, so it is a $0
+        # mode that cannot become a paid one.
+        "model-bench",
+    ]
     for allowed in ("validation.queue_probe", "validation.template_probe",
-                    "validation.volume_probe"):
+                    "validation.volume_probe", "validation.model_bench"):
         assert allowed in raw
 
     # The spend driver and every endpoint mutation are unreachable from here.
@@ -1129,9 +1135,10 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
     # And the modules it DOES name hold no mutating verb themselves.
     import inspect
 
-    from validation import queue_probe, template_probe, volume_probe
+    from validation import (model_bench, queue_probe, template_probe,
+                            volume_probe)
 
-    for module in (queue_probe, template_probe, volume_probe):
+    for module in (model_bench, queue_probe, template_probe, volume_probe):
         source = inspect.getsource(module)
         for verb in ("attach_template", "attach_network_volume",
                      "create_network_volume", "set_execution_timeout",

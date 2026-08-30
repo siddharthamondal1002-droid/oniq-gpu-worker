@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "queue-probe = queue counts, worker states and per-worker detail across every endpoint (the 'is anything actually happening' read). template-probe = what templates exist and whether one carries the storage env. volume-probe = endpoints, their templates, network volumes and the measured storage rate."
+        description: "model-bench = measure every benchmark candidate from the HuggingFace registry and project its VRAM against the card matrix, $0 and no GPU — run ALONE here so its A5000/minimum-GPU summary is the tail of the log rather than being clipped by a step that follows it. queue-probe = queue counts, worker states and per-worker detail across every endpoint (the 'is anything actually happening' read). template-probe = what templates exist and whether one carries the storage env. volume-probe = endpoints, their templates, network volumes and the measured storage rate."
         type: choice
-        options: [queue-probe, template-probe, volume-probe]
+        options: [queue-probe, template-probe, volume-probe, model-bench]
         default: queue-probe
       job_id:
         description: "queue-probe: a RunPod run id to ask after. Endpoint health is printed either way, so a placeholder is fine when the id is not known — an unknown id answers 404 and the worker states still come back."
@@ -78,3 +78,13 @@ jobs:
       - name: "Endpoints, their templates, volumes, and the storage rate"
         if: inputs.mode == 'volume-probe'
         run: python -m validation.volume_probe
+      # LAST STEP, DELIBERATELY. model_bench ends with the summary that
+      # answers "which card does this model actually need" — and in
+      # gpu-validation.yml that summary is followed by the publisher-
+      # settings step, whose output pushes it out of reach of a log tail.
+      # The verdict goes last, or it may as well not be printed.
+      - name: "Measure every candidate, project the card matrix"
+        if: inputs.mode == 'model-bench'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m validation.model_bench
