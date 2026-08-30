@@ -657,18 +657,44 @@ def create_network_volume(name: str, size_gb: int, datacenter_id: str):
     return json.loads(raw)
 
 
-def attach_network_volume(endpoint_id: str, volume_id: str):
-    """PATCH the endpoint's networkVolumeId. Nothing else is sent.
+def attach_network_volume(endpoint_id: str, volume_id: str,
+                          datacenter_id: str | None = None):
+    """PATCH the endpoint's networkVolumeId AND the datacenter it lives in.
+
+    TWO FIELDS, BECAUSE AN ATTACHMENT IS TWO FIELDS. This sent
+    networkVolumeId alone until 2026-08-30, on a one-field-per-PATCH
+    principle that is right for most endpoint writes and wrong for this
+    one. A network volume is datacenter-scoped: an endpoint holding a
+    volume in US-MO-2 can only run in US-MO-2. Sending the volume without
+    the datacenter left this endpoint with `networkVolumeId` set and no
+    `dataCenterIds` key at all — a state RunPod's scheduler answered by
+    placing nothing.
+
+    MEASURED, not deduced. After the one-field attach the endpoint sat
+    with jobs {inQueue: 1} and workers {idle 0, initializing 0, ready 0,
+    running 0, throttled 0, unhealthy 0} for fifty minutes. The same
+    endpoint had shown initializing=2 before the attach. Nothing was
+    billed — no worker, no charge — and nothing could ever run.
+
+    Detaching is still the same call with an empty volume id, which sends
+    no datacenter and so removes the pin along with the volume.
 
     Read-before and read-after, for the reason the template retarget
-    taught on 2026-08-30: a PATCH that sends one field and silently drops
+    taught the same day: a PATCH that sends one field and silently drops
     another leaves an endpoint nothing printed will show is broken.
     """
     _, before = get_endpoint(endpoint_id)
+    body: dict = {"networkVolumeId": volume_id}
+    if volume_id and datacenter_id:
+        # The caller reads this off the VOLUME document, never off a
+        # dispatch input: the only correct value is where the volume
+        # actually is, and a typed one could pin the endpoint somewhere
+        # its storage is not.
+        body["dataCenterIds"] = [datacenter_id]
     status, raw = _request(
         f"{REST_BASE}/endpoints/{endpoint_id}",
         method="PATCH",
-        body={"networkVolumeId": volume_id},
+        body=body,
     )
     if status not in (200, 201, 202):
         raise RunPodApiError(

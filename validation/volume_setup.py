@@ -97,7 +97,23 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
             "run reported success.",
         )
 
-    before, after = client.attach_network_volume(endpoint_id, volume_id)
+    # WHERE THE VOLUME ACTUALLY IS, read off the volume document rather
+    # than taken from the caller. A network volume is datacenter-scoped,
+    # so this value is not a preference — it is the only place the
+    # endpoint can now run, and a typed one could pin it away from its own
+    # storage.
+    landed_dc = volume.get("dataCenterId") or datacenter_id
+    if not landed_dc:
+        raise Refused(
+            "volume-datacenter-unknown",
+            f"the volume document names no dataCenterId: {volume!r}. "
+            "Attaching without pinning the endpoint to the volume's "
+            "datacenter is what left it unschedulable on 2026-08-30.",
+        )
+
+    before, after = client.attach_network_volume(
+        endpoint_id, volume_id, landed_dc
+    )
     landed = after.get("networkVolumeId")
     if landed != volume_id:
         raise Refused(
@@ -105,6 +121,22 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
             f"asked to attach {volume_id}, endpoint reports {landed!r}. The "
             "PATCH returned success and did not take effect; do not hydrate "
             "against a volume the endpoint will not mount.",
+        )
+
+    # THE DATACENTER IS HALF THE ATTACHMENT, so it is verified like the
+    # other half. MEASURED 2026-08-30: with networkVolumeId set and no
+    # dataCenterIds key at all, the endpoint reported one queued job and
+    # ZERO workers — not even initializing — for fifty minutes. It had
+    # shown initializing=2 before the attach. An attach that lands the
+    # volume and not the pin looks successful and schedules nothing.
+    pinned = after.get("dataCenterIds")
+    if not pinned or landed_dc not in pinned:
+        raise Refused(
+            "datacenter-not-pinned",
+            f"the volume is in {landed_dc} but the endpoint reports "
+            f"dataCenterIds={pinned!r}. An endpoint that holds a volume it "
+            "is not allowed to run beside gets no worker at all, and the "
+            "queue simply never drains.",
         )
 
     moved = {
@@ -128,6 +160,8 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
         "endpoint": endpoint_id,
         "network_volume_id_before": before.get("networkVolumeId") or "",
         "network_volume_id_after": landed,
+        "data_center_ids_before": before.get("dataCenterIds"),
+        "data_center_ids_after": after.get("dataCenterIds"),
         "usd_per_gb_month_measured": USD_PER_GB_MONTH,
         "estimated_monthly_usd": monthly_cost(volume.get("size", size_gb)),
     }
