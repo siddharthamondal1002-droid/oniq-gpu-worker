@@ -53,14 +53,14 @@ on:
         default: ""
       stale_job_id:
         description: "RunPod run id for queue-probe / stale-cancel."
+        type: string
+        default: ""
       timeout_token:
         description: "Type SET-EXECUTION-TIMEOUT (exactly) to allow the endpoint ceiling change."
-        required: false
+        type: string
         default: ""
       timeout_ms:
-        description: "New executionTimeoutMs for endpoint-timeout mode."
-        required: false
-        default: ""
+        description: "New executionTimeoutMs for endpoint-timeout mode (e.g. 2700000 = 45 min)."
         type: string
         default: ""
       cancel_token:

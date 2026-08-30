@@ -174,6 +174,43 @@ def test_dockerfile_copies_exactly_the_shipped_files():
     ]
 
 
+
+def test_no_workflow_has_a_duplicate_key():
+    """PyYAML accepts duplicate mapping keys and keeps the last one.
+    GitHub's parser refuses the file outright.
+
+    On 2026-08-30 an inserted input split an existing one, leaving two
+    `default:` keys in the same block. yaml.safe_load said the file was
+    fine; the dispatch came back "'default' is already defined" and the
+    run never started. A gate that is more permissive than the thing it
+    guards is not a gate.
+    """
+    import yaml
+
+    class StrictLoader(yaml.SafeLoader):
+        pass
+
+    def _no_duplicates(loader, node, deep=False):
+        seen = set()
+        for key_node, _ in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            assert key not in seen, (
+                f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
+            )
+            seen.add(key)
+        return yaml.SafeLoader.construct_mapping(loader, node, deep)
+
+    StrictLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_duplicates
+    )
+
+    workflows = os.path.join(ROOT, ".github", "workflows")
+    for name in sorted(os.listdir(workflows)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        with open(os.path.join(workflows, name), encoding="utf-8") as fh:
+            yaml.load(fh, Loader=StrictLoader)
+
 def test_dockerfile_never_copies_the_context_wholesale():
     for line in _dockerfile_instructions():
         if line.startswith("COPY"):
