@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 
 import runpod_client as rp
@@ -183,7 +184,7 @@ _MAGIC = {
 }
 
 
-def reference_readable(base: str, key: str) -> dict:
+def reference_readable(base: str, key: str, *, fetch=None) -> dict:
     """Fetch the benchmark reference and confirm it is really an image.
 
     Owner directive section 11: use the already-validated single-person
@@ -192,16 +193,35 @@ def reference_readable(base: str, key: str) -> dict:
     DECODING the first bytes rather than trusting a header — a 404 page
     served with image/png is still a 404 page, and conditioning a paid job
     on one produces a clip of nothing.
+
+    IT READS THROUGH frame_pull's FETCHER, NOT A FRESH urlopen. This gate
+    failed on 2026-08-30 with HTTP 403, which reads like a private bucket
+    and is not one: r2.dev applies Cloudflare's UA-signature filter (error
+    code 1010) to known scraper agents, python-urllib among them, and a
+    bare urlopen sends exactly that UA. The finding was already measured
+    on 2026-08-29, written into frame_pull's two-UA ladder, and recorded
+    in validation/fixtures/FIXTURES.md as PUBLIC_R2_ARTIFACT_READ =
+    CURRENT. Writing a second fetcher here threw all of that away and
+    produced a 403 that would have been read as "the reference is gone".
+
+    So there is ONE fetcher for this bucket. A refusal that survives it is
+    a real refusal.
     """
+    from validation.frame_pull import _fetch, http_detail
+
+    if fetch is None:
+        fetch = _fetch
     url = f"{base.rstrip('/')}/{key.lstrip('/')}"
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
-            head = resp.read(4096)
-            status = resp.status
+        head = fetch(url)[:4096]
+    except urllib.error.HTTPError as exc:
+        detail = http_detail(exc)
+        return {"ok": False, "url": url,
+                "error": f"HTTP {exc.code}" + (f" ({detail})" if detail else "")}
     except Exception as exc:
         return {"ok": False, "url": url, "error": f"{type(exc).__name__}: {exc}"}
-    if status != 200:
-        return {"ok": False, "url": url, "error": f"HTTP {status}"}
+    if not head:
+        return {"ok": False, "url": url, "error": "empty body"}
     kind = next((k for magic, k in _MAGIC.items() if head.startswith(magic)), None)
     if kind is None:
         return {"ok": False, "url": url,

@@ -7,6 +7,7 @@ implementation/checkpoint", not from a README. Section 12: zero GPU jobs.
 
 import os
 import sys
+import urllib.error
 
 import pytest
 
@@ -118,6 +119,10 @@ def test_the_module_submits_no_job():
 class _Resp:
     def __init__(self, body, status=200):
         self._body, self.status = body, status
+        # frame_pull's fetcher reads Content-Length before the body, to
+        # refuse an oversized artifact before it lands in a runner's
+        # memory. A fake without headers would not exercise that path.
+        self.headers = {"Content-Length": str(len(body))}
 
     def read(self, n=None):
         return self._body[:n] if n else self._body
@@ -133,16 +138,15 @@ PNG_HEAD = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + \
     (704).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"\x00" * 64
 
 
-def test_a_real_png_reference_passes_and_reports_its_size(monkeypatch):
-    monkeypatch.setattr(hp.urllib.request, "urlopen",
-                        lambda url, timeout=0: _Resp(PNG_HEAD))
-    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png")
+def test_a_real_png_reference_passes_and_reports_its_size():
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png",
+                                 fetch=lambda url: PNG_HEAD)
     assert info["ok"] is True
     assert info["format"] == "png"
     assert (info["width"], info["height"]) == (704, 480)
 
 
-def test_an_html_error_page_served_as_200_is_refused(monkeypatch):
+def test_an_html_error_page_served_as_200_is_refused():
     """The failure this check exists for.
 
     A 404 page served with image/png is still a 404 page. Conditioning a
@@ -150,21 +154,130 @@ def test_an_html_error_page_served_as_200_is_refused(monkeypatch):
     before anyone looks. Headers are what a server claims; magic bytes are
     what the decoder will actually see.
     """
-    monkeypatch.setattr(hp.urllib.request, "urlopen",
-                        lambda url, timeout=0: _Resp(b"<!DOCTYPE html><html>404"))
-    info = hp.reference_readable("https://pub-x.r2.dev", "a/missing.png")
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/missing.png",
+                                 fetch=lambda url: b"<!DOCTYPE html><html>404")
     assert info["ok"] is False
     assert "not an image" in info["error"]
 
 
-def test_an_unreachable_reference_is_a_failed_gate_not_a_crash(monkeypatch):
-    def boom(url, timeout=0):
+def test_an_unreachable_reference_is_a_failed_gate_not_a_crash():
+    def boom(url):
         raise OSError("connection refused")
 
-    monkeypatch.setattr(hp.urllib.request, "urlopen", boom)
-    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png")
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png", fetch=boom)
     assert info["ok"] is False
     assert "OSError" in info["error"]
+
+
+def test_an_empty_body_is_refused_rather_than_read_as_an_image():
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png",
+                                 fetch=lambda url: b"")
+    assert info["ok"] is False
+    assert "empty" in info["error"]
+
+
+def _through_frame_pull(opener):
+    """reference_readable's real reader, with ONE seam: the socket.
+
+    The ladder under test lives in frame_pull._fetch, so the fake is
+    injected where frame_pull itself takes one rather than by patching a
+    module attribute — _fetch binds its opener as a default at definition
+    time, so a monkeypatched attribute would never be consulted and the
+    test would silently exercise nothing.
+    """
+    from validation import frame_pull
+
+    return lambda url: frame_pull._fetch(url, opener=opener)
+
+
+def test_the_reference_is_read_through_frame_pulls_two_UA_ladder():
+    """MEASURED 2026-08-30: this gate failed with HTTP 403 and the run was
+    one step from being reported as "the reference is gone".
+
+    It was not gone. r2.dev applies Cloudflare's UA-signature filter (error
+    code 1010) to known scraper agents, python-urllib among them, and a
+    bare urlopen sends exactly that UA. frame_pull had measured this on
+    2026-08-29, built the browser-UA retry, and FIXTURES.md records the
+    posture as PUBLIC_R2_ARTIFACT_READ = CURRENT. A second fetcher written
+    here threw all of that away.
+
+    So: a 403 under the honest UA must still resolve.
+    """
+    from validation import frame_pull
+
+    seen = []
+
+    def opener(url, ua, timeout=120):
+        seen.append(ua)
+        if ua == frame_pull.UA_PRIMARY:
+            raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+        return _Resp(PNG_HEAD)
+
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png",
+                                 fetch=_through_frame_pull(opener))
+    assert info["ok"] is True, info
+    assert seen == [frame_pull.UA_PRIMARY, frame_pull.UA_BROWSER]
+
+
+def test_a_403_that_survives_both_UAs_is_still_a_failed_gate():
+    """The retry must not become a blanket pass. A bucket that really is
+    private refuses both identities, and that is a stop."""
+    def opener(url, ua, timeout=120):
+        raise urllib.error.HTTPError(url, 403, "Forbidden", {}, None)
+
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png",
+                                 fetch=_through_frame_pull(opener))
+    assert info["ok"] is False
+    assert "403" in info["error"]
+
+
+def test_a_404_is_not_retried_under_a_second_identity():
+    """Only the UA-ban shape earns the second identity. A missing object
+    answers every UA identically, and retrying would blur the diagnosis."""
+    from validation import frame_pull
+
+    seen = []
+
+    def opener(url, ua, timeout=120):
+        seen.append(ua)
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/gone.png",
+                                 fetch=_through_frame_pull(opener))
+    assert info["ok"] is False
+    assert "404" in info["error"]
+    assert seen == [frame_pull.UA_PRIMARY], "a 404 must not be retried"
+
+
+def test_the_default_reader_IS_frame_pulls_and_not_a_bare_urlopen():
+    """The wiring claim itself, held in place.
+
+    Every test above injects a fetcher, so none of them would notice this
+    module quietly growing a second reader again. This one reads the
+    source: reference_readable must reach for frame_pull's _fetch and must
+    not call urlopen itself.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    source = inspect.getsource(hp.reference_readable)
+    assert "from validation.frame_pull import _fetch" in source
+
+    # The DOCSTRING explains the regression and therefore says "urlopen".
+    # Matching on raw source would trip on the explanation rather than on
+    # the code, so the body is checked with the docstring removed.
+    tree = ast.parse(textwrap.dedent(source))
+    fn = tree.body[0]
+    if (fn.body and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            and isinstance(fn.body[0].value.value, str)):
+        fn.body = fn.body[1:]
+    body = ast.unparse(fn)
+    assert "urlopen" not in body, (
+        "a bare urlopen sends the python-urllib UA that r2.dev's 1010 "
+        "filter refuses — this is exactly the 2026-08-30 regression"
+    )
 
 
 def test_an_unreadable_reference_fails_the_gate_list():
