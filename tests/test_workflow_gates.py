@@ -582,6 +582,12 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # all — detach is not delete, and the volume must survive being
         # looked at.
         "volume-detach",
+        # endpoint-bounds joined 2026-08-30. The admission gate refuses an
+        # endpoint that is not min=0/max=1 and never repairs one on
+        # purpose; this is the repair, kept separate so the gate stays the
+        # control. Both numbers are literals, so like the other two
+        # reducers it needs no token.
+        "endpoint-bounds",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

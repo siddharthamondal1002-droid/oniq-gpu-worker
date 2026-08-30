@@ -283,6 +283,37 @@ def set_workers_min_zero(endpoint_id: str):
     return status, raw
 
 
+def set_worker_bounds_min0_max1(endpoint_id: str):
+    """workersMin=0 AND workersMax=1. Both literals. A spend REDUCTION.
+
+    This is the exact shape validation/admission.check_endpoint_config
+    demands, and the reason it demands it: min=0 means nothing bills while
+    no job is running, max=1 means one runaway job cannot become three.
+
+    ONE PATCH, TWO FIELDS, BECAUSE THEY ARE ONE DECISION. Sending them
+    separately would restart the worker twice, and on a 25 GiB image each
+    restart is a fresh pull. They are also only meaningful together: min=0
+    with max=3 still allows three concurrent rentals, and max=1 with min=1
+    still bills continuously.
+
+    NO VALUE PARAMETERS, deliberately — the same guarantee
+    set_workers_standby_zero and set_workers_min_zero carry. 0 and 1 are
+    literals in the body, so no caller, dispatch input or stale read can
+    turn this into a scale-up. If the endpoint is already inside these
+    bounds the caller skips it; this function has no opinion, it only ever
+    writes the floor and the ceiling CI requires.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"workersMin": 0, "workersMax": 1},
+    )
+    return status, raw
+
+
 def template_env_names_graphql(template_id: str):
     """Env var NAMES on a template, via GraphQL (values are fetched by
     the API but only names ever leave this function). Returns a set, or
