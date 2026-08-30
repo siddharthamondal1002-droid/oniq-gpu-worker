@@ -314,6 +314,38 @@ def set_worker_bounds_min0_max1(endpoint_id: str):
     return status, raw
 
 
+def set_endpoint_gpu_types(endpoint_id: str, gpu_type_ids):
+    """PATCH gpuTypeIds ALONE, to a list the caller has already resolved.
+
+    WHY THIS ONE TAKES A VALUE, when set_worker_bounds_min0_max1 and
+    set_workers_min_zero deliberately do not. Those write literals because
+    any value at all could turn a reduction into a scale-up. A GPU list
+    cannot be a literal here — the canonical id RunPod wants ("NVIDIA RTX
+    A6000", not "A6000 48GB") is a fact about the provider's catalogue,
+    not about this repo, and writing a guess would repeat the US-MO-2
+    mistake exactly: a string RunPod accepts into a field and then has
+    nowhere legal to schedule.
+
+    So the guarantee moves one level up instead of disappearing.
+    validation/endpoint_gpus.py resolves every card against the LIVE
+    catalogue, refuses anything the catalogue does not list, and holds the
+    approved set as a module constant with no dispatch input feeding it —
+    tests/test_endpoint_gpus.py and tests/test_workflow_gates.py assert
+    both. This function is the transport for that decision, not the place
+    it is made.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted. WIDENING this list adds places a worker may be placed; it
+    does not raise the worker count, which workersMax still bounds.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"gpuTypeIds": list(gpu_type_ids)},
+    )
+    return status, raw
+
+
 def template_env_names_graphql(template_id: str):
     """Env var NAMES on a template, via GraphQL (values are fetched by
     the API but only names ever leave this function). Returns a set, or

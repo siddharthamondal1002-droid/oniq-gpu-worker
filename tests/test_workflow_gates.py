@@ -588,6 +588,13 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # control. Both numbers are literals, so like the other two
         # reducers it needs no token.
         "endpoint-bounds",
+        # endpoint-gpus joined 2026-08-30, after the only endpoint on the
+        # account sat with throttled=1 and one card named. It is the one
+        # endpoint writer that is NOT a reduction — widening the card set
+        # changes cost per second — so unlike the three reducers above it
+        # is token-gated, and the approved set stays a module constant no
+        # dispatch input can reach.
+        "endpoint-gpus",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
