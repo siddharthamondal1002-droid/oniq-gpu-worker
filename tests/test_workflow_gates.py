@@ -861,9 +861,12 @@ def test_gate7_the_read_base_input_overrides_the_variable_everywhere():
     # conditioning plates exist over the base before its first paid
     # submission — the run-72 lesson, times five), the spend job's frame
     # step, and the free frame pull.
-    assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 3, (
-        "spend preflight, spend frames, and the free frame pull must all "
-        "honour the override"
+    # Four since 2026-08-30: the hunyuan preflight joined, because it now
+    # fetches the reference to prove it is really an image, and a gate that
+    # could not honour the override would read from a base nobody chose.
+    assert raw.count("inputs.public_base || vars.R2_PUBLIC_BASE_URL") == 4, (
+        "spend preflight, spend frames, the free frame pull and the hunyuan "
+        "preflight must all honour the override"
     )
 
 
