@@ -179,6 +179,18 @@ ALLOWED_LICENCES = {"other"}
 DEST = "/app/models/ltx"
 SIZE_GUARD_BYTES = 16 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
+# WHICH COMPONENTS THIS RUN DOWNLOADS. The survey above still checks that
+# EVERY component in COMPONENTS exists before a byte moves; this narrower
+# tuple only decides what lands in THIS layer.
+#
+# A container layer is one download stream with NO RESUME. Measured
+# 2026-08-30 from the published manifest: baking the whole pipeline in one
+# RUN produced a single 16.05 GiB layer, and a worker that lost the stream
+# at any point restarted all 16 GiB — which is exactly what a RunPod
+# worker was observed doing for over three hours, re-downloading layers it
+# had already completed. Splitting the text encoder into its own passes
+# caps the worst-case restart at roughly a third of that.
+FIRST_PASS = ("transformer", "vae", "tokenizer", "scheduler")
 
 # The credential arrives on a tmpfs for the duration of this RUN only, via
 # BuildKit's secret mount. Read here, passed explicitly to the two calls
@@ -285,7 +297,7 @@ for repo, tag in CANDIDATES:
                 # the image size changes.
                 ["model_index.json", "LICENSE*", "NOTICE*",
                  "*icense*.txt", "*icence*.txt"]
-                + [c + "/*" for c in COMPONENTS]
+                + [c + "/*" for c in FIRST_PASS]
             ),
         )
         with open(os.path.join(DEST, "model_index.json")) as fh:
@@ -356,6 +368,12 @@ with open("/app/models/MODEL_ID", "w") as fh:
 # rather than that being knowable only from a build log that scrolls away.
 with open("/app/models/LTX_REVISION", "w") as fh:
     fh.write(resolved_revision + "\n")
+# The BARE repo id, for the text-encoder passes below. MODEL_ID carries
+# repo+tag and is what the worker reports; this is what the hub is asked
+# for, and keeping them separate stops a display string from becoming a
+# download argument.
+with open("/app/models/LTX_REPO", "w") as fh:
+    fh.write(repo + "\n")
 with open("/app/models/LTX_LICENCE", "w") as fh:
     fh.write(str(resolved_licence) + "\n")
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
@@ -365,6 +383,124 @@ shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
 shutil.rmtree("/root/.cache/huggingface", ignore_errors=True)
 shutil.rmtree("/home/oniq/.cache/huggingface", ignore_errors=True)
+EOF
+
+# THE TEXT ENCODER, IN TWO LAYERS. Same repository, same pinned revision,
+# same token — split only so no single layer is large enough to be
+# un-pullable. Each pass lists the component's files from metadata, splits
+# them by cumulative size, and downloads its own half; snapshot_download
+# skips what is already on disk, so the passes compose rather than
+# duplicate. A repository whose encoder is one unsharded file puts it all
+# in pass 0 and leaves pass 1 empty — still correct, just unsplit.
+RUN --mount=type=secret,id=hf_token LTX_PASS=0 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PASSES = 2
+PASS = int(os.environ["LTX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith("text_encoder/")
+)
+if not files:
+    raise SystemExit("the pinned revision carries no text_encoder files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before the halfway mark would otherwise land wholly in
+    # the first pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
+if not mine:
+    print("nothing for this pass — the encoder is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+RUN --mount=type=secret,id=hf_token LTX_PASS=1 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PASSES = 2
+PASS = int(os.environ["LTX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith("text_encoder/")
+)
+if not files:
+    raise SystemExit("the pinned revision carries no text_encoder files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before the halfway mark would otherwise land wholly in
+    # the first pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
+if mine:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+
+# THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
+# silently landed half an encoder would fail at job time on a rented card,
+# which is the class of failure this whole bake exists to prevent.
+missing = [name for name, _ in files
+           if not os.path.exists(os.path.join(DEST, name))]
+if missing:
+    raise SystemExit(f"text_encoder incomplete after all passes: {missing[:5]}")
+landed = sum(os.path.getsize(os.path.join(DEST, name)) for name, _ in files)
+print(f"TEXT ENCODER COMPLETE: {len(files)} file(s), {landed} bytes")
+
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
 EOF
 
 # Bake the STORY model — ONIQ's local causal LLM (owner directive

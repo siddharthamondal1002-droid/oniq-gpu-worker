@@ -198,13 +198,41 @@ def _bake_blocks():
     return re.findall(r"RUN[^\n]*python3 - <<'EOF'\n(.*?)\nEOF", text, re.S)
 
 
+def _bakes_by_role():
+    """The bakes keyed by WHAT THEY BAKE, never by position.
+
+    These assertions used to index the list — [0] LTX, [1] story, [2] voice
+    — and splitting the 16.05 GiB LTX layer into text-encoder passes on
+    2026-08-30 silently re-pointed every one of them at a different block.
+    The licence-gate test then read a pass and failed; had it read a block
+    that happened to contain the string, it would have PASSED while
+    checking nothing. A name cannot slide the way an index can.
+    """
+    roles = {}
+    for block in _bake_blocks():
+        if "LTX_PASS" in block:
+            roles.setdefault("ltx_passes", []).append(block)
+        elif "/app/models/ltx" in block:
+            roles["ltx"] = block
+        elif "/app/models/piper" in block:
+            roles["voice"] = block
+        else:
+            roles["story"] = block
+    missing = {"ltx", "story", "voice"} - set(roles)
+    assert not missing, f"Dockerfile no longer carries bake(s): {sorted(missing)}"
+    return roles
+
+
 def test_every_bake_is_syntactically_valid_python():
     """Nothing else ever compiles these. A syntax error in a bake surfaces
     only part-way through a build that downloads tens of GiB first."""
     import ast
 
     blocks = _bake_blocks()
-    assert len(blocks) == 3
+    roles = _bakes_by_role()
+    # Three named bakes plus however many text-encoder passes the layer
+    # split uses; every one of them is compiled, none is skipped.
+    assert len(blocks) == 3 + len(roles.get("ltx_passes", []))
     for block in blocks:
         ast.parse(block)
 
@@ -214,11 +242,24 @@ def test_the_ltx_bake_receives_the_credential_and_the_others_do_not():
     bakes fetch public assets; giving them the token would widen its reach
     for nothing."""
     with open("Dockerfile", encoding="utf-8") as fh:
-        lines = [l for l in fh if l.startswith("RUN") and "python3 - <<" in l]
-    assert len(lines) == 3
-    assert "--mount=type=secret,id=hf_token" in lines[0]
-    assert "secret" not in lines[1]
-    assert "secret" not in lines[2]
+        text = fh.read()
+    import re
+
+    # Pair each bake's RUN line with the block it opens, so the credential
+    # is checked against WHAT IS BAKED rather than against a line number.
+    pairs = re.findall(r"(RUN[^\n]*python3 - <<'EOF')\n(.*?)\nEOF", text, re.S)
+    assert len(pairs) >= 3
+    for run_line, block in pairs:
+        needs_token = "LTX_PASS" in block or "/app/models/ltx" in block
+        has_token = "--mount=type=secret,id=hf_token" in run_line
+        assert has_token == needs_token, (
+            f"credential reach is wrong for: {run_line}"
+        )
+    # The LTX family alone: the story and voice assets are public, and
+    # widening the token's reach buys nothing.
+    assert sum("secret" in run for run, _ in pairs) == sum(
+        1 for _, b in pairs if "LTX_PASS" in b or "/app/models/ltx" in b
+    )
 
 
 def test_the_image_takes_no_build_argument_and_no_credential_env():
@@ -294,7 +335,7 @@ def test_the_bake_never_puts_the_token_in_the_environment():
 def test_the_bake_clears_every_token_cache_home():
     """This stage runs as root while HOME is /home/oniq, so a cache written
     to either would otherwise ride into the published layer."""
-    block = _bake_blocks()[0]
+    block = _bakes_by_role()["ltx"]
     assert "/root/.cache/huggingface" in block
     assert "/home/oniq/.cache/huggingface" in block
 
@@ -302,7 +343,7 @@ def test_the_bake_clears_every_token_cache_home():
 def test_the_story_licence_gate_is_still_mandatory():
     """Requirement 10. The Apache gate on the story model is untouched by
     the LTX work."""
-    block = _bake_blocks()[1]
+    block = _bakes_by_role()["story"]
     assert "ALLOWED_LICENCES" in block
     assert "apache-2.0" in block
     assert "refusing to bake" in block
@@ -316,3 +357,54 @@ def test_the_size_guards_both_survive():
         bakes = image_size.parse_bakes(fh.read())
     assert bakes[0]["size_guard_bytes"] == 16 * 1024**3
     assert bakes[1]["size_guard_bytes"] == 20 * 1024**3
+
+
+def test_the_text_encoder_passes_cover_every_file_exactly_once():
+    """The split must be a PARTITION. A file assigned to both passes is
+    wasted bandwidth; a file assigned to neither is a broken pipeline that
+    only shows up when a rented card tries to load it.
+
+    This runs the Dockerfile's own grouping arithmetic — lifted from the
+    bake, not reimplemented — over the shard layouts a repository can
+    plausibly have.
+    """
+    passes = _bakes_by_role()["ltx_passes"]
+    assert len(passes) == 2, "the split is written as two passes"
+
+    def group_of(running, size, total, n_passes):
+        return min(int((running + size / 2) * n_passes / total) if total else 0,
+                   n_passes - 1)
+
+    # The arithmetic above must be the arithmetic in the image.
+    for block in passes:
+        assert "(running + size / 2) * PASSES / total" in block
+
+    GB = 1024 ** 3
+    layouts = {
+        "four equal shards": [(f"text_encoder/m-{i}.safetensors", 2 * GB)
+                              for i in range(4)],
+        "one unsharded file": [("text_encoder/model.safetensors", 9 * GB)],
+        "uneven shards + config": [("text_encoder/config.json", 1000),
+                                   ("text_encoder/m-1.safetensors", 4 * GB),
+                                   ("text_encoder/m-2.safetensors", 4 * GB),
+                                   ("text_encoder/m-3.safetensors", 1 * GB)],
+    }
+    for label, files in layouts.items():
+        files = sorted(files)
+        total = sum(size for _, size in files)
+        assigned, running = {}, 0
+        for name, size in files:
+            assigned.setdefault(group_of(running, size, total, 2), []).append(name)
+            running += size
+        flat = [n for names in assigned.values() for n in names]
+        assert sorted(flat) == sorted(n for n, _ in files), label
+        assert len(flat) == len(set(flat)), f"{label}: a file is in both passes"
+
+
+def test_the_last_text_encoder_pass_refuses_an_incomplete_component():
+    """A split download that lands half an encoder must fail the BUILD, not
+    a paid job. Only the final pass can know the component is whole."""
+    first, last = _bakes_by_role()["ltx_passes"]
+    assert "text_encoder incomplete after all passes" in last
+    assert "TEXT ENCODER COMPLETE" in last
+    assert "incomplete after all passes" not in first
