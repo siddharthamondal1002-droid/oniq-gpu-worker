@@ -716,17 +716,6 @@ jobs:
           set -o pipefail
           python -m validation.spend_run run 2>&1 | tee spend.log
 
-      - name: "The refusal, last, where a tail can always reach it"
-        if: always()
-        run: |
-          if [ -f spend.log ]; then
-            echo "===== spend_run, last 60 lines ====="
-            tail -n 60 spend.log
-            echo "===== end ====="
-          else
-            echo "no spend.log — the driver did not start"
-          fi
-
       # ----------------------------------------------------------------
       # FRAMES, NOT METADATA (owner directive 2026-08-29).
       #
@@ -817,6 +806,17 @@ jobs:
             frames/
             artifact-manifest.json
           if-no-files-found: warn
+
+      - name: "The refusal, last, where a tail can always reach it"
+        if: always()
+        run: |
+          if [ -f spend.log ]; then
+            echo "===== spend_run, last 60 lines ====="
+            tail -n 60 spend.log
+            echo "===== end ====="
+          else
+            echo "no spend.log — the driver did not start"
+          fi
           retention-days: 30
 
   standby_probe:
