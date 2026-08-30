@@ -117,31 +117,90 @@ def volume_datacenters(doc: dict, raw: str) -> list[str] | None:
     return None
 
 
-def a5000_datacenters(gpu_id: str = "NVIDIA RTX A5000"):
-    """Where the A5000 can actually be had, straight from the catalogue.
+def datacenters():
+    """Every datacenter RunPod exposes, with whatever each row says about
+    storage support and GPU availability.
 
-    Returned as (datacenter ids or None, raw availability note). None means
-    the catalogue does not carry per-datacenter availability — which is a
-    finding, not a licence to assume the card is everywhere.
+    Read rather than assumed, and the RAW shape is returned alongside the
+    parse. The first version of this probe called gpu_catalogue() as if it
+    returned a dict; it returns a (raw, parsed) tuple, so the lookup fell
+    through to "catalogue shape unrecognised" and answered nothing. A
+    parser that cannot see the document it failed on costs a second run to
+    say what one should have said.
     """
-    try:
-        parsed = rp.gpu_catalogue()
-    except rp.RunPodApiError as exc:
-        return None, f"catalogue unreadable: {exc}"
-    rows = parsed.get("rest") if isinstance(parsed, dict) else parsed
-    if not isinstance(rows, list):
-        return None, "catalogue shape unrecognised"
-    for g in rows:
-        if not isinstance(g, dict):
+    for path in ("/datacenters", "/datacenter"):
+        try:
+            raw, doc = rp._get_json(f"{rp.REST_BASE}{path}")
+        except rp.RunPodApiError:
             continue
-        if gpu_id.lower() not in str(g.get("id", "")).lower() \
-           and gpu_id.lower() not in str(g.get("displayName", "")).lower():
+        rows = doc if isinstance(doc, list) else (
+            doc.get("datacenters") or doc.get("dataCenters") or doc.get("data") or []
+        )
+        if not isinstance(rows, list) or not rows:
             continue
-        for key in ("dataCenterIds", "dataCenters", "datacenterIds"):
-            if isinstance(g.get(key), list) and g[key]:
-                return sorted(str(d) for d in g[key]), f"from catalogue.{key}"
-        return None, "catalogue row found, no per-datacenter field on it"
-    return None, f"{gpu_id!r} not present in the catalogue"
+        return rows, sorted(set().union(*(set(r) for r in rows if isinstance(r, dict))))
+    return None, None
+
+
+def _row_id(row: dict):
+    for key in ("id", "dataCenterId", "name"):
+        if row.get(key):
+            return str(row[key])
+    return None
+
+
+def volume_capable(rows) -> list[str] | None:
+    """Datacenter ids whose own row says they support network storage.
+
+    None when no row carries such a field — an absent field is not a No,
+    and must not be reported as one.
+    """
+    if not rows:
+        return None
+    keys = ("storageSupport", "storage", "networkStorageSupport",
+            "supportsNetworkVolume", "networkVolumeSupport")
+    found, saw_field = [], False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for k in keys:
+            if k in row:
+                saw_field = True
+                if row[k]:
+                    ident = _row_id(row)
+                    if ident:
+                        found.append(ident)
+                break
+    return sorted(set(found)) if saw_field else None
+
+
+def a5000_datacenters(rows, gpu_id: str = "NVIDIA RTX A5000"):
+    """Where the A5000 is actually listed, from the datacenter rows.
+
+    Returns (ids or None, note). None means the rows do not carry GPU
+    availability — a finding to report, never a licence to assume the card
+    is everywhere.
+    """
+    if not rows:
+        return None, "no datacenter document to read"
+    keys = ("gpuAvailability", "gpuTypes", "gpuTypeIds", "gpus")
+    found, saw_field = [], False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for k in keys:
+            if k not in row:
+                continue
+            saw_field = True
+            blob = json.dumps(row[k]).lower()
+            if "a5000" in blob:
+                ident = _row_id(row)
+                if ident:
+                    found.append(ident)
+            break
+    if not saw_field:
+        return None, f"datacenter rows carry no GPU field (keys seen: {sorted(rows[0])})"
+    return sorted(set(found)), "from the datacenter rows"
 
 
 def storage_rate(raw_spec: str):
@@ -156,16 +215,19 @@ def storage_rate(raw_spec: str):
 def survey() -> dict:
     url, doc, raw = _spec()
     vols, vol_err = existing_volumes()
-    dcs = volume_datacenters(doc, raw) if doc else None
-    a5000_dcs, a5000_note = a5000_datacenters()
-    overlap = None
-    if dcs and a5000_dcs:
-        overlap = sorted(set(dcs) & set(a5000_dcs))
+    rows, row_keys = datacenters()
+    dcs = volume_capable(rows)
+    if dcs is None and doc:
+        dcs = volume_datacenters(doc, raw)
+    a5000_dcs, a5000_note = a5000_datacenters(rows)
+    overlap = sorted(set(dcs) & set(a5000_dcs)) if dcs and a5000_dcs else None
     return {
         "spec_url": url,
         "create_schema": _create_schema(doc) if doc else None,
         "existing_volumes": vols,
         "existing_volumes_error": vol_err,
+        "datacenter_row_keys": row_keys,
+        "datacenter_count": len(rows) if rows else None,
         "volume_datacenters": dcs,
         "a5000_datacenters": a5000_dcs,
         "a5000_datacenter_note": a5000_note,
@@ -194,6 +256,7 @@ def report() -> int:
     print("DATACENTER CONSTRAINT — the one that decides feasibility:")
     print(f"  volumes offered in : {s['volume_datacenters']}")
     print(f"  A5000 available in : {s['a5000_datacenters']}  ({s['a5000_datacenter_note']})")
+    print(f"  datacenter rows    : {s['datacenter_count']}, keys={s['datacenter_row_keys']}")
     print(f"  overlap            : {s['datacenter_overlap']}")
     if s["datacenter_overlap"] == []:
         print("  VERDICT: NO OVERLAP. Mounting a volume would strand the endpoint")
