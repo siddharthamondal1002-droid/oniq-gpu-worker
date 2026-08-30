@@ -943,7 +943,16 @@ def test_gate9_the_probe_model_input_is_a_closed_choice():
     probe = _triggers(doc)["workflow_dispatch"]["inputs"]["probe_model"]
     assert probe["type"] == "choice"
     assert probe["default"] == ""
-    assert set(probe["options"]) == {""} | set(modelprobe.PROBE_MODELS)
+    # The set is closed over two server-side tables and nothing else: the
+    # benchmark ROWS a model_probe may measure, and the experimental MODEL
+    # IDS a model_hydrate may fetch. Both are constants in this repository,
+    # so a dispatch still cannot name a repository, a revision, a precision
+    # or an offload strategy — it can only pick from what was reviewed.
+    import modelroot
+
+    assert set(probe["options"]) == (
+        {""} | set(modelprobe.PROBE_MODELS) | set(modelroot.EXPERIMENTAL)
+    )
     assert "PROBE_MODEL: ${{ inputs.probe_model }}" in raw
     # Hunyuan is not offerable: its architecture did not resolve without
     # guessing, and an option nobody can select is how that stays true.

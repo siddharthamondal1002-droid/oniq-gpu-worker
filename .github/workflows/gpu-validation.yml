@@ -127,9 +127,9 @@ on:
         options: [a, b, ref]
         default: a
       probe_model:
-        description: "model_probe only: which benchmark row to measure. ONE candidate per dispatch — there is deliberately no battery shape, so a single wrong assumption cannot spend five times over before anyone reads a result."
+        description: "model_probe: which benchmark ROW to measure. model_hydrate: which experimental MODEL ID to fetch onto the volume (the upper-case ids). ONE candidate per dispatch. ONE candidate per dispatch — there is deliberately no battery shape, so a single wrong assumption cannot spend five times over before anyone reads a result."
         type: choice
-        options: ["", ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v, hunyuanvideo-1.5-i2v, hunyuanvideo-1.5-i2v-12step]
+        options: ["", ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v, hunyuanvideo-1.5-i2v, hunyuanvideo-1.5-i2v-12step, HUNYUAN_15_I2V_480_STEP]
         default: ""
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket. The previous default, validation/input.jpg, was DELETED from the bucket at some point and nothing noticed until a paid canary refused on it (2026-08-29, 1232ms of billed execution). The worker lists what the bucket actually holds when an input is missing, so that failure is cheap and self-diagnosing - but a default that does not exist is still a trap, and this one is a still that demonstrably exists at the video canvas."
