@@ -434,6 +434,14 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # file sizes; it submits no job and holds no RunPod credential, so
         # like frames-pull it is a $0 mode that cannot turn into a paid one.
         "model-bench",
+        # volume-probe joined 2026-08-30, with the owner's directive to
+        # move the baked weights onto a network volume. It is the READ
+        # that has to come first: a network volume pins the endpoint to
+        # one datacenter, so the migration is only possible if the A5000
+        # is sold there. Every call in validation/volume_probe.py is a
+        # GET and the module has no write path at all, so like
+        # frames-pull and model-bench it cannot become a paid mode.
+        "volume-probe",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -511,6 +519,39 @@ def test_the_stale_cancel_job_needs_the_literal_token_and_never_purges():
     assert "purge_queue" not in module
     assert "submit_job" not in module
 
+
+def test_the_volume_probe_can_only_read():
+    """Owner directive 2026-08-30 approved MOVING the weights to a network
+    volume. It did not approve creating one blind, so the probe that
+    informs it is read-only by construction: no mutating verb reaches the
+    module, and the module names no write call. The datacenter cross-check
+    is asserted too, because that — not the storage rate — is what decides
+    whether the migration is possible at all: a volume pins the endpoint
+    to one datacenter, and an endpoint pinned where the A5000 is not sold
+    has traded a slow pull for no GPU."""
+    doc, _ = _load("gpu-validation.yml")
+    job = doc["jobs"]["volume_probe"]
+    assert job["if"].strip() == "inputs.mode == 'volume-probe'"
+
+    commands = " ".join(str(step.get("run", "")) for step in job["steps"])
+    assert "validation.volume_probe" in commands
+    for forbidden in ("SPEND", "spend_run", "submit", "create", "retarget"):
+        assert forbidden not in commands
+
+    with open(os.path.join(ROOT, "validation", "volume_probe.py"), encoding="utf-8") as fh:
+        module = fh.read()
+    # Every RunPod call it makes is a GET. These are the verbs that are not.
+    for forbidden in ("submit_job", "create_template", "retarget_template",
+                      "set_template_env", "attach_template",
+                      "set_workers_standby_zero", "purge_queue",
+                      "cancel_job", 'method="POST"', 'method="PATCH"',
+                      'method="DELETE"', 'method="PUT"'):
+        assert forbidden not in module, forbidden
+    # The feasibility answer the probe exists to produce.
+    assert "datacenter_overlap" in module
+    assert "a5000_datacenters" in module
+    # A rate the API does not state must not be filled in from memory.
+    assert "NOT INVENTED HERE" in module
 
 # ------------------------------------------------------- image-publish.yml
 

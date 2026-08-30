@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -537,6 +537,29 @@ jobs:
           python-version: "3.11"
       - name: "Can this run still execute?"
         run: python -m validation.queue_probe "${{ inputs.stale_job_id }}"
+
+  volume_probe:
+    # Owner directive 2026-08-30: move the baked weights onto a network
+    # volume so a worker change stops costing a 25 GiB cold pull. Before
+    # anything is created, this READS what the API offers — chiefly
+    # whether a datacenter that sells network volumes also has the A5000.
+    # A volume pins the endpoint to one datacenter; if the card is not
+    # there, the migration trades a slow pull for no GPU at all.
+    name: "network volume probe - read-only, $0"
+    if: inputs.mode == 'volume-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "What the API offers, and whether the A5000 lives there"
+        run: python -m validation.volume_probe
 
   stale_cancel:
     # Cancels ONE run on ONE endpoint, both named on the dispatch, and
