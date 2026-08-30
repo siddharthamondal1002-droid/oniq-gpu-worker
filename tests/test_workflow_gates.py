@@ -981,3 +981,36 @@ def test_the_model_bench_module_never_reaches_runpod():
     source += pathlib.Path("validation/model_registry.py").read_text(encoding="utf-8")
     for forbidden in ("runpod", "RUNPOD_API_KEY", "api.runpod.ai"):
         assert forbidden not in source.lower()
+
+
+def test_every_op_the_workflow_offers_is_dispatchable_and_admitted():
+    """Registration is one property, not four.
+
+    model_hydrate had a contract entry, a workflow choice, a driver branch
+    and a handler — and was still rejected at dispatch, because the
+    driver's own gate was a separate inline tuple nobody had updated. The
+    first three being right said nothing about the fourth, and the failure
+    only appeared after a workflow had spun up and run.
+
+    These three lists must agree in both directions: anything the workflow
+    lets someone choose must be dispatchable by the driver and admitted by
+    the contract. A one-way check would let an op be offered and refused.
+    """
+    import contract
+    from validation.spend_run import DISPATCHABLE_OPS
+
+    doc, _ = _load("gpu-validation.yml")
+    offered = {
+        o for o in _triggers(doc)["workflow_dispatch"]["inputs"]["op"]["options"] if o
+    }
+
+    unroutable = offered - set(DISPATCHABLE_OPS)
+    assert not unroutable, (
+        f"the workflow offers {sorted(unroutable)} but spend_run refuses them — "
+        "a dispatch would fail after the run has already started"
+    )
+    unadmitted = set(DISPATCHABLE_OPS) - set(contract.ALLOWED_OPS)
+    assert not unadmitted, (
+        f"the driver would dispatch {sorted(unadmitted)} but the worker's "
+        "contract refuses them — the job would be rejected on a booted worker"
+    )

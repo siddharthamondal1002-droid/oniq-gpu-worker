@@ -534,6 +534,29 @@ def submit_and_wait(
 # 7800s covers the measured pull with margin. It is a WATCH window, not a
 # spend ceiling: the job's own executionTimeoutMs bounds what can be
 # billed, and a worker that is pulling is not yet billing GPU time.
+# EVERY op this driver may dispatch, in ONE place.
+#
+# model_hydrate needed registering in four separate lists before it could
+# run: the contract's ALLOWED_OPS, the workflow's choice input, the
+# driver's phase-16 branch, and this gate — which was an inline tuple, so
+# the first three passing told me nothing about the fourth. The dispatch
+# was rejected after the workflow had already spun up.
+#
+# Naming the set once is the fix. A future op is added here and the gate
+# and the test read the same list, so "registered" stops being a property
+# that can be three-quarters true.
+DISPATCHABLE_OPS = (
+    "image_preprocess",
+    "image_generate",
+    "video_generate",
+    "audio_mux",
+    "model_probe",
+    # Runs no inference and writes no artifact: it puts a checkpoint on the
+    # persistent volume so a later model change is a config edit, not a
+    # 25 GiB rebuild.
+    "model_hydrate",
+)
+
 COLD_PULL_ALLOWANCE_S = 7800
 
 
@@ -1778,13 +1801,7 @@ def main(argv) -> int:
 
         through = int(os.environ.get("THROUGH_PHASE", "16"))
         op = os.environ.get("OP", "image_preprocess")
-        if op not in (
-            "image_preprocess",
-            "image_generate",
-            "video_generate",
-            "audio_mux",
-            "model_probe",
-        ):
+        if op not in DISPATCHABLE_OPS:
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
         if op == "audio_mux":
             # The audio canary is ONE job by definition: narration muxed
