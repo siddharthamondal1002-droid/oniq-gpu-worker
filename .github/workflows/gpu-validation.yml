@@ -767,7 +767,15 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          set +e
           python -m validation.spend_run run 2>&1 | tee spend.log
+          code=${PIPESTATUS[0]}
+          echo "===== driver exit code: $code ====="
+          if [ "$code" -ne 0 ]; then
+            echo "----- last 40 lines, beside the failure -----"
+            tail -n 40 spend.log
+          fi
+          exit "$code"
 
       # ----------------------------------------------------------------
       # FRAMES, NOT METADATA (owner directive 2026-08-29).
@@ -859,18 +867,19 @@ jobs:
             frames/
             artifact-manifest.json
           if-no-files-found: warn
+          retention-days: 30
 
       - name: "The refusal, last, where a tail can always reach it"
         if: always()
+        shell: bash
         run: |
           if [ -f spend.log ]; then
-            echo "===== spend_run, last 60 lines ====="
-            tail -n 60 spend.log
+            echo "===== spend_run, last 80 lines ====="
+            tail -n 80 spend.log
             echo "===== end ====="
           else
-            echo "no spend.log — the driver did not start"
+            echo "no spend.log - the driver did not start"
           fi
-          retention-days: 30
 
   standby_probe:
     # READ-ONLY twin of the standby job. Owner directive 2026-08-27: run

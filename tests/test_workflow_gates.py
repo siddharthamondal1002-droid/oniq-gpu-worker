@@ -1014,3 +1014,57 @@ def test_every_op_the_workflow_offers_is_dispatchable_and_admitted():
         f"the driver would dispatch {sorted(unadmitted)} but the worker's "
         "contract refuses them — the job would be rejected on a booted worker"
     )
+
+
+def test_no_step_run_block_contains_a_yaml_key_from_a_neighbour():
+    """A split step is a step that runs YAML as shell.
+
+    On 2026-08-30 an inserted step landed mid-block and left
+    `retention-days: 30` inside a `run:` script. Bash tried to execute it,
+    the step died with 127 (command not found), and the diagnosis it
+    existed to print was lost — the exact failure it had been added to
+    prevent.
+
+    yaml.safe_load cannot see this: the file parses, the script is just a
+    string. So the scripts themselves are scanned for lines that are
+    obviously an action input rather than a command.
+    """
+    import re
+
+    import yaml
+
+    workflows = os.path.join(ROOT, ".github", "workflows")
+    suspicious = re.compile(
+        r"^\s*(retention-days|if-no-files-found|compression-level|"
+        r"overwrite|include-hidden-files|python-version|fetch-depth|"
+        r"path|name):\s*\S", re.M
+    )
+    for filename in sorted(os.listdir(workflows)):
+        if not filename.endswith((".yml", ".yaml")):
+            continue
+        with open(os.path.join(workflows, filename), encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+        for job_name, job in (doc.get("jobs") or {}).items():
+            for step in job.get("steps") or []:
+                script = step.get("run")
+                if not isinstance(script, str):
+                    continue
+                # A heredoc legitimately contains arbitrary text; only the
+                # shell-level lines are checked.
+                lines, in_heredoc = [], False
+                for line in script.splitlines():
+                    if re.search(r"<<\s*'?[A-Z_]+'?", line):
+                        in_heredoc = True
+                        continue
+                    if in_heredoc and re.match(r"^\s*[A-Z_]+\s*$", line):
+                        in_heredoc = False
+                        continue
+                    if not in_heredoc:
+                        lines.append(line)
+                hit = suspicious.search("\n".join(lines))
+                assert not hit, (
+                    f"{filename} job {job_name} step "
+                    f"{step.get('name', '?')!r} has an action input inside "
+                    f"its run script: {hit.group(0).strip()!r} — the step "
+                    "was split and bash will try to execute it"
+                )
