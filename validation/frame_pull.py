@@ -96,6 +96,60 @@ class FramePullError(Exception):
 # ------------------------------------------------------------ the base
 
 
+# ONIQ's R2 public READ base, recorded by owner directive 2026-08-30
+# section 24. It is PUBLIC configuration — the same string that appears in
+# any URL a reader follows — never a secret and never a presigned URL, so
+# it belongs in the repository rather than in a secret store.
+#
+# It is here because the repository VARIABLE currently holds the literal
+# string "on", which is not a URL. That mis-set value silently disabled
+# frame retrieval: the GPU work succeeded, the artifacts landed in the
+# bucket, and there was no way to LOOK at them. The owner cannot be the
+# single point of failure for seeing the output of a paid job, and this
+# session cannot reach the Actions variables API (the agent proxy refuses
+# that path), so the known-good base is recorded as a fallback.
+#
+# The environment still WINS when it holds a usable value. This is only
+# consulted when the environment is empty or holds something that is not a
+# URL at all, and using it says so loudly.
+RECORDED_PUBLIC_BASE = "https://pub-375e3f0f9afb47cca77889b3a03b2b2e.r2.dev"
+
+
+# The ONLY failures the recorded base may cover. Both mean "nobody
+# configured this": an empty variable, or a placeholder like the literal
+# "on" that is not a URL at all.
+#
+# Every OTHER rejection is deliberately NOT covered, and the important one
+# is base-has-query. A base carrying a query string is a presigned URL,
+# which is a CREDENTIAL someone pasted into a public variable. Refusing
+# that loudly is the whole point of the check; quietly substituting a
+# working base would leave the credential sitting in the variable with
+# nothing to draw attention to it. Same for base-not-https,
+# base-has-userinfo and base-has-fragment: those are misconfigurations
+# with security shape, and they must surface.
+_FALLBACK_COVERS = frozenset({"base-not-a-url"})
+
+
+def resolve_base(value: str):
+    """(base, note). The environment wins; the recorded base is the net.
+
+    The note exists so the caller can print WHY it is reading from where it
+    is reading. A fallback that happens silently is a fallback nobody can
+    audit, and an unaudited fallback is how the next wrong value hides.
+    """
+    try:
+        return normalise_base(value), None
+    except FramePullError as exc:
+        if exc.code not in _FALLBACK_COVERS:
+            raise
+    return normalise_base(RECORDED_PUBLIC_BASE), (
+        f"R2_PUBLIC_BASE_URL is {value!r}, which is not a usable read "
+        "base; falling back to the base recorded in frame_pull.py "
+        "(owner directive 2026-08-30 s24). Fix the repository VARIABLE "
+        "to remove this fallback."
+    )
+
+
 def normalise_base(raw: str) -> str:
     """The public read base, or a refusal saying exactly what is wrong.
 
@@ -672,7 +726,7 @@ def main(argv=None) -> int:
         print("frame-pull: no clips in this run's manifest — nothing to fetch")
         return 0
     try:
-        base = normalise_base(os.environ.get("R2_PUBLIC_BASE_URL", ""))
+        base, note = resolve_base(os.environ.get("R2_PUBLIC_BASE_URL", ""))
     except FramePullError as exc:
         # LOUD, and still not a failure: the GPU work succeeded and its
         # artifacts are in the bucket. What is lost is the seeing.
@@ -680,6 +734,8 @@ def main(argv=None) -> int:
         print("Set the R2_PUBLIC_BASE_URL repository VARIABLE (public config,")
         print("never a secret, never a presigned URL) to retrieve frames.")
         return 0
+    if note:
+        print(f"frame-pull NOTE: {note}")
     print(f"frame-pull: reading {len(clips)} clip(s) from {safe_host(base)}")
     # Made here, not only inside pull_clip: a run where every fetch fails
     # still has a report to write, and it belongs beside the frames.

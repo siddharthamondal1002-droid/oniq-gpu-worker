@@ -853,3 +853,79 @@ def test_a_jpeg_that_is_actually_an_error_page_is_refused(tmp_path):
         run=lambda *a, **k: None,
     )
     assert report["error"] == "artifact-not-jpeg"
+
+
+# ------------------------------- the recorded public base (owner s24)
+
+
+def test_a_usable_environment_value_always_wins():
+    from validation.frame_pull import resolve_base, RECORDED_PUBLIC_BASE
+
+    base, note = resolve_base("https://pub-someone-else.r2.dev")
+    assert base == "https://pub-someone-else.r2.dev"
+    assert base != RECORDED_PUBLIC_BASE
+    assert note is None, "a working env value must not trigger the fallback"
+
+
+def test_the_broken_literal_falls_back_and_says_so():
+    """R2_PUBLIC_BASE_URL held the string "on", which is not a URL.
+
+    That silently disabled frame retrieval: the GPU work succeeded, the
+    artifacts landed in the bucket, and there was no way to look at them.
+    The fallback exists so seeing a paid job's output does not depend on a
+    console action — and it announces itself, because a fallback nobody
+    can audit is how the next wrong value hides.
+    """
+    from validation.frame_pull import resolve_base, RECORDED_PUBLIC_BASE
+
+    base, note = resolve_base("on")
+    assert base == RECORDED_PUBLIC_BASE
+    assert note and "not a usable read base" in note
+    assert "Fix the repository VARIABLE" in note
+
+
+def test_an_unset_value_still_refuses_loudly():
+    """Deliberately NOT covered by the fallback.
+
+    An unset variable is a configuration the owner has not made yet, and
+    the existing guard already says so usefully. Covering it would hide
+    the difference between "nobody set this" and "someone set it wrong".
+    """
+    import pytest as _pytest
+    from validation.frame_pull import resolve_base, FramePullError
+
+    with _pytest.raises(FramePullError) as exc:
+        resolve_base("")
+    assert exc.value.code == "base-unset"
+
+
+def test_a_presigned_url_is_refused_and_NEVER_swapped_for_the_recorded_base():
+    """The security-shaped case, and the reason the fallback is narrow.
+
+    A base carrying a query string is a presigned URL — a credential
+    someone pasted into a public variable. Refusing loudly is the point of
+    the check. Quietly substituting a working base would let the run
+    succeed with that credential still sitting in the variable and nothing
+    drawing attention to it.
+    """
+    import pytest as _pytest
+    from validation.frame_pull import resolve_base, FramePullError
+
+    for bad, code in (
+        ("https://pub-x.r2.dev?sig=SECRET", "base-has-query"),
+        ("http://pub-x.r2.dev", "base-not-https"),
+        ("https://user:pw@pub-x.r2.dev", "base-has-userinfo"),
+    ):
+        with _pytest.raises(FramePullError) as exc:
+            resolve_base(bad)
+        assert exc.value.code == code
+
+
+def test_the_recorded_base_is_public_config_not_a_credential():
+    from validation.frame_pull import RECORDED_PUBLIC_BASE, normalise_base
+
+    # https, no query string, no userinfo: a read base, never a presigned
+    # URL. normalise_base is the same gate the environment value passes.
+    assert RECORDED_PUBLIC_BASE.startswith("https://")
+    assert "?" not in RECORDED_PUBLIC_BASE and "@" not in RECORDED_PUBLIC_BASE
+    assert normalise_base(RECORDED_PUBLIC_BASE) == RECORDED_PUBLIC_BASE
