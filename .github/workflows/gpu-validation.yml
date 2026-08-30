@@ -705,7 +705,27 @@ jobs:
         with:
           python-version: "3.11"
       - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
-        run: python -m validation.spend_run run
+        # Tee'd, and PIPESTATUS'd so the pipe cannot swallow the failure.
+        # The refusal this driver prints is the whole diagnosis, and twice
+        # on 2026-08-30 it was pushed out of reach: the ffmpeg apt install
+        # that follows emits ~500 lines, and the log API only serves a
+        # tail. A reason that cannot be read is a reason that was not
+        # given, so it is captured to a file and re-printed at the end.
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m validation.spend_run run 2>&1 | tee spend.log
+
+      - name: "The refusal, last, where a tail can always reach it"
+        if: always()
+        run: |
+          if [ -f spend.log ]; then
+            echo "===== spend_run, last 60 lines ====="
+            tail -n 60 spend.log
+            echo "===== end ====="
+          else
+            echo "no spend.log — the driver did not start"
+          fi
 
       # ----------------------------------------------------------------
       # FRAMES, NOT METADATA (owner directive 2026-08-29).
