@@ -157,6 +157,10 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         "contract.py",
         "preprocess.py",
         "storage.py",
+        # modelroot joined 2026-08-30: every engine reaches its weights
+        # through it, so the migration to a network volume is one seam
+        # rather than three hardcoded paths.
+        "modelroot.py",
         # preview joined 2026-08-29: the bucket is private, so the only way
         # to LOOK at what the worker made is for the worker to hand a
         # thumbnail back with the reply.
@@ -186,6 +190,7 @@ def test_dockerignore_denies_by_default():
         "!contract.py",
         "!preprocess.py",
         "!storage.py",
+        "!modelroot.py",
         "!preview.py",
         "!videogen.py",
         "!modelprobe.py",
@@ -289,6 +294,11 @@ def test_the_closure_actually_reaches_the_engines():
         # walk finds it anyway — which is the point: storygen once reached CI
         # missing from both locks and the image died on import at start-up.
         "modelprobe",
+        # modelroot joined 2026-08-30 with the owner's directive to move
+        # the weights onto a network volume. Every engine reaches its
+        # weights through it, so it is the one module whose absence from
+        # the image would break all three at once.
+        "modelroot",
     }
     # runpod_client is the CI harness's, not the worker's. It must NOT be
     # in the image: it is the only module that talks to the RunPod API.

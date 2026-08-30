@@ -25,11 +25,26 @@ import time
 from PIL import Image
 
 import contract
+import modelroot
 import preview
 from preprocess import GpuUnavailable, _decode
 
-MODEL_DIR = "/app/models/ltx"
-MODEL_ID_FILE = "/app/models/MODEL_ID"
+# Both resolve LAZILY, through modelroot — None means "ask on each call".
+# Lazy, not import-time, because a warm worker can see the volume change
+# underneath it: hydration populates /runpod-volume/models while the
+# process is already running, and the next job on that same worker must
+# see the new answer. Tests still override by setting these attributes,
+# which is why they stay module-level names rather than becoming calls.
+MODEL_DIR = None
+MODEL_ID_FILE = None
+
+
+def _model_dir() -> str:
+    return MODEL_DIR or modelroot.resolve("ltx")
+
+
+def _model_id_file() -> str:
+    return MODEL_ID_FILE or modelroot.resolve_file("MODEL_ID")
 
 # Sampler settings — server decisions, deliberately boring for the first
 # measurement: a fixed seed so a re-run is comparable, a stock negative
@@ -45,7 +60,7 @@ STEPS_FULL = 30
 
 def model_id() -> str:
     try:
-        with open(MODEL_ID_FILE, encoding="utf-8") as fh:
+        with open(_model_id_file(), encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return "missing"
@@ -57,7 +72,7 @@ def _load_real_pipeline():
     from diffusers import LTXImageToVideoPipeline
 
     pipe = LTXImageToVideoPipeline.from_pretrained(
-        MODEL_DIR, torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()
@@ -77,7 +92,7 @@ def _load_real_text_pipeline():
     from diffusers import LTXPipeline
 
     pipe = LTXPipeline.from_pretrained(
-        MODEL_DIR, torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()
