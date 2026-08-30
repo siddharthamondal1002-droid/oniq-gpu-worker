@@ -390,8 +390,8 @@ def _sweep_with(monkeypatch, endpoints, pods=()):
 
 
 def test_an_accepted_endpoint_is_reported_but_does_not_alarm(monkeypatch):
-    """Owner decision 2026-08-30: ynysmj3dm92cwp stays running, and the
-    owner is told what it costs.
+    """Owner directive 2026-08-30: the owner's own always-on endpoint stays
+    running, and the owner is told what it costs.
 
     Before this, workersMin=1 on that endpoint made the sweep fire on every
     single run. A guard that is permanently red is a guard people learn to
@@ -399,17 +399,17 @@ def test_an_accepted_endpoint_is_reported_but_does_not_alarm(monkeypatch):
     line among many.
     """
     result = _sweep_with(monkeypatch, [
-        {"id": "ynysmj3dm92cwp", "workersMin": 1, "workersMax": 2},
+        {"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2},
     ])
     assert result["endpoint_min_workers"] == 0, "accepted capacity must not alarm"
     assert result["accepted_min_workers"] == 1, "but it must still be reported"
-    assert result["accepted_endpoints"] == {"ynysmj3dm92cwp": 1}
+    assert result["accepted_endpoints"] == {"9gh6qbou1in8yb": 1}
 
 
 def test_any_OTHER_endpoint_still_takes_the_run_down(monkeypatch):
     # The whole point of naming the exception: everything else still alarms.
     result = _sweep_with(monkeypatch, [
-        {"id": "ynysmj3dm92cwp", "workersMin": 1, "workersMax": 2},
+        {"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2},
         {"id": "some-new-endpoint", "workersMin": 1, "workersMax": 1},
     ])
     assert result["endpoint_min_workers"] == 1
@@ -418,7 +418,7 @@ def test_any_OTHER_endpoint_still_takes_the_run_down(monkeypatch):
 def test_a_pod_still_alarms_even_with_only_accepted_endpoints(monkeypatch):
     result = _sweep_with(
         monkeypatch,
-        [{"id": "ynysmj3dm92cwp", "workersMin": 1, "workersMax": 2}],
+        [{"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2}],
         pods=[{"id": "pod-1"}],
     )
     assert result["pods"] == 1

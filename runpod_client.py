@@ -647,11 +647,15 @@ def attach_network_volume(endpoint_id: str, volume_id: str):
 def endpoint_billing():
     """What every endpoint on the account has actually accrued. Read-only.
 
-    Owner directive 2026-08-30: endpoint ynysmj3dm92cwp appeared on the
-    account holding workersMin=1 and workersStandby=2 on A5000s, having
-    never run a job. The owner chose to leave it and be told the cost, so
-    the cost is READ rather than estimated from a per-hour rate and a
-    guess at how long it has been up.
+    Owner directive 2026-08-30: an always-on endpoint is billing whether or
+    not it runs a job, and the owner asked to be TOLD the cost rather than
+    have it changed. So the cost is READ here, never estimated from a
+    per-hour rate times a guess at how long the endpoint has been up — an
+    invented number has no place in a spend report. The endpoint carrying
+    that configuration today is named in ACCEPTED_ALWAYS_ON; two earlier
+    ones were deleted by the owner on 2026-08-30, and their accrued
+    charges still appear in this document, which is why it is read whole
+    rather than filtered to the live id.
     """
     try:
         raw, doc = _get_json(f"{REST_BASE}/billing/endpoints")
@@ -710,10 +714,20 @@ def purge_queue(endpoint_id: str):
 # Endpoints the OWNER has accepted as always-on. Their minimum workers are
 # still counted and still reported — they are simply not an alarm.
 #
-# ynysmj3dm92cwp appeared on the account on 2026-08-30 holding
-# workersMin=1 and workersStandby=2 on A5000s, having never run a job.
-# Nothing in this repository can create an endpoint. The owner chose to
-# leave it running and be told the cost (recorded decision, 2026-08-30).
+# Owner directive 2026-08-30: the owner deleted p3zmlv8ek10dzt and
+# ynysmj3dm92cwp and created 9gh6qbou1in8yb in their place, configured by
+# hand with workersMin=1, workersMax=1, workersStandby=1 on an A5000.
+# Nothing in this repository can create an endpoint or set those bounds,
+# so this is the owner's own configuration and its idle cost is the
+# owner's to weigh — this file records it and the reports print what it
+# accrues rather than deciding for them.
+#
+# THE ENTRY IS KEYED ON THE ID FOR A REASON. Every dispatch between 12:00
+# and 12:56 on 2026-08-30 went to p3zmlv8ek10dzt, which had already been
+# deleted; the jobs vanished and the endpoint's absence was only found by
+# printing the list. An id that stops existing must therefore stop being
+# named here too, or this list becomes a record of endpoints that are gone
+# while the live one trips the alarm on every run.
 #
 # WHY IT IS RECORDED HERE RATHER THAN TOLERATED. Once workersMin never
 # returns to zero, this sweep fires on every run forever. A guard that is
@@ -722,7 +736,10 @@ def purge_queue(endpoint_id: str):
 # exception keeps the alarm meaningful: anything not on this list still
 # takes the run down.
 ACCEPTED_ALWAYS_ON = {
-    "ynysmj3dm92cwp": "owner-accepted 2026-08-30; workersMin=1, never ran a job",
+    "9gh6qbou1in8yb": (
+        "owner-created 2026-08-30; workersMin=1/workersMax=1/workersStandby=1 "
+        "on NVIDIA RTX A5000, set by the owner in the console"
+    ),
 }
 
 

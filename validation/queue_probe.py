@@ -149,12 +149,15 @@ def billing_lines(client) -> list:
     """What each endpoint has actually accrued, or a one-line reason why
     that could not be read.
 
-    Owner directive 2026-08-30: endpoint ynysmj3dm92cwp appeared holding
-    workersMin=1 and workersStandby=2 on A5000s, having never run a job.
-    The owner chose to leave it running and be told what it costs — so
-    this reports a READ figure. An estimate from a per-hour rate times a
-    guess at uptime is exactly the kind of invented number that has no
-    place in a spend report.
+    Owner directive 2026-08-30: an always-on endpoint bills whether or not
+    it ever runs a job, and the owner asked to be told what that costs
+    rather than have it changed. So this reports a READ figure. An
+    estimate from a per-hour rate times a guess at uptime is exactly the
+    kind of invented number that has no place in a spend report.
+
+    Every row is printed, including rows for endpoints the owner has since
+    deleted — money already spent does not stop having been spent because
+    the thing that spent it is gone.
     """
     try:
         doc, err = client.endpoint_billing()

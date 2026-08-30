@@ -220,6 +220,51 @@ def endpoint_locations():
             "workersMin": e.get("workersMin"),
             "workersMax": e.get("workersMax"),
             "workersStandby": e.get("workersStandby"),
+            # WHICH TEMPLATE, AND THEREFORE WHICH IMAGE. On 2026-08-30 the
+            # owner deleted the endpoints this repository had been
+            # configuring and created one fresh; every dispatch for the
+            # hour before that discovery went to an id that no longer
+            # existed. An endpoint's identity is not just its id — a NEW
+            # endpoint carries a NEW template, and a template pointing at
+            # the wrong image is the difference between a Hunyuan probe
+            # and an LTX worker that cannot answer the question. Read it
+            # here so the answer arrives with the rest of the endpoint
+            # facts rather than costing another dispatch.
+            "templateId": e.get("templateId"),
+            "name": e.get("name"),
+        })
+    return out, None
+
+
+def account_templates():
+    """Every template on the account: id, name and the IMAGE it names.
+
+    Paired with `templateId` above, this closes the loop in ONE read —
+    which template the endpoint uses, and what that template would
+    actually run. containerDiskInGb comes along because a checkpoint that
+    does not fit on disk fails for a reason that has nothing to do with
+    the model, and those two findings must not be confused.
+
+    Returns None when the account cannot be read; None is UNKNOWN and is
+    never rendered as "no templates exist".
+    """
+    try:
+        rows = rp.list_templates_graphql()
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    if rows is None:
+        return None, "list_templates_graphql returned None (unreadable)"
+    out = []
+    for t in rows:
+        if not isinstance(t, dict):
+            continue
+        out.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "imageName": t.get("imageName"),
+            "containerDiskInGb": t.get("containerDiskInGb"),
+            "volumeInGb": t.get("volumeInGb"),
+            "volumeMountPath": t.get("volumeMountPath"),
         })
     return out, None
 
@@ -402,6 +447,8 @@ def survey() -> dict:
         "volume_billing_error": volume_billing()[1],
         "introspection_note": introspect("GpuAvailabilityInput")[1],
         "endpoint_locations": endpoint_locations()[0],
+        "account_templates": account_templates()[0],
+        "account_templates_error": account_templates()[1],
         "derived_rate": derived_rate(volume_billing()[0]),
         "endpoint_patch_properties": _patch_properties(doc) if doc else None,
     }
@@ -443,6 +490,14 @@ def report() -> int:
     print(f"BILLING (/billing/networkvolumes): {s['volume_billing'] if s['volume_billing'] is not None else s['volume_billing_error']}")
     print(f"introspection : {s['introspection_note']}")
     print(f"ENDPOINTS    : {s['endpoint_locations']}")
+    if s["account_templates"] is None:
+        print(f"TEMPLATES    : unreadable — {s['account_templates_error']}")
+    else:
+        print(f"TEMPLATES    : {len(s['account_templates'])} on the account")
+        for t in s["account_templates"]:
+            print(f"  {t['id']!r} {t['name']!r} image={t['imageName']!r} "
+                  f"disk={t['containerDiskInGb']!r}GB "
+                  f"vol={t['volumeInGb']!r}GB at {t['volumeMountPath']!r}")
     print(f"DERIVED RATE : {s['derived_rate']}")
     print(f"ENDPOINT PATCH accepts: {s['endpoint_patch_properties']}")
     print()
