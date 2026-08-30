@@ -606,6 +606,11 @@ jobs:
     env:
       RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # The reference the paid job will condition on. Checked by DECODING
+      # its first bytes, not by trusting a Content-Type: a 404 page served
+      # as image/png would otherwise produce a clip of nothing, paid for.
+      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || 'validation/out/probe-reference.png' }}
+      R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

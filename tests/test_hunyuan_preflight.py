@@ -110,3 +110,90 @@ def test_the_module_submits_no_job():
                       "retarget_template", "set_template_env",
                       "create_template", "set_execution_timeout"):
         assert forbidden not in source, forbidden
+
+
+# ------------------------------------- the reference is really an image
+
+
+class _Resp:
+    def __init__(self, body, status=200):
+        self._body, self.status = body, status
+
+    def read(self, n=None):
+        return self._body[:n] if n else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+PNG_HEAD = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + \
+    (704).to_bytes(4, "big") + (480).to_bytes(4, "big") + b"\x00" * 64
+
+
+def test_a_real_png_reference_passes_and_reports_its_size(monkeypatch):
+    monkeypatch.setattr(hp.urllib.request, "urlopen",
+                        lambda url, timeout=0: _Resp(PNG_HEAD))
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png")
+    assert info["ok"] is True
+    assert info["format"] == "png"
+    assert (info["width"], info["height"]) == (704, 480)
+
+
+def test_an_html_error_page_served_as_200_is_refused(monkeypatch):
+    """The failure this check exists for.
+
+    A 404 page served with image/png is still a 404 page. Conditioning a
+    paid job on one produces a clip of nothing, and the money is spent
+    before anyone looks. Headers are what a server claims; magic bytes are
+    what the decoder will actually see.
+    """
+    monkeypatch.setattr(hp.urllib.request, "urlopen",
+                        lambda url, timeout=0: _Resp(b"<!DOCTYPE html><html>404"))
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/missing.png")
+    assert info["ok"] is False
+    assert "not an image" in info["error"]
+
+
+def test_an_unreachable_reference_is_a_failed_gate_not_a_crash(monkeypatch):
+    def boom(url, timeout=0):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(hp.urllib.request, "urlopen", boom)
+    info = hp.reference_readable("https://pub-x.r2.dev", "a/ref.png")
+    assert info["ok"] is False
+    assert "OSError" in info["error"]
+
+
+def test_an_unreadable_reference_fails_the_gate_list():
+    facts = {
+        "vae/config.json": {"temporal_compression_ratio": 4,
+                            "spatial_compression_ratio": 16},
+        "transformer/config.json": {"task_type": "i2v"},
+        "model_index.json": {"_class_name": "HunyuanVideo15ImageToVideoPipeline",
+                             "vae": [], "text_encoder": [], "text_encoder_2": [],
+                             "scheduler": []},
+        "revision": "a" * 40,
+    }
+    endpoint = {"gpuTypeIds": ["NVIDIA RTX A5000"], "networkVolumeId": "v1"}
+    rows, _, _ = hp.gates(facts, endpoint, 24, {"ok": False, "error": "HTTP 404"})
+    failed = [name for name, ok, _ in rows if not ok]
+    assert any("reference" in name for name in failed)
+
+
+def test_no_reference_information_means_no_reference_gate():
+    # Absent evidence must not be reported as a pass.
+    facts = {
+        "vae/config.json": {"temporal_compression_ratio": 4,
+                            "spatial_compression_ratio": 16},
+        "transformer/config.json": {"task_type": "i2v"},
+        "model_index.json": {"_class_name": "HunyuanVideo15ImageToVideoPipeline",
+                             "vae": [], "text_encoder": [], "text_encoder_2": [],
+                             "scheduler": []},
+        "revision": "a" * 40,
+    }
+    endpoint = {"gpuTypeIds": ["NVIDIA RTX A5000"], "networkVolumeId": "v1"}
+    rows, _, _ = hp.gates(facts, endpoint, 24, None)
+    assert not any("reference" in name for name, _, _ in rows)

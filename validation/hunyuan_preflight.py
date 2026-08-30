@@ -127,7 +127,8 @@ def read_checkpoint_facts(fetcher=None) -> dict:
     return facts
 
 
-def gates(facts: dict, endpoint: dict, fps: int = 24) -> list:
+def gates(facts: dict, endpoint: dict, fps: int = 24,
+          reference: dict | None = None) -> list:
     """Every §12 check that can be answered without a GPU. Each row is
     (name, ok, detail) — a failing row is a stop, never a warning."""
     vae = facts.get("vae/config.json") or {}
@@ -163,7 +164,55 @@ def gates(facts: dict, endpoint: dict, fps: int = 24) -> list:
          True,
          "spend_run performs no retry; the driver stops on a terminal status"),
     ]
+    if reference is not None:
+        rows.append((
+            "R2 reference readable and really an image",
+            bool(reference.get("ok")),
+            reference.get("error") or
+            f"{reference.get('format')} "
+            f"{reference.get('width')}x{reference.get('height')}",
+        ))
     return rows, chosen, candidates
+
+
+# Magic bytes, because a Content-Type header is what a server claims and
+# the first bytes are what the decoder will actually see.
+_MAGIC = {
+    b"\x89PNG\r\n\x1a\n": "png",
+    b"\xff\xd8\xff": "jpeg",
+}
+
+
+def reference_readable(base: str, key: str) -> dict:
+    """Fetch the benchmark reference and confirm it is really an image.
+
+    Owner directive section 11: use the already-validated single-person
+    reference and do NOT regenerate it unless genuinely unavailable. So
+    this checks availability rather than assuming it, and checks it by
+    DECODING the first bytes rather than trusting a header — a 404 page
+    served with image/png is still a 404 page, and conditioning a paid job
+    on one produces a clip of nothing.
+    """
+    url = f"{base.rstrip('/')}/{key.lstrip('/')}"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as resp:
+            head = resp.read(4096)
+            status = resp.status
+    except Exception as exc:
+        return {"ok": False, "url": url, "error": f"{type(exc).__name__}: {exc}"}
+    if status != 200:
+        return {"ok": False, "url": url, "error": f"HTTP {status}"}
+    kind = next((k for magic, k in _MAGIC.items() if head.startswith(magic)), None)
+    if kind is None:
+        return {"ok": False, "url": url,
+                "error": f"not an image; first bytes {head[:16]!r}"}
+    info = {"ok": True, "url": url, "format": kind, "head_bytes": len(head)}
+    if kind == "png" and len(head) >= 24:
+        import struct
+
+        width, height = struct.unpack(">II", head[16:24])
+        info["width"], info["height"] = width, height
+    return info
 
 
 def endpoint_facts(endpoint_id: str) -> dict:
@@ -174,7 +223,22 @@ def endpoint_facts(endpoint_id: str) -> dict:
 def report(endpoint_id: str, fps: int = 24) -> int:
     facts = read_checkpoint_facts()
     endpoint = endpoint_facts(endpoint_id)
-    rows, chosen, candidates = gates(facts, endpoint, fps)
+
+    reference = None
+    ref_key = os.environ.get("GPU_TEST_INPUT_REF", "")
+    base_raw = os.environ.get("R2_PUBLIC_BASE_URL", "")
+    if ref_key:
+        from validation.frame_pull import resolve_base
+
+        try:
+            base, note = resolve_base(base_raw)
+            if note:
+                print(f"NOTE: {note}")
+            reference = reference_readable(base, ref_key)
+        except Exception as exc:
+            reference = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    rows, chosen, candidates = gates(facts, endpoint, fps, reference)
 
     print("=" * 68)
     print("HUNYUAN FREE PREFLIGHT — zero GPU jobs")
