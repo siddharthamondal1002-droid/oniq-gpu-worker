@@ -249,6 +249,40 @@ def set_workers_standby_zero(endpoint_id: str):
     )
 
 
+def set_workers_min_zero(endpoint_id: str):
+    """Set workersMin to the literal 0. A strict spend REDUCTION.
+
+    Owner decision 2026-08-30: the endpoint the owner created came up with
+    workersMin=1, holding an A5000 continuously whether or not any job ran
+    — the same shape that accrued $1.155 on ynysmj3dm92cwp without that
+    endpoint ever running one. The owner chose to drop it to zero, so the
+    GPU is paid for only while work is on it.
+
+    THERE IS DELIBERATELY NO VALUE PARAMETER. Like set_workers_standby_zero
+    above, this function cannot scale anything UP: 0 is a literal in the
+    body, so no caller, input or stale read can turn a spend reduction into
+    a spend increase. workersMin is the field, and it is the only field in
+    the body, so no worker ceiling, template, volume or GPU list can move
+    with it.
+
+    One transport, not two. workersStandby needed a GraphQL fallback
+    because the REST route answered 400 'not in input schema' (measured
+    2026-08-26); workersMin IS declared in PATCH /endpoints/{id}'s accepted
+    properties, read off the live OpenAPI document 2026-08-30. If REST ever
+    stops accepting it the status and body come back verbatim rather than
+    being papered over by a second attempt that hides which one worked.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"workersMin": 0},
+    )
+    return status, raw
+
+
 def template_env_names_graphql(template_id: str):
     """Env var NAMES on a template, via GraphQL (values are fetched by
     the API but only names ever leave this function). Returns a set, or

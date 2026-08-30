@@ -569,6 +569,12 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # difference between repairing a dangling reference and writing a
         # second one over it.
         "endpoint-template",
+        # workers-min-zero joined 2026-08-30 with the owner's decision to
+        # drop the floor rather than relax the admission gate. It is the
+        # SECOND mode with no token, and it earns that the same way
+        # standby-zero does: the writer it calls takes no value, so there
+        # is no argument by which a spend reduction becomes an increase.
+        "workers-min-zero",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
