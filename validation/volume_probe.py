@@ -139,19 +139,86 @@ def _gql(query: str):
 
 
 def introspect(type_name: str):
-    """Field names on one GraphQL type. Read, so a query is written
-    against the schema that exists rather than the one documentation
-    describes — the difference cost run 162."""
+    """Field names on one GraphQL type — when the server allows it.
+
+    RunPod's Apollo server answers INTROSPECTION_DISABLED (measured
+    2026-08-30, run 163), so this returns None WITH that reason rather
+    than pretending the type does not exist. Kept, and kept honest about
+    why, because the alternative — writing queries against remembered
+    field names — is what the "no third-party claims where official
+    documentation answers" rule exists to prevent, and a server's own
+    error message is the closest thing to documentation available here.
+    """
     data, err = _gql(
         '{ __type(name: "%s") { fields { name } inputFields { name } } }'
         % type_name
     )
-    if err or not data or not data.get("__type"):
-        return None, err or f"{type_name} not in the schema"
+    if err:
+        return None, err
+    if not data or not data.get("__type"):
+        return None, f"{type_name} not in the schema"
     node = data["__type"]
     names = [f["name"] for f in (node.get("fields") or [])]
     names += [f["name"] for f in (node.get("inputFields") or [])]
     return sorted(names), None
+
+
+def endpoint_locations():
+    """Any location or datacenter the ENDPOINT document itself names.
+
+    With introspection off this is the practical route to the feasibility
+    question: a volume must be created in a datacenter the endpoint can
+    actually run in, and the endpoint knows where it runs. Every key is
+    reported, so a field this code does not anticipate stays visible
+    instead of being silently dropped.
+    """
+    try:
+        _, doc = rp._get_json(f"{rp.REST_BASE}/endpoints")
+    except rp.RunPodApiError as exc:
+        return None, str(exc)
+    rows = doc if isinstance(doc, list) else doc.get("endpoints") or []
+    out = []
+    for e in rows:
+        if not isinstance(e, dict):
+            continue
+        out.append({
+            "id": e.get("id"),
+            "keys": sorted(e),
+            "locations": e.get("locations"),
+            "dataCenterIds": e.get("dataCenterIds"),
+            "networkVolumeId": e.get("networkVolumeId"),
+            "gpuTypeIds": e.get("gpuTypeIds"),
+        })
+    return out, None
+
+
+def derived_rate(billing):
+    """The per-GB-month rate, DERIVED from a real charge on this account.
+
+    /billing/networkvolumes reports an hourly `amount` against
+    `diskSpaceBilledGb`. amount * 720 / gb lands on 0.06999999750 for the
+    2026-08-30 line — $0.07/GB/month on a 720-hour month. That is a
+    measured figure rather than one recalled from memory, which is the
+    whole reason this probe refused to state a rate before now.
+
+    Returns None when the payload is not the shape that reasoning
+    assumes: a rate inferred from an unexpected document is worse than no
+    rate, because the migration would be sized on it.
+    """
+    if not isinstance(billing, list) or not billing:
+        return None
+    row = billing[0]
+    if not isinstance(row, dict):
+        return None
+    amount, gb = row.get("amount"), row.get("diskSpaceBilledGb")
+    if not isinstance(amount, (int, float)) or not isinstance(gb, (int, float)):
+        return None
+    if gb <= 0:
+        return None
+    return {
+        "usd_per_gb_month_720h": round(amount * 720 / gb, 6),
+        "measured_from": row,
+    }
 
 
 def spec_paths(doc: dict) -> list[str] | None:
@@ -301,7 +368,9 @@ def survey() -> dict:
         "storage_rate_fields_in_spec": storage_rate(raw),
         "volume_billing": volume_billing()[0],
         "volume_billing_error": volume_billing()[1],
-        "gpu_availability_input_fields": introspect("GpuAvailabilityInput")[0],
+        "introspection_note": introspect("GpuAvailabilityInput")[1],
+        "endpoint_locations": endpoint_locations()[0],
+        "derived_rate": derived_rate(volume_billing()[0]),
     }
 
 
@@ -339,7 +408,9 @@ def report() -> int:
         print("           datacenters here, so feasibility is not yet proven.")
     print()
     print(f"BILLING (/billing/networkvolumes): {s['volume_billing'] if s['volume_billing'] is not None else s['volume_billing_error']}")
-    print(f"GpuAvailabilityInput accepts: {s['gpu_availability_input_fields']}")
+    print(f"introspection : {s['introspection_note']}")
+    print(f"ENDPOINTS    : {s['endpoint_locations']}")
+    print(f"DERIVED RATE : {s['derived_rate']}")
     print()
     if s["storage_rate_fields_in_spec"]:
         print(f"RATE: spec carries {s['storage_rate_fields_in_spec']}")
