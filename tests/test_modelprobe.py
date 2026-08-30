@@ -144,7 +144,13 @@ def test_an_unpinned_revision_is_unspendable():
     the interim state costs a refusal, never a download of moving bytes."""
     for key, row in modelprobe.PROBE_MODELS.items():
         if len(row["revision"]) == 40:
-            assert modelprobe.spec(key) is row
+            # spec() returns the table's row WITH its key attached
+            # (2026-08-30), so identity no longer holds. The property this
+            # test is actually about — that a pinned row is returned
+            # unaltered rather than substituted — is asserted directly.
+            returned = modelprobe.spec(key)
+            assert returned["key"] == key
+            assert {k: v for k, v in returned.items() if k != "key"} == row
         else:
             with pytest.raises(modelprobe.ProbeStop) as stop:
                 modelprobe.spec(key)

@@ -13,6 +13,17 @@ root-owned and merely readable by the uid-10001 runtime user.
 
 from __future__ import annotations
 
+# FIRST, and above every project module on purpose. cudaenv sets
+# PYTORCH_CUDA_ALLOC_CONF, which PyTorch reads exactly once when its CUDA
+# allocator initialises; a value set after that point is present in the
+# environment and ignored by the allocator, which is the worst kind of
+# configuration because every report says it is on. Importing it here,
+# before anything that could pull in torch, is what makes the setting
+# real — and cudaenv.evidence() records the ordering rather than asserting
+# it. Owner directive 2026-08-30: "Do not claim it is configured merely
+# because it appears in source."
+import cudaenv  # noqa: F401  (imported for its import-time effect)
+
 import shutil
 import tempfile
 import time
@@ -76,6 +87,17 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
+        if job["op"] == "model_hydrate":
+            # No GPU, no artifact, no upload. It puts a checkpoint on the
+            # persistent volume so that every later change to that model is
+            # a configuration edit rather than a 25 GiB image rebuild.
+            import modelhydrate
+
+            record = modelhydrate.hydrate(job["model"])
+            _check_deadline(started, job["op"])
+            return contract.filter_output({**record, "ok": True,
+                                           "cleanup_ok": True})
+
         if job["op"] == "story_generate":
             # Text in the response, no artifact: nothing to upload.
             metrics = storygen.run(job)

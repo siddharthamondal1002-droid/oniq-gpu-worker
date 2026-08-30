@@ -548,6 +548,57 @@ def spec(model_key: str) -> dict:
             f"{model_key} revision {row.get('revision')!r} is not a pinned "
             "commit sha — refusing to fetch moving bytes",
         )
+    # The key travels WITH the row. volume_path needs to know which
+    # benchmark row it is looking at, and a row that does not carry its own
+    # identity forces every caller to pass the key alongside it — which is
+    # how the two drift apart.
+    return dict(row, key=model_key)
+
+
+def legal_frames(temporal_ratio: int, frames: int) -> bool:
+    """Can this VAE encode exactly this many frames?
+
+    A causal video VAE with temporal compression R encodes the first frame
+    alone and the rest in blocks of R, so the legal counts are R*k+1.
+    Checked BEFORE the pipeline loads: an illegal count is a shape error
+    that surfaces after the weights are resident, which is the expensive
+    place to find it.
+    """
+    if not isinstance(temporal_ratio, int) or temporal_ratio < 1:
+        return True  # unknown ratio: do not invent a rule to enforce
+    return frames >= 1 and (frames - 1) % temporal_ratio == 0
+
+
+def vae_temporal_ratio(local_dir: str):
+    """The ratio the hydrated checkpoint itself declares, or None.
+
+    Read from disk rather than recorded in this table on purpose: the
+    revision is pinned, so the config on the volume IS the authority, and a
+    number copied into a row here could drift from it silently.
+    """
+    try:
+        with open(os.path.join(local_dir, "vae", "config.json"),
+                  encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    ratio = doc.get("temporal_compression_ratio")
+    return ratio if isinstance(ratio, int) else None
+
+
+def apply_overrides(spec_row: dict, params: dict) -> dict:
+    """Frames and steps from the job, bounded by the contract already.
+
+    Owner directive 2026-08-30: frames, steps, revision and offload mode
+    "belong to the model configuration/provider layer", not to the image.
+    Absent means the row's own value, so nothing changes for a caller that
+    sends neither.
+    """
+    row = dict(spec_row)
+    for field in ("frames", "steps"):
+        value = params.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            row[field] = value
     return row
 
 
@@ -714,7 +765,7 @@ def run(job: dict, input_path: str, output_path: str,
     is exercised without a GPU.
     """
     model_key = job.get("model")
-    spec_row = spec(model_key)
+    spec_row = apply_overrides(spec(model_key), job.get("params") or {})
     phases = Phases()
     disk: dict = {}
     before: dict = {}
@@ -782,6 +833,22 @@ def _measure(job, input_path, output_path, model_key, spec_row, phases,
     except Exception as exc:  # noqa: BLE001
         raise ProbeStop("LOAD_FAILED", f"{type(exc).__name__}: {exc}") from exc
     disk["download_bytes"] = dir_bytes(cache_dir)
+
+    # THE SHAPE CHECK, before the weights become resident. A frame count the
+    # VAE cannot encode is a shape error that would otherwise surface after
+    # ~15 GiB is on the card — the expensive place to find it. The ratio is
+    # read from the checkpoint on disk, never from a number typed into the
+    # row, because the revision is pinned and the config IS the authority.
+    ratio = vae_temporal_ratio(local)
+    if not legal_frames(ratio, spec_row["frames"]):
+        raise ProbeStop(
+            "CONFIG_ERROR",
+            f"{spec_row['frames']} frames is not encodable by a VAE with "
+            f"temporal_compression_ratio {ratio}: legal counts are "
+            f"{ratio}k+1. Nearest legal below is "
+            f"{((spec_row['frames'] - 1) // ratio) * ratio + 1}.",
+        )
+    disk["vae_temporal_ratio"] = ratio
 
     try:
         pipe = phases.time("model_load", lambda: load_pipeline(local))
@@ -911,10 +978,41 @@ def _cache_dir(spec_row: dict) -> str:
     return os.path.join(PROBE_CACHE, spec_row["repo"].replace("/", "--"))
 
 
+# Probe rows that also exist as hydrated models on the persistent volume.
+# Owner directive 2026-08-30: model weights are DATA. When the volume
+# carries the checkpoint, the probe reads it and downloads NOTHING — which
+# is what turns a 32 GiB, 40-second job-time fetch into a path lookup, and
+# what stops a frame-count change from needing a Docker rebuild.
+VOLUME_MODELS = {"hunyuanvideo-1.5-i2v": "HUNYUAN_15_I2V_480_STEP"}
+
+
+def volume_path(spec_row: dict):
+    """The hydrated model's directory, or None when it is not on a volume.
+
+    Returns None on ANY refusal so the caller falls back to the job-time
+    download; modelroot's fail-closed contract is enforced at dispatch by
+    the preflight, which is the place that can stop before spending. Here,
+    mid-job, a refusal that aborted would waste a booted worker.
+    """
+    model_id = VOLUME_MODELS.get(spec_row.get("key") or "")
+    if not model_id:
+        return None
+    try:
+        import modelroot
+
+        return modelroot.resolve(model_id)
+    except Exception:
+        return None
+
+
 def _real_fetch(spec_row: dict):  # pragma: no cover - needs the network
     """The download, separated from the load so each is timed on its own."""
 
     def fetch():
+        hydrated = volume_path(spec_row)
+        if hydrated:
+            return hydrated
+
         # Belt and braces: the module-level assignment above is the one that
         # matters, but these directories must EXIST and be ours before the
         # hub or its chunk-cache tries to create them inside a root-owned

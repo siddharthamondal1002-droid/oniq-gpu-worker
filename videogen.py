@@ -40,11 +40,11 @@ MODEL_ID_FILE = None
 
 
 def _model_dir() -> str:
-    return MODEL_DIR or modelroot.resolve("ltx")
+    return MODEL_DIR or modelroot.resolve_production("ltx")
 
 
 def _model_id_file() -> str:
-    return MODEL_ID_FILE or modelroot.resolve_file("MODEL_ID")
+    return MODEL_ID_FILE or modelroot.resolve_production_file("MODEL_ID")
 
 # Sampler settings — server decisions, deliberately boring for the first
 # measurement: a fixed seed so a re-run is comparable, a stock negative

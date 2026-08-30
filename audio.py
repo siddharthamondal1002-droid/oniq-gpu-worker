@@ -48,7 +48,7 @@ VOICE_DIR = None
 
 
 def _voice_dir() -> str:
-    return VOICE_DIR or modelroot.resolve("piper")
+    return VOICE_DIR or modelroot.resolve_production("piper")
 VOICE_MODEL = "en-us-ryan-high.onnx"
 
 # The documented loudness strategy (RMS target with a true-peak-ish

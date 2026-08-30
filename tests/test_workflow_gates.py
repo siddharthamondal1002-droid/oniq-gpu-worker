@@ -160,7 +160,14 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         # modelroot joined 2026-08-30: every engine reaches its weights
         # through it, so the migration to a network volume is one seam
         # rather than three hardcoded paths.
+        # cudaenv joined 2026-08-30 and is the handler's FIRST import:
+        # PyTorch reads PYTORCH_CUDA_ALLOC_CONF once, when its allocator
+        # initialises, so a value set later is present and ignored.
+        "cudaenv.py",
         "modelroot.py",
+        # modelhydrate puts an experimental checkpoint on the volume. It is
+        # what makes a model change a data change.
+        "modelhydrate.py",
         # preview joined 2026-08-29: the bucket is private, so the only way
         # to LOOK at what the worker made is for the worker to hand a
         # thumbnail back with the reply.
@@ -227,7 +234,9 @@ def test_dockerignore_denies_by_default():
         "!contract.py",
         "!preprocess.py",
         "!storage.py",
+        "!cudaenv.py",
         "!modelroot.py",
+        "!modelhydrate.py",
         "!preview.py",
         "!videogen.py",
         "!modelprobe.py",
@@ -336,6 +345,15 @@ def test_the_closure_actually_reaches_the_engines():
         # weights through it, so it is the one module whose absence from
         # the image would break all three at once.
         "modelroot",
+        # cudaenv sets PYTORCH_CUDA_ALLOC_CONF and MUST be the handler's
+        # first import: PyTorch reads that variable once, when its CUDA
+        # allocator initialises, and a value set afterwards is present and
+        # ignored.
+        "cudaenv",
+        # modelhydrate fetches an experimental checkpoint onto the volume.
+        # It is reached from the handler's hydrate op, which is how a model
+        # change stops being a Docker rebuild.
+        "modelhydrate",
     }
     # runpod_client is the CI harness's, not the worker's. It must NOT be
     # in the image: it is the only module that talks to the RunPod API.
@@ -497,6 +515,11 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # retarget hit the same day, where a write that was not read back
         # dropped a registry credential nobody could see was gone.
         "endpoint-timeout",
+        # hunyuan-preflight joined 2026-08-30 as section 12's free gate. It
+        # reads checkpoint configs and endpoint state and submits nothing;
+        # like frames-pull and model-bench it is a $0 mode that cannot
+        # become a paid one.
+        "hunyuan-preflight",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

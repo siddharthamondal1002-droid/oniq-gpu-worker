@@ -9,7 +9,9 @@
 !preprocess.py
 !storage.py
 !handler.py
+!cudaenv.py
 !modelroot.py
+!modelhydrate.py
 !preview.py
 !videogen.py
 !modelprobe.py

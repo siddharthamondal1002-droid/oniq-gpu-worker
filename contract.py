@@ -31,6 +31,12 @@ ALLOWED_OPS = (
     # job time and measures it. Production ops are untouched and still run the
     # baked model with local_files_only, so nothing a user can reach changes.
     "model_probe",
+    # model_hydrate joined 2026-08-30 (owner: "MODEL WEIGHTS ARE DATA").
+    # It fetches an experimental checkpoint onto the persistent volume and
+    # produces NO artifact and NO inference: no GPU work, no input object,
+    # no output object. It exists so that changing a model stops meaning
+    # rebuilding a 25 GiB image and cold-pulling it for two hours.
+    "model_hydrate",
 )
 
 # Bounded input: the object referenced from R2 may not exceed this, checked
@@ -153,6 +159,10 @@ _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
 # or revision: a caller may say which row of an authorised benchmark to run,
 # never what to download or how to run it.
 _PROBE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"model", "preview"}
+# model_hydrate carries a model id and nothing else. No keys, because it
+# reads no object and writes none; no params, because there is nothing to
+# tune about a download whose revision is pinned server-side.
+_HYDRATE_TOP_LEVEL_FIELDS = frozenset({"op", "model"})
 # `preview` is legal on the two ops an INSPECTION reads, and nowhere else.
 #
 # It changes nothing about what is generated or what it costs: the artifact
@@ -167,6 +177,27 @@ _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # absent means TRUE (marked), the fail-safe: an old or malformed caller
 # can only ever produce the watermarked product, never a free clean one.
 _VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark"})
+
+# model_probe ONLY. Owner directive 2026-08-30: "Do not rebuild the image
+# merely to change frames, steps, checkpoint revision, offload mode or
+# model weights. Those values belong to the model configuration/provider
+# layer." Baking them cost a two-hour cold pull per edit.
+#
+# This does NOT widen what a user can reach. model_probe is a server-side
+# evaluation op: `model` is legal on it and nowhere else, the browser
+# cannot select it, and every production op still takes neither field. The
+# standing fence is that a USER may not choose model, precision, runtime
+# or offloading strategy; the provider adapter always could, and this is
+# the provider adapter.
+_PROBE_PARAM_FIELDS = _VIDEO_PARAM_FIELDS | frozenset({"frames", "steps"})
+
+# Bounded, so a typo cannot become an expensive job. The upper frame bound
+# is the 121 that OOM'd on the A5000 on 2026-08-30 - measured, so nothing
+# above it is worth dispatching on this card.
+MIN_PROBE_FRAMES = 5
+MAX_PROBE_FRAMES = 121
+MIN_PROBE_STEPS = 1
+MAX_PROBE_STEPS = 50
 _IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt"})
 _STORY_PARAM_FIELDS = frozenset({"prompt", "max_tokens"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
@@ -247,6 +278,16 @@ OUTPUT_WHITELIST = frozenset(
         "disk_free_bytes",
         "disk_total_bytes",
         "download_bytes",
+        # The ratio the hydrated checkpoint declared, so the report can
+        # say WHY a frame count was legal rather than asserting it.
+        "vae_temporal_ratio",
+        # Hydration record fields (model_hydrate, 2026-08-30). A model
+        # that is on the volume must be able to prove it: revision,
+        # bytes, file count and the manifest digest, or the READY it
+        # reports is just a word.
+        "model_id", "state", "path", "already_present", "licence",
+        "file_count", "manifest_sha256", "download_ms",
+        "disk_free_after_gib",
         "preview_frames",
         "steps",
         "guidance",
@@ -289,6 +330,43 @@ def _bounded_int(value, field: str, lo: int, hi: int) -> int:
     return value
 
 
+def _probe_params(prompt: str, params_raw: dict) -> dict:
+    """Validated probe knobs. Absent means "use the row's own default".
+
+    Bounded rather than trusted: an unbounded frame count is a job that
+    runs to the ceiling and bills for it, and an out-of-range step count
+    measures something nobody asked for.
+    """
+    out = {"prompt": prompt.strip()}
+
+    frames = params_raw.get("frames")
+    if frames is not None:
+        if not isinstance(frames, int) or isinstance(frames, bool):
+            raise ContractError("invalid-input", "params.frames must be an integer")
+        if not MIN_PROBE_FRAMES <= frames <= MAX_PROBE_FRAMES:
+            raise ContractError(
+                "invalid-input",
+                f"params.frames must be between {MIN_PROBE_FRAMES} and "
+                f"{MAX_PROBE_FRAMES}; {frames} is outside what this card has "
+                "been measured to hold",
+            )
+        out["frames"] = frames
+
+    steps = params_raw.get("steps")
+    if steps is not None:
+        if not isinstance(steps, int) or isinstance(steps, bool):
+            raise ContractError("invalid-input", "params.steps must be an integer")
+        if not MIN_PROBE_STEPS <= steps <= MAX_PROBE_STEPS:
+            raise ContractError(
+                "invalid-input",
+                f"params.steps must be between {MIN_PROBE_STEPS} and "
+                f"{MAX_PROBE_STEPS}",
+            )
+        out["steps"] = steps
+
+    return out
+
+
 def validate_job(raw) -> dict:
     """Validate an incoming event's input and return the normalized job.
 
@@ -298,7 +376,9 @@ def validate_job(raw) -> dict:
     if not isinstance(raw, dict):
         raise ContractError("invalid-input", "job input must be an object")
 
-    if raw.get("op") == "model_probe":
+    if raw.get("op") == "model_hydrate":
+        allowed = _HYDRATE_TOP_LEVEL_FIELDS
+    elif raw.get("op") == "model_probe":
         allowed = _PROBE_TOP_LEVEL_FIELDS
     elif raw.get("op") == "image_generate":
         allowed = _PREVIEWABLE_TOP_LEVEL_FIELDS
@@ -329,14 +409,16 @@ def validate_job(raw) -> dict:
     # it has no source object. An input_key sent with it is refused rather
     # than ignored — a caller that thinks it is conditioning on an image
     # must not be told silently that it was.
-    if op in ("image_generate", "story_generate"):
+    if op in ("image_generate", "story_generate", "model_hydrate"):
         if raw.get("input_key") is not None:
             raise ContractError("invalid-input", f"{op} takes no input_key")
         input_key = None
     else:
         input_key = _require_key(raw.get("input_key"), "input_key")
     output_key = (
-        None if op == "story_generate" else _require_key(raw.get("output_key"), "output_key")
+        None
+        if op in ("story_generate", "model_hydrate")
+        else _require_key(raw.get("output_key"), "output_key")
     )
 
     params_raw = raw.get("params", {})
@@ -410,6 +492,29 @@ def validate_job(raw) -> dict:
             "params": {"prompt": prompt.strip()},
         }
 
+    if op == "model_hydrate":
+        import modelroot
+
+        model = raw.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ContractError("invalid-input", "model must be a non-empty string")
+        model = model.strip()
+        if model not in modelroot.EXPERIMENTAL:
+            # Named, never guessed at. A hydrate that silently fell back to
+            # some default would download 32 GiB of the wrong checkpoint
+            # and mark it READY.
+            raise ContractError(
+                "invalid-input",
+                "model must be one of: " + ", ".join(sorted(modelroot.EXPERIMENTAL)),
+            )
+        return {
+            "op": op,
+            "model": model,
+            "input_key": None,
+            "output_key": None,
+            "params": {},
+        }
+
     if op == "model_probe":
         import modelprobe
 
@@ -430,7 +535,7 @@ def validate_job(raw) -> dict:
                 "invalid-input",
                 "model must be one of: " + ", ".join(sorted(modelprobe.PROBE_MODELS)),
             )
-        unknown_params = set(params_raw) - _VIDEO_PARAM_FIELDS
+        unknown_params = set(params_raw) - _PROBE_PARAM_FIELDS
         if unknown_params:
             raise ContractError(
                 "invalid-input",
@@ -458,7 +563,7 @@ def validate_job(raw) -> dict:
             # the worker never saw it, so the reference came back invisible
             # and cost a dispatch to find out.
             "preview": preview,
-            "params": {"prompt": prompt.strip()},
+            "params": _probe_params(prompt, params_raw),
         }
 
     if op == "video_generate":

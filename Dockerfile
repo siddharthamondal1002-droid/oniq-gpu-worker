@@ -69,7 +69,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt \
 COPY contract.py /app/contract.py
 COPY preprocess.py /app/preprocess.py
 COPY storage.py /app/storage.py
+COPY cudaenv.py /app/cudaenv.py
 COPY modelroot.py /app/modelroot.py
+COPY modelhydrate.py /app/modelhydrate.py
 COPY preview.py /app/preview.py
 COPY videogen.py /app/videogen.py
 COPY modelprobe.py /app/modelprobe.py

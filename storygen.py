@@ -35,11 +35,11 @@ MODEL_ID_FILE = None
 
 
 def _model_dir() -> str:
-    return MODEL_DIR or modelroot.resolve("story")
+    return MODEL_DIR or modelroot.resolve_production("story")
 
 
 def _model_id_file() -> str:
-    return MODEL_ID_FILE or modelroot.resolve_file("STORY_MODEL_ID")
+    return MODEL_ID_FILE or modelroot.resolve_production_file("STORY_MODEL_ID")
 
 # Server decisions, like the video sampler's: the caller chooses none of
 # them. A story is long-form structured JSON, so the budget is generous
