@@ -525,7 +525,16 @@ def submit_and_wait(
 # billed, and the stop wore the costume of a job failure. Delay time is
 # not billed; the money bound stays the endpoint's executionTimeout and
 # the contract ceiling, so patience here risks minutes, not dollars.
-COLD_PULL_ALLOWANCE_S = 2700
+# MEASURED, twice, on 2026-08-30: a cold worker pulling this 25.38 GiB
+# image took 1h51m (08:28 -> 10:19). 2700s was set when the pull was
+# believed to be ~30 minutes and it is simply wrong against the evidence —
+# a watch that expires mid-pull cancels a job whose worker is still
+# downloading, and the next attempt starts the clock again.
+#
+# 7800s covers the measured pull with margin. It is a WATCH window, not a
+# spend ceiling: the job's own executionTimeoutMs bounds what can be
+# billed, and a worker that is pulling is not yet billing GPU time.
+COLD_PULL_ALLOWANCE_S = 7800
 
 
 # The one motion prompt of the first media experiment — a server
@@ -1198,6 +1207,12 @@ def one_job(
         payload["preview"] = True
     watch_s = None
     policy = None
+    if op == "model_hydrate":
+        # A hydrate on a cold worker waits for the SAME pull every other op
+        # waits for, and then downloads 32.26 GiB to the volume. Without an
+        # explicit window it inherits the default and is cancelled while the
+        # worker is still fetching the image.
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     if op == "model_probe":
         # THE PIN IS CHECKED HERE FOR FREE, before RunPod hears anything. The
         # worker's spec() refuses an unpinned revision too, but its refusal
