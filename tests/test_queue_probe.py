@@ -133,3 +133,50 @@ def test_the_module_carries_no_mutation_verbs():
     for verb in ("cancel_job", "purge_queue", "submit_job", "set_workers_standby_zero"):
         assert f"client.{verb}" not in source
         assert f"runpod_client.{verb}" not in source
+
+
+# ---------------------------------------------------- per-worker detail
+
+
+def test_worker_detail_is_reported_and_never_fails_the_probe():
+    """The counts cannot tell a worker that is downloading from one that
+    died and was recreated — both read {"initializing": 1}. The detail
+    answers it, and must never be able to break the probe that carries it:
+    a diagnostic that takes the report down with it is worse than no
+    diagnostic."""
+    import validation.queue_probe as qp
+
+    class Client:
+        def endpoint_health(self, ep):
+            return "{}", {"jobs": {"inQueue": 0, "inProgress": 0},
+                          "workers": {"initializing": 1}}
+
+        def worker_detail_graphql(self, ep):
+            raise RuntimeError("graphql is down")
+
+        def job_status(self, ep, job):
+            return "{}", {"status": "COMPLETED"}
+
+    row = qp.probe_endpoint(Client(), "ep1", "job1")
+    assert row["worker_detail"] is None
+    assert "RuntimeError" in row["worker_detail_note"]
+    # The rest of the row still answered.
+    assert row["in_queue"] == 0
+    assert row["workers"]["initializing"] == 1
+
+
+def test_worker_detail_rows_reach_the_row():
+    import validation.queue_probe as qp
+
+    class Client:
+        def endpoint_health(self, ep):
+            return "{}", {"jobs": {"inQueue": 0, "inProgress": 0}, "workers": {}}
+
+        def worker_detail_graphql(self, ep):
+            return [{"id": "w-abc", "status": "INITIALIZING"}], "fields: ['id']"
+
+        def job_status(self, ep, job):
+            return "{}", {"status": "COMPLETED"}
+
+    row = qp.probe_endpoint(Client(), "ep1", "job1")
+    assert row["worker_detail"] == [{"id": "w-abc", "status": "INITIALIZING"}]

@@ -82,6 +82,19 @@ def probe_endpoint(client, endpoint_id: str, job_id: str) -> dict:
     row["jobs"] = _facts(health, "jobs", JOB_KEYS)
     row["workers"] = _facts(health, "workers", WORKER_KEYS)
 
+    # Per-worker detail. A worker id that is the SAME across two reads is
+    # downloading; one that changed has restarted, and on a 25 GiB image a
+    # restart means the pull began again from zero. The counts alone
+    # cannot tell those apart, and telling them apart is the difference
+    # between waiting and intervening.
+    try:
+        workers, note = client.worker_detail_graphql(endpoint_id)
+        row["worker_detail"] = workers
+        row["worker_detail_note"] = note
+    except Exception as exc:
+        row["worker_detail"] = None
+        row["worker_detail_note"] = f"{type(exc).__name__}: {exc}"
+
     try:
         _, doc = client.job_status(endpoint_id, job_id)
         row["job_status"] = (doc or {}).get("status") if isinstance(doc, dict) else None

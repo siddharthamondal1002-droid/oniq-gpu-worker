@@ -480,6 +480,55 @@ def rest_schema_probe():
     return None
 
 
+def worker_detail_graphql(endpoint_id: str):
+    """Per-worker rows for ONE endpoint, or (None, note). Read-only.
+
+    Exists to answer a question the health counts cannot: is a worker that
+    has reported "initializing" for an hour making progress, or has it
+    died and been recreated? Both look identical in {"initializing": 1}.
+    A worker id that changes between two reads is a restart, and a restart
+    on a 25 GiB image means the whole download began again — the failure
+    that cost 2026-08-29 and most of 2026-08-30.
+
+    The schema is introspected before the query is written. Guessing a
+    field name cost run 162 a whole round trip, and rest.runpod.io is
+    unreachable from the dev container, so each guess is a CI run.
+    """
+    probe = {"query": '{ __type(name: "Worker") { fields { name } } }'}
+    status, raw = _request(GRAPHQL_URL, method="POST", body=probe)
+    if status != 200:
+        return None, f"introspection HTTP {status}"
+    doc = json.loads(raw)
+    if doc.get("errors"):
+        return None, "introspection: " + "; ".join(
+            e.get("message", "?") for e in doc["errors"])[:300]
+    node = (doc.get("data") or {}).get("__type")
+    if not node:
+        return None, "no Worker type in the schema"
+    available = {f["name"] for f in node.get("fields") or []}
+    wanted = [f for f in ("id", "status", "version", "uptimeInSeconds",
+                          "lastStatusChange", "machineId", "gpuTypeId")
+              if f in available]
+    if "id" not in wanted:
+        return None, f"Worker has no id field; has {sorted(available)}"
+
+    query = (
+        '{ myself { endpoints { id workers { %s } } } }' % " ".join(wanted)
+    )
+    status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+    if status != 200:
+        return None, f"workers HTTP {status} {raw[:200]}"
+    doc = json.loads(raw)
+    if doc.get("errors"):
+        return None, "workers: " + "; ".join(
+            e.get("message", "?") for e in doc["errors"])[:300]
+    endpoints = ((doc.get("data") or {}).get("myself") or {}).get("endpoints") or []
+    for ep in endpoints:
+        if ep.get("id") == endpoint_id:
+            return ep.get("workers") or [], f"fields: {wanted}"
+    return None, f"endpoint {endpoint_id} not in myself.endpoints"
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),
