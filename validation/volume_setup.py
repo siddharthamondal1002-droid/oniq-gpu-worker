@@ -37,6 +37,19 @@ USD_PER_GB_MONTH = 0.07
 # /networkvolumes/{id}/update without recreating it.
 DEFAULT_SIZE_GB = 50
 
+# The account's only existing network volume lives here, which makes it the
+# datacenter RunPod has already proven willing to place storage in for this
+# account. A constant rather than a dispatch input: GitHub caps
+# workflow_dispatch at 25 inputs, and this is one line to edit rather than
+# a value to re-type per run.
+#
+# It is also the migration's one irreversible-feeling risk, so it is worth
+# stating where it lives: attaching a volume PINS the endpoint to this
+# datacenter, and if the A5000 is not schedulable here the endpoint gets no
+# GPU. Detaching restores it.
+DEFAULT_DATACENTER = "US-MO-2"
+DEFAULT_NAME = "oniq-models"
+
 
 class Refused(Exception):
     def __init__(self, code: str, detail: str):
@@ -123,11 +136,13 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
 def main(argv) -> int:
     import runpod_client as rp
 
-    if len(argv) < 4:
-        print("usage: volume_setup <endpoint_id> <name> <datacenter_id> [size_gb]")
+    if len(argv) < 2 or not argv[1]:
+        print("usage: volume_setup <endpoint_id> [datacenter_id] [name] [size_gb]")
         return 2
-    endpoint_id, name, datacenter_id = argv[1], argv[2], argv[3]
-    size_gb = int(argv[4]) if len(argv) > 4 else DEFAULT_SIZE_GB
+    endpoint_id = argv[1]
+    datacenter_id = argv[2] if len(argv) > 2 and argv[2] else DEFAULT_DATACENTER
+    name = argv[3] if len(argv) > 3 and argv[3] else DEFAULT_NAME
+    size_gb = int(argv[4]) if len(argv) > 4 and argv[4] else DEFAULT_SIZE_GB
 
     print(f"volume {name!r} {size_gb} GB in {datacenter_id} -> endpoint {endpoint_id}")
     print(f"measured rate ${USD_PER_GB_MONTH}/GB-month "

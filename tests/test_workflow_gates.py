@@ -182,6 +182,31 @@ def test_dockerfile_copies_exactly_the_shipped_files():
 
 
 
+def test_no_workflow_exceeds_githubs_dispatch_input_cap():
+    """GitHub allows at most 25 workflow_dispatch inputs and refuses the
+    whole file past that — the workflow becomes undispatchable, not just
+    the new mode.
+
+    Hit on 2026-08-30 at 27, after four modes each added their own token
+    and value. The fix was to fold decisions already taken (a 45-minute
+    ceiling, the datacenter the account's only volume already lives in)
+    into module constants, where they are one line to edit rather than a
+    value to re-type per run. This gate is what turns the next occurrence
+    into a local failure instead of a rejected dispatch.
+    """
+    import yaml
+
+    workflows = os.path.join(ROOT, ".github", "workflows")
+    for name in sorted(os.listdir(workflows)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        with open(os.path.join(workflows, name), encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+        triggers = doc.get(True) or doc.get("on") or {}
+        dispatch = (triggers or {}).get("workflow_dispatch") or {}
+        inputs = dispatch.get("inputs") or {}
+        assert len(inputs) <= 25, f"{name} has {len(inputs)} inputs"
+
 def test_no_workflow_has_a_duplicate_key():
     """PyYAML accepts duplicate mapping keys and keeps the last one.
     GitHub's parser refuses the file outright.

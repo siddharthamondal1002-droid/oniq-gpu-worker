@@ -59,24 +59,8 @@ on:
         description: "Type CREATE-AND-ATTACH-VOLUME (exactly) to allow volume-setup."
         type: string
         default: ""
-      volume_name:
-        description: "Name for the network volume (volume-setup)."
-        type: string
-        default: "oniq-models"
-      datacenter_id:
-        description: "Datacenter for the network volume, e.g. US-MO-2. A volume PINS the endpoint to its datacenter."
-        type: string
-        default: ""
-      volume_size_gb:
-        description: "Volume size in GB (volume-setup). 50 holds Hunyuan's 32.26 GiB with headroom."
-        type: string
-        default: "50"
       timeout_token:
         description: "Type SET-EXECUTION-TIMEOUT (exactly) to allow the endpoint ceiling change."
-        type: string
-        default: ""
-      timeout_ms:
-        description: "New executionTimeoutMs for endpoint-timeout mode (e.g. 2700000 = 45 min)."
         type: string
         default: ""
       cancel_token:
@@ -606,7 +590,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: "Raise the ceiling, then read it back"
-        run: python -m validation.endpoint_timeout "${{ inputs.endpoint_id }}" "${{ inputs.timeout_ms }}"
+        run: python -m validation.endpoint_timeout "${{ inputs.endpoint_id }}"
 
   hunyuan_preflight:
     # Owner directive 2026-08-30 section 12: every gate below is free, and
@@ -654,11 +638,7 @@ jobs:
           python-version: "3.11"
       - name: "Create, attach, then read both back"
         run: |
-          python -m validation.volume_setup \
-            "${{ inputs.endpoint_id }}" \
-            "${{ inputs.volume_name }}" \
-            "${{ inputs.datacenter_id }}" \
-            "${{ inputs.volume_size_gb }}"
+          python -m validation.volume_setup "${{ inputs.endpoint_id }}"
 
   stale_cancel:
     # Cancels ONE run on ONE endpoint, both named on the dispatch, and

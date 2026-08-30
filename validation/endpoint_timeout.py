@@ -54,6 +54,12 @@ GUARDED = (
 )
 
 
+# 45 minutes, per the owner's 2026-08-30 authorization. A constant rather
+# than a dispatch input because GitHub caps workflow_dispatch at 25 inputs
+# and a decision already taken does not need to be re-typed on every run.
+DEFAULT_TIMEOUT_MS = 2_700_000
+
+
 class Refused(Exception):
     """Raised when the endpoint did not end up the way it was asked to."""
 
@@ -106,10 +112,11 @@ def apply(client, endpoint_id: str, timeout_ms: int) -> dict:
 def main(argv) -> int:
     import runpod_client as rp
 
-    if len(argv) < 3:
-        print("usage: endpoint_timeout <endpoint_id> <timeout_ms>")
+    if len(argv) < 2 or not argv[1]:
+        print("usage: endpoint_timeout <endpoint_id> [timeout_ms]")
         return 2
-    endpoint_id, timeout_ms = argv[1], int(argv[2])
+    endpoint_id = argv[1]
+    timeout_ms = int(argv[2]) if len(argv) > 2 and argv[2] else DEFAULT_TIMEOUT_MS
 
     print(f"raising executionTimeoutMs on {endpoint_id} to {timeout_ms} ms "
           f"({timeout_ms / 60000:.0f} min)")
