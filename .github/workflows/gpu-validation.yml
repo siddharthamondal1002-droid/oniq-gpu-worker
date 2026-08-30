@@ -805,6 +805,12 @@ jobs:
       OP: ${{ inputs.op }}
       PLATE: ${{ inputs.plate }}
       PROBE_MODEL: ${{ inputs.probe_model }}
+      # Owner directive 2026-08-30 section 10: the probe's frame count is
+      # DERIVED from the checkpoint's own VAE at dispatch time, so the
+      # driver reads vae/config.json at the pinned revision. Same token the
+      # free preflight uses, same reader, same bytes — a second source for
+      # the same question is how the two drift.
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
       # The battery PROVES both conditioning plates exist over the public
       # read base before its first paid submission (require_plates) — the
       # run 72 lesson, times five.

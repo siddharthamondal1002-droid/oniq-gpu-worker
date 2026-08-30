@@ -2126,3 +2126,83 @@ def test_no_dispatch_branch_uses_a_name_that_is_never_bound():
         "that branch dies with NameError, and the SpendStop handlers do not "
         "catch it, so nothing prints why"
     )
+
+
+# ---------------------------------------- section 10: frames are DERIVED
+
+
+def test_a_derived_row_dispatches_the_derived_count_not_the_tabled_one():
+    """Owner directive 2026-08-30 section 10.
+
+    The Hunyuan rows carry frames=121 because that is what the
+    checkpoint's own README recommends, and 121 is LEGAL for this VAE
+    (4*30+1) — so no shape gate anywhere refuses it. The probe would
+    simply run two and a half times longer than the benchmark needs, on a
+    rented card, and the section forbidding it would have been satisfied
+    by nobody.
+    """
+    import modelprobe
+
+    row = dict(modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"])
+    assert row["frames"] == 121, "the row still documents what the card says"
+
+    seen = {}
+
+    def reader(repo, revision, fps):
+        seen.update(repo=repo, revision=revision, fps=fps)
+        return {"frames": 49, "seconds": 2.042, "ratio": 4}
+
+    frames = spend_run.derived_probe_frames(row, read=reader)
+    assert frames == 49
+    assert seen["repo"] == row["repo"]
+    assert seen["revision"] == row["revision"], "must read the PINNED sha"
+    assert seen["fps"] == row["fps"]
+
+
+def test_a_failed_derivation_stops_rather_than_falling_back_to_121():
+    """There is no safe fallback. The only one available is the row's own
+    121 — the exact configuration the directive rules out — so a
+    derivation that cannot be made is a refusal, not a default."""
+    import modelprobe
+    from validation import hunyuan_preflight as hp
+
+    row = dict(modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"])
+
+    def boom(repo, revision, fps):
+        raise hp.PreflightFailure("config-unreadable", "vae/config.json 404")
+
+    with pytest.raises(spend_run.SpendStop) as exc:
+        spend_run.derived_probe_frames(row, read=boom)
+    assert exc.value.code == "frames-underived"
+    assert "121" in str(exc.value), "the refusal must name what it refused"
+
+
+def test_a_nonsense_derivation_is_refused_too():
+    import modelprobe
+
+    row = dict(modelprobe.PROBE_MODELS["hunyuanvideo-1.5-i2v"])
+    for bad in (None, 0, -4, "49", 2.5):
+        with pytest.raises(spend_run.SpendStop) as exc:
+            spend_run.derived_probe_frames(
+                row, read=lambda r, v, f, b=bad: {"frames": b}
+            )
+        assert exc.value.code == "frames-underived", bad
+
+
+def test_every_derived_row_names_a_real_probe_row():
+    """A typo here would silently stop deriving and dispatch 121."""
+    import modelprobe
+
+    for key in modelprobe.DERIVED_FRAME_ROWS:
+        assert key in modelprobe.PROBE_MODELS, key
+
+
+def test_both_hunyuan_rows_derive_and_the_ltx_rows_do_not():
+    """LTX's shapes are fixed and were signed off by a human against real
+    fixture clips; re-deriving them would recalibrate gates against
+    nothing. Only the rows the directive is about derive."""
+    import modelprobe
+
+    for key in modelprobe.PROBE_MODELS:
+        derives = key in modelprobe.DERIVED_FRAME_ROWS
+        assert derives == key.startswith("hunyuanvideo-1.5"), key

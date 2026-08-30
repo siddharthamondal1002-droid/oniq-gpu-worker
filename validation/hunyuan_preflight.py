@@ -104,17 +104,21 @@ def _read_raw(url: str, token=None):
         return None
 
 
-def read_checkpoint_facts(fetcher=None) -> dict:
-    """The configs that decide the shape, from the pinned revision."""
-    import modelroot
+def configs_at(repo: str, revision: str, paths, fetcher=None) -> dict:
+    """Named config files, read from ONE pinned revision of ONE repo.
 
-    spec = modelroot.EXPERIMENTAL[MODEL_ID]
+    Split out of read_checkpoint_facts so the spend driver can derive a
+    frame count from the SAME bytes this preflight gates on. Section 10
+    requires the count be read from the checkpoint rather than assumed,
+    and two readers of the same question drift — the 403 that stopped this
+    preflight on 2026-08-30 was exactly that, a second fetcher that had not
+    learned what the first one knew.
+    """
     token = os.environ.get("HF_TOKEN") or None
     fetcher = fetcher or (lambda url: _read_raw(url, token))
-    facts = {"repo": spec["repo"], "revision": spec["revision"]}
-    for path in ("vae/config.json", "transformer/config.json",
-                 "model_index.json"):
-        body = fetcher(probe_settings.card_url(spec["repo"], spec["revision"], path))
+    out = {"repo": repo, "revision": revision}
+    for path in paths:
+        body = fetcher(probe_settings.card_url(repo, revision, path))
         if body is None:
             raise PreflightFailure(
                 "config-unreadable",
@@ -122,10 +126,46 @@ def read_checkpoint_facts(fetcher=None) -> dict:
                 "cannot be verified and nothing may be dispatched",
             )
         try:
-            facts[path] = json.loads(body)
+            out[path] = json.loads(body)
         except json.JSONDecodeError as exc:
             raise PreflightFailure("config-unparseable", f"{path}: {exc}")
-    return facts
+    return out
+
+
+def read_checkpoint_facts(fetcher=None) -> dict:
+    """The configs that decide the shape, from the pinned revision."""
+    import modelroot
+
+    spec = modelroot.EXPERIMENTAL[MODEL_ID]
+    return configs_at(
+        spec["repo"], spec["revision"],
+        ("vae/config.json", "transformer/config.json", "model_index.json"),
+        fetcher,
+    )
+
+
+def shortest_useful_frames(repo: str, revision: str, fps: int,
+                           fetcher=None) -> dict:
+    """The frame count to actually dispatch: {frames, seconds, ratio}.
+
+    Owner directive 2026-08-30 section 10, verbatim: "Do NOT use the
+    previous 121-frame configuration. Do NOT blindly use 61 either. Read
+    the exact legal frame-count requirements" and select the shortest
+    valid useful one.
+
+    121 IS legal for this VAE (4*30+1), so no shape gate anywhere would
+    catch it — the probe would simply run two and a half times longer than
+    the benchmark needs, on a rented card, and the section that forbids it
+    would have been satisfied by nobody. Hence a derivation the driver
+    performs itself rather than a number sitting in a table.
+
+    Raises rather than returning a default. A fallback here would be the
+    121 the directive rules out.
+    """
+    facts = configs_at(repo, revision, ("vae/config.json",), fetcher)
+    ratio = (facts.get("vae/config.json") or {}).get("temporal_compression_ratio")
+    chosen = choose_frames(legal_frame_counts(ratio, fps))
+    return dict(chosen, ratio=ratio, repo=repo, revision=revision)
 
 
 def gates(facts: dict, endpoint: dict, fps: int = 24,

@@ -989,6 +989,27 @@ def _cache_dir(spec_row: dict) -> str:
 # what stops a frame-count change from needing a Docker rebuild.
 VOLUME_MODELS = {"hunyuanvideo-1.5-i2v": "HUNYUAN_15_I2V_480_STEP"}
 
+# Rows whose FRAME COUNT is derived from the checkpoint's own VAE at
+# dispatch time, rather than taken from the table above.
+#
+# Owner directive 2026-08-30 section 10: "Do NOT use the previous
+# 121-frame configuration. Do NOT blindly use 61 either. Read the exact
+# legal frame-count requirements." Both Hunyuan rows carry frames=121
+# because that is what the checkpoint's own README recommends, and 121 is
+# perfectly legal for this VAE (4*30+1) — so legal_frames() below would
+# wave it through, and the probe would spend two and a half times the
+# benchmark's needed runtime on a rented card.
+#
+# The rows keep their published numbers, because they document what the
+# checkpoint recommends. The DISPATCH derives what to actually ask for.
+# Rows not listed here are unaffected: LTX's shapes are fixed and measured
+# against real fixtures, and re-deriving them would recalibrate gates that
+# a human already signed off against those exact clips.
+DERIVED_FRAME_ROWS = frozenset({
+    "hunyuanvideo-1.5-i2v",
+    "hunyuanvideo-1.5-i2v-12step",
+})
+
 
 def volume_path(spec_row: dict):
     """The hydrated model's directory, or None when it is not on a volume.

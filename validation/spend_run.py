@@ -1171,6 +1171,52 @@ def probe_failure(output) -> str:
     return code if code in modelprobe.FAILURES else ""
 
 
+def derived_probe_frames(row: dict, *, read=None) -> int:
+    """The frame count to dispatch for a row that derives one.
+
+    Owner directive 2026-08-30 section 10 requires the count be READ from
+    the checkpoint's legal frame-count rule and the shortest valid useful
+    one selected — not the previous 121, and not a 61 picked because it
+    sounds safer.
+
+    THIS DERIVES IT AT DISPATCH TIME rather than trusting the number the
+    free preflight printed. Both read the same pinned revision through the
+    same reader, so they agree; but a number copied out of an earlier run's
+    log is a recollection, and section 17 is explicit that a recollection
+    must never be presented as a measurement.
+
+    Fails closed. There is deliberately no fallback, because the only
+    available fallback is the row's own 121 — the exact configuration the
+    directive rules out.
+    """
+    from validation import hunyuan_preflight as _hp
+
+    reader = read or _hp.shortest_useful_frames
+    try:
+        chosen = reader(row["repo"], row["revision"], row["fps"])
+    except _hp.PreflightFailure as exc:
+        raise SpendStop(
+            "frames-underived",
+            f"the legal frame count could not be derived from "
+            f"{row['repo']}@{row['revision']}: {exc}. Dispatching the row's "
+            f"own {row.get('frames')!r} instead is the configuration the "
+            "owner directive rules out, so nothing is dispatched.",
+        ) from exc
+    frames = chosen.get("frames")
+    if not isinstance(frames, int) or frames < 1:
+        raise SpendStop(
+            "frames-underived",
+            f"the derivation returned {frames!r}, which is not a frame count",
+        )
+    print(
+        f"  frames DERIVED from the checkpoint's VAE (temporal ratio "
+        f"{chosen.get('ratio')!r}): {frames} @ {row['fps']}fps = "
+        f"{chosen.get('seconds')}s — the shortest legal useful count, not "
+        f"the row's published {row.get('frames')}"
+    )
+    return frames
+
+
 def one_job(
     client,
     facts: dict,
@@ -1181,6 +1227,7 @@ def one_job(
     input_key: str | None = None,
     model: str | None = None,
     preview: bool = False,
+    frames: int | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
@@ -1279,6 +1326,12 @@ def one_job(
         # execution, and a probe that never got as far as naming a model.
         # Every op that carries a prompt now sets it in the SAME place.
         payload["params"] = {"prompt": prompt or PROBE_ACTION_PROMPT}
+        if frames is not None:
+            # DERIVED, never tabled — owner directive section 10. The row's
+            # own 121 is legal for this VAE, so nothing downstream would
+            # refuse it; it would simply cost two and a half times the
+            # runtime the benchmark needs. See derived_probe_frames.
+            payload["params"]["frames"] = frames
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
         # worker, so the harness must not send one either.
@@ -1939,6 +1992,9 @@ def main(argv) -> int:
             print(f"  shape: {probe_shape_line(row)}")
             print(f"  published weights: {row['download_gib']:.2f} GiB, "
                   f"loading {row['dtype']} with {row['offload']} offload")
+            frames = None
+            if candidate in modelprobe.DERIVED_FRAME_ROWS:
+                frames = derived_probe_frames(row)
             rows = [
                 one_job(
                     rp,
@@ -1949,6 +2005,7 @@ def main(argv) -> int:
                     input_key=reference,
                     model=candidate,
                     preview=True,
+                    frames=frames,
                 )
             ]
             print(f"PHASE 13-16 PASS — {row['label']} probed and terminated")
