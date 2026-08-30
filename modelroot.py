@@ -37,10 +37,50 @@ from __future__ import annotations
 import json
 import os
 
-# RunPod mounts a serverless network volume here. Overridable by the
-# template only — a provider that changes its mount path should not need a
-# code change — but never by a job.
-VOLUME_ROOT = os.environ.get("MODEL_VOLUME_ROOT") or "/runpod-volume"
+# Where the persistent volume actually is.
+#
+# RunPod mounts a serverless network volume at /runpod-volume. That is the
+# documented path and almost certainly the right one — but "almost
+# certainly" is a two-hour rebuild if it is wrong, because the value would
+# be baked into an image that takes that long to cold-pull. So the path is
+# DETECTED rather than asserted, from a short ordered list, and the choice
+# is reported.
+#
+# The test is not "does this directory exist": the image itself could
+# contain an empty /workspace, and mounting nothing there would then look
+# like a mounted volume. A real mount is on a DIFFERENT filesystem from /,
+# so the device id is what decides.
+#
+# An explicit MODEL_VOLUME_ROOT from the template always wins and is never
+# second-guessed — an operator naming a path has answered the question.
+_CANDIDATES = ("/runpod-volume", "/workspace", "/mnt/volume")
+
+
+def _is_real_mount(path: str) -> bool:
+    try:
+        here = os.stat(path)
+        root = os.stat("/")
+    except OSError:
+        return False
+    if not os.path.isdir(path):
+        return False
+    return here.st_dev != root.st_dev
+
+
+def _detect_volume_root() -> tuple:
+    """(path, how). `how` records the reasoning for the worker's report."""
+    explicit = os.environ.get("MODEL_VOLUME_ROOT")
+    if explicit:
+        return explicit, "MODEL_VOLUME_ROOT (template)"
+    for candidate in _CANDIDATES:
+        if _is_real_mount(candidate):
+            return candidate, f"detected: {candidate} is a separate filesystem"
+    # Nothing mounted. Return the documented default so the refusal names a
+    # path an operator recognises rather than an empty string.
+    return _CANDIDATES[0], "default (no mounted candidate found)"
+
+
+VOLUME_ROOT, VOLUME_ROOT_SOURCE = _detect_volume_root()
 
 # The deterministic layout the owner specified: <volume>/models/oniq/<family>/<dir>
 ONIQ_TREE = os.path.join("models", "oniq")
@@ -104,11 +144,15 @@ def oniq_root() -> str:
 def volume_mounted() -> bool:
     """Is the volume actually there?
 
-    A mount point that exists as a plain directory inside the image would
-    pass a bare isdir(), so the check is on VOLUME_ROOT itself, which the
-    image does not create.
+    An explicitly configured root is trusted as a directory check, because
+    an operator who named a path has made the decision. An auto-detected
+    one must be a real mount: a plain directory baked into the image would
+    otherwise read as a volume and every model would resolve to a path
+    with nothing in it.
     """
-    return os.path.isdir(VOLUME_ROOT)
+    if os.environ.get("MODEL_VOLUME_ROOT"):
+        return os.path.isdir(VOLUME_ROOT)
+    return _is_real_mount(VOLUME_ROOT)
 
 
 def model_dir(model_id: str) -> str:
@@ -238,6 +282,8 @@ def where() -> dict:
     inferring it from how long the worker took to start."""
     report = {
         "volume_root": VOLUME_ROOT,
+        "volume_root_source": VOLUME_ROOT_SOURCE,
+        "volume_candidates": list(_CANDIDATES),
         "volume_mounted": volume_mounted(),
         "oniq_root": oniq_root(),
         "baked_root": BAKED_ROOT,

@@ -51,6 +51,52 @@ def _hydrate(path, files, revision=None):
         json.dump(marker, fh)
 
 
+# --------------------------------------------------- finding the volume
+
+
+def test_an_explicit_template_path_always_wins(monkeypatch, tmp_path):
+    # An operator who names a path has answered the question; the detector
+    # must not second-guess them.
+    monkeypatch.setenv("MODEL_VOLUME_ROOT", str(tmp_path))
+    reloaded = importlib.reload(modelroot)
+    assert reloaded.VOLUME_ROOT == str(tmp_path)
+    assert "template" in reloaded.VOLUME_ROOT_SOURCE
+    assert reloaded.volume_mounted() is True
+
+
+def test_a_plain_directory_in_the_image_is_not_a_mounted_volume(monkeypatch):
+    """The failure this detector exists to prevent.
+
+    /workspace can exist inside the image. If mere existence counted as a
+    mounted volume, every model would resolve to a real-looking path with
+    nothing in it, and the fail-closed contract would report
+    MODEL_NOT_HYDRATED for a volume that was never attached at all —
+    a true statement pointing at the wrong problem.
+    """
+    monkeypatch.delenv("MODEL_VOLUME_ROOT", raising=False)
+    reloaded = importlib.reload(modelroot)
+    # "/" is a directory and is trivially not a separate filesystem from
+    # itself, which is exactly the discrimination being made.
+    assert reloaded._is_real_mount("/") is False
+    assert reloaded._is_real_mount("/definitely/not/here") is False
+
+
+def test_with_nothing_mounted_the_refusal_names_the_documented_path(monkeypatch):
+    monkeypatch.delenv("MODEL_VOLUME_ROOT", raising=False)
+    reloaded = importlib.reload(modelroot)
+    assert reloaded.VOLUME_ROOT == "/runpod-volume"
+    assert "no mounted candidate" in reloaded.VOLUME_ROOT_SOURCE
+    assert reloaded.volume_mounted() is False
+
+
+def test_where_reports_how_the_root_was_chosen(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODEL_VOLUME_ROOT", str(tmp_path))
+    reloaded = importlib.reload(modelroot)
+    report = reloaded.where()
+    assert report["volume_root_source"]
+    assert "/runpod-volume" in report["volume_candidates"]
+
+
 # ------------------------------------------------- experimental: fail closed
 
 
@@ -200,13 +246,28 @@ def test_nothing_a_caller_sends_can_steer_the_root():
     # Nothing that carries a job, a request or a user.
     assert imported <= {"json", "os", "__future__"}, sorted(imported)
 
-    # Exactly one environment read, and it names the template's variable.
-    envs = [
-        n for n in _ast.walk(tree)
-        if isinstance(n, _ast.Attribute) and n.attr == "environ"
-    ]
-    assert len(envs) == 1
-    assert 'os.environ.get("MODEL_VOLUME_ROOT")' in source
+    # EVERY environment read names MODEL_VOLUME_ROOT and nothing else.
+    #
+    # Counting the reads was the earlier form of this check, and it broke
+    # the moment mount detection legitimately needed a second one. The
+    # count was never the property worth guarding: what matters is that no
+    # OTHER variable can steer where weights load from. Asserting the
+    # argument is both stricter and stable under refactoring.
+    reads = []
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, _ast.Attribute) or func.attr != "get":
+            continue
+        target = func.value
+        if isinstance(target, _ast.Attribute) and target.attr == "environ":
+            assert node.args, "os.environ.get() with no argument"
+            first = node.args[0]
+            assert isinstance(first, _ast.Constant), _ast.dump(first)
+            reads.append(first.value)
+    assert reads, "no environment read found — the detector must read one"
+    assert set(reads) == {"MODEL_VOLUME_ROOT"}, reads
 
 
 def test_where_reports_the_refusal_code_rather_than_a_path(volume):
