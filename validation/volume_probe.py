@@ -179,7 +179,26 @@ def patch_schema(doc: dict):
                 ["requestBody"]["content"]["application/json"]["schema"])
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
-    out = {"keys": sorted(body)}
+
+    # FOLLOW THE $ref. The first version of this printed
+    # {"$ref": "#/components/schemas/EndpointUpdateInput"} and called it the
+    # schema — a pointer rendered as an answer. An unresolved reference is
+    # exactly as uninformative as the property-name list it replaced.
+    seen = set()
+    while isinstance(body, dict) and "$ref" in body and len(body) <= 2:
+        ref = body["$ref"]
+        if ref in seen:
+            return {"error": f"circular $ref at {ref}"}
+        seen.add(ref)
+        if not ref.startswith("#/"):
+            return {"error": f"non-local $ref, cannot resolve: {ref}"}
+        node = doc
+        for part in ref[2:].split("/"):
+            node = node.get(part) if isinstance(node, dict) else None
+            if node is None:
+                return {"error": f"$ref {ref} does not resolve"}
+        body = node
+    out = {"keys": sorted(body), "resolved_from": sorted(seen) or None}
     for key in ("required", "oneOf", "anyOf", "allOf", "not",
                 "additionalProperties", "dependentRequired",
                 "dependentSchemas", "$ref"):
