@@ -558,6 +558,17 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # detaching. The rate it reports is measured from this account's
         # own billing, never recalled.
         "volume-setup",
+        # endpoint-template joined 2026-08-30 as the sixth job-level
+        # mutation. The owner deleted the previous endpoints and created
+        # 9gh6qbou1in8yb in the console; it came up naming a templateId the
+        # account does not have — the hhhdwtjw0y dangling reference again.
+        # This points the endpoint at a template that ALREADY EXISTS, so
+        # unlike template-attach it creates nothing and cannot leave a
+        # correct image sitting on a template with no R2 environment. It
+        # refuses a target it cannot prove is on the account, which is the
+        # difference between repairing a dangling reference and writing a
+        # second one over it.
+        "endpoint-template",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

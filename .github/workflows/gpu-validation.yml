@@ -35,9 +35,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-setup = create ONE network volume and attach it to ONE endpoint (literal token required). Storage spend, measured at $0.07/GB-month from this account's own billing; reversible by detaching. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-setup = create ONE network volume and attach it to ONE endpoint (literal token required). Storage spend, measured at $0.07/GB-month from this account's own billing; reversible by detaching. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. endpoint-template = point ONE endpoint at a template that ALREADY EXISTS, $0 (type POINT-AT-TEMPLATE into attach_token) - the repair for an endpoint whose templateId names a template the account does not have; refuses a target that is not on the account, so one dangling reference cannot become another. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup, endpoint-template]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -94,7 +94,7 @@ on:
         type: string
         default: ""
       attach_token:
-        description: "Type ATTACH-TEMPLATE (exactly) to allow template-attach. Creates ONE template and repoints ONE endpoint."
+        description: "Type ATTACH-TEMPLATE (exactly) for template-attach, which CREATES one template and repoints one endpoint. Type POINT-AT-TEMPLATE (exactly) for endpoint-template, which creates nothing and points the endpoint at the existing template named in template_id. One input carries both literals because workflow_dispatch is capped at 25 inputs and this file is at the cap; mode selects the job, the literal authorizes it."
         type: string
         default: ""
       replaces_template:
@@ -410,6 +410,41 @@ jobs:
             "${{ inputs.attach_token }}" \
             "${{ inputs.replaces_template }}" \
             "${{ inputs.replace_token }}"
+
+  endpoint_template:
+    # Owner directive 2026-08-30. The owner deleted the previous endpoints
+    # and created 9gh6qbou1in8yb in the console; it came up referencing
+    # templateId ei22bjog46, which is not among the fifteen templates the
+    # account reports. That is the hhhdwtjw0y failure again on a new id.
+    #
+    # This points the endpoint at a template that ALREADY EXISTS rather
+    # than creating one. aqa3wkdf8g carries the digest-pinned image, 201 GB
+    # of container disk and the R2 environment the owner set by hand; a
+    # freshly created template would carry the image and NO environment,
+    # and every job against it would fail closed with
+    # storage-not-configured.
+    #
+    # $0: templateId is the only field sent, workers are not started by a
+    # PATCH, and the module refuses a target it cannot prove exists.
+    name: "endpoint template - point at an EXISTING template, $0"
+    if: inputs.mode == 'endpoint-template' && inputs.attach_token == 'POINT-AT-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Prove the template exists, point at it, re-read the endpoint"
+        run: |
+          python -m validation.endpoint_template \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.template_id }}" \
+            "${{ inputs.attach_token }}"
 
   template_retarget:
     # Repoints the endpoint's EXISTING template at a new image and a bigger
