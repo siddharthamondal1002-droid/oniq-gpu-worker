@@ -1085,3 +1085,50 @@ def test_no_step_run_block_contains_a_yaml_key_from_a_neighbour():
                     f"its run script: {hit.group(0).strip()!r} — the step "
                     "was split and bash will try to execute it"
                 )
+
+
+def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
+    """gpu-readonly.yml exists so a $0 read can happen WHILE a paid run
+    holds gpu-validation's lock.
+
+    Two properties make it safe, and both are asserted rather than
+    intended: a DIFFERENT concurrency group (otherwise it queues behind
+    the very run it is meant to observe, which is the blindness it was
+    written to remove), and no reachable mutating verb.
+    """
+    doc, raw = _load("gpu-readonly.yml")
+    paid, _ = _load("gpu-validation.yml")
+
+    assert doc["concurrency"]["group"] != paid["concurrency"]["group"], (
+        "sharing the paid workflow's group would queue every read behind "
+        "the run it exists to look at"
+    )
+    assert doc["concurrency"]["cancel-in-progress"] is False
+
+    # Only read-only modules, and only the three read-only modes.
+    mode = _triggers(doc)["workflow_dispatch"]["inputs"]["mode"]
+    assert mode["options"] == ["queue-probe", "template-probe", "volume-probe"]
+    for allowed in ("validation.queue_probe", "validation.template_probe",
+                    "validation.volume_probe"):
+        assert allowed in raw
+
+    # The spend driver and every endpoint mutation are unreachable from here.
+    for forbidden in ("spend_run", "standby_zero", "workers_min_zero",
+                      "template_attach", "template_retarget", "template_env",
+                      "endpoint_timeout", "endpoint_template", "volume_setup",
+                      "stale_run", "SPEND"):
+        assert forbidden not in raw, forbidden
+
+    # And the modules it DOES name hold no mutating verb themselves.
+    import inspect
+
+    from validation import queue_probe, template_probe, volume_probe
+
+    for module in (queue_probe, template_probe, volume_probe):
+        source = inspect.getsource(module)
+        for verb in ("attach_template", "attach_network_volume",
+                     "create_network_volume", "set_execution_timeout",
+                     "retarget_template", "create_template",
+                     "set_template_env", "set_workers_min_zero",
+                     "set_workers_standby_zero", "purge_queue", "run_sync"):
+            assert verb not in source, f"{module.__name__}: {verb}"
