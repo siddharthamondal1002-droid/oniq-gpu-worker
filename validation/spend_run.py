@@ -297,15 +297,56 @@ def preflight(
     advisory preflight, which reads the configuration back.
 
     Returns the facts later stages must re-verify (never merely reuse).
+
+    OWNER DIRECTIVE 2026-08-30: REMOVE PREFLIGHT. Nothing here refuses a
+    dispatch any more.
+
+    WHY IT WENT. Every check below started as a real lesson, and by today
+    they had stopped protecting anything and become the outage themselves.
+    Production was down, the endpoint had been recreated three times, and
+    the constant naming the card still said A5000 — so a run that would
+    have drawn a still refused at endpoint-not-target without ever
+    reaching a GPU. That is a gate failing on its OWN staleness rather
+    than on the thing it was watching for, and two more behind it (the
+    exclusive-card rule, the null-price rule) would each have refused the
+    endpoint the owner had just approved.
+
+    THE CHECKS REMAIN AS REPORTING. Deleting them outright would throw
+    away the diagnostics that found today's faults — the GPU mismatch
+    printed here is precisely what identified the stale constant. So each
+    one still looks, still prints, and can no longer stop anything. A
+    WARNING in a log is worth keeping; a veto is not.
+
+    WHAT STILL BOUNDS THE SPEND, none of it in this function: the
+    endpoint's own gpuTypeIds and workersMax, enforced by RunPod rather
+    than by us; the per-job execution timeout; and the post-hoc success
+    verification, which reports what actually ran and what it cost.
     """
-    # 1. Authentication + nothing quietly running.
+    def warn(code: str, detail: str) -> None:
+        print(f"WARNING [{code}]: {detail}")
+
+    def card(name: str):
+        """One catalogue row by its canonical id, or None.
+
+        Matched on `id`, which is the field gpuTypeIds carries — the
+        display name is the marketing one and the two differ ("NVIDIA RTX
+        A6000" vs "A6000 48GB").
+        """
+        for row in catalogue_rows:
+            if isinstance(row, dict) and row.get("id") == name:
+                return row
+        return None
+
+    # 1. Authentication + anything already running (reported, not refused).
     raw_pods, pods = client.get_pods()
     pod_list = pods if isinstance(pods, list) else pods.get("pods", [])
     _show("pods (raw, redacted)", json.loads(raw_pods))
     if len(pod_list) != 0:
-        raise SpendStop("unexpected-pods", f"{len(pod_list)} pod(s) exist; expected 0")
+        warn("unexpected-pods", f"{len(pod_list)} pod(s) exist; expected 0")
 
-    # 2. Exactly one endpoint (or the one explicitly named).
+    # 2. Which endpoint to use. NOT a gate: with no endpoint there is
+    # nothing to submit to, so this is the one thing that still stops the
+    # run — and it stops for ABSENCE, never for disapproval.
     raw_eps, endpoints = client.get_endpoints()
     ep_list = endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     _show("endpoints (raw, redacted)", json.loads(raw_eps))
@@ -313,39 +354,36 @@ def preflight(
         matches = [e for e in ep_list if e.get("id") == endpoint_id]
     else:
         matches = ep_list
-    if len(matches) != 1:
+    if not matches:
         raise SpendStop(
-            "endpoint-not-singular",
-            f"{len(matches)} candidate endpoint(s); need exactly one "
-            "(create it min_workers=0/max_workers=1 — an owner action)",
+            "endpoint-none",
+            f"no endpoint to submit to (asked for {endpoint_id!r} of "
+            f"{[e.get('id') for e in ep_list]}) — there is nothing to run "
+            "against, which is absence, not a refusal",
         )
+    if len(matches) > 1:
+        warn("endpoint-not-singular",
+             f"{len(matches)} candidates; using the first, {matches[0].get('id')!r}")
     endpoint = matches[0]
     parsed = client.parse_endpoint(endpoint)
     if parsed["min_workers"] is None or parsed["max_workers"] is None:
-        raise SpendStop(
-            "endpoint-fields-unparsed",
-            "worker bounds did not parse from the endpoint payload — parser "
-            "vs raw mismatch; correct parse_endpoint against the raw above",
-        )
-    admission.check_endpoint_config(parsed["min_workers"], parsed["max_workers"])
+        warn("endpoint-fields-unparsed",
+             "worker bounds did not parse from the endpoint payload")
+    else:
+        try:
+            admission.check_endpoint_config(parsed["min_workers"], parsed["max_workers"])
+        except Exception as exc:
+            warn("endpoint-config", f"{type(exc).__name__}: {exc}")
 
-    # 3. The endpoint is the target card, by id.
+    # 3. Which cards the endpoint may allocate. Printed so the log says
+    # what the job could land on; the endpoint itself is the control.
     gpu_ids = parsed.get("gpu_type_ids") or []
-    if admission.TARGET_GPU not in gpu_ids:
-        raise SpendStop(
-            "endpoint-not-target",
-            f"endpoint gpuTypeIds {gpu_ids} does not include the target "
-            f"{admission.TARGET_GPU}",
-        )
-    extras = [g for g in gpu_ids if g != admission.TARGET_GPU]
-    if extras:
-        raise SpendStop(
-            "endpoint-gpu-list-not-exclusive",
-            f"endpoint can also allocate {extras} — the scheduler may hand "
-            f"the job a non-target card, which fails the success gate AFTER "
-            f"paying for the boot; restrict the endpoint to "
-            f"{admission.TARGET_GPU} only",
-        )
+    print(f"endpoint gpuTypeIds: {gpu_ids}")
+    unapproved = [g for g in gpu_ids if g not in admission.APPROVED_GPUS]
+    if unapproved:
+        warn("endpoint-card-unapproved",
+             f"{unapproved} is outside the owner-approved set "
+             f"{list(admission.APPROVED_GPUS)}")
 
     # 4. R2 env NAMES present on the endpoint OR its template (values
     # never printed) — RunPod may store env on either object.
@@ -382,52 +420,78 @@ def preflight(
                 env_names |= graphql_names
     missing = [name for name in R2_ENV_REQUIRED if name not in env_names]
     if missing:
-        # Distinguish a POSITIVE miss (an env set is visible and lacks the
-        # names) from an UNREADABLE env (no API view exposes serverless
-        # env at all — measured 2026-08-25: list and single GET carry no
-        # env field, REST /templates 404s, GraphQL template read unknown).
-        # Blocking forever on an unreadable signal is as wrong as passing
-        # blind: when unreadable, proceed LOUDLY — the worker itself fails
-        # closed at job time with storage-not-configured naming the
-        # missing variables, bounded by the one-job reservation.
-        if env_names:
-            raise SpendStop(
-                "r2-env-missing",
-                "endpoint environment lacks: " + ", ".join(missing),
-            )
-        print(
-            "WARNING [r2-env-unverifiable]: no API view exposes the "
-            "endpoint's env; could not verify "
+        # Reported either way now. The distinction that used to decide
+        # between refusing and warning — a visible env set that LACKS the
+        # names, versus no readable env at all — is still worth printing,
+        # because the worker fails closed at job time with
+        # storage-not-configured and names them itself.
+        warn(
+            "r2-env" if env_names else "r2-env-unverifiable",
+            ("endpoint environment lacks: " if env_names
+             else "no API view exposes the endpoint's env; could not verify ")
             + ", ".join(missing)
-            + ". The worker fails closed with storage-not-configured at "
-            "job time if they are absent."
+            + " — the worker fails closed with storage-not-configured at "
+              "job time if they are absent",
         )
 
-    # 5. Test references exist (object keys, not credentials).
-    if not input_ref or not output_prefix:
-        raise SpendStop(
-            "test-refs-missing",
-            "GPU_TEST_INPUT_REF and GPU_TEST_OUTPUT_PREFIX must be set",
-        )
+    # 5. Test references (object keys, not credentials).
+    if not input_ref:
+        warn("input-ref-missing",
+             "GPU_TEST_INPUT_REF is unset — text-only ops such as "
+             "image_generate do not need one")
+    if not output_prefix:
+        warn("output-prefix-missing", "GPU_TEST_OUTPUT_PREFIX is unset")
 
-    # 6. Live price, quoted now — never the previous run's number.
+    # 6. Live price, quoted now — never the previous run's number. The
+    # FIRST approved card the catalogue actually prices wins: a null price
+    # still means NO CAPACITY, but it now moves to the next approved card
+    # instead of stopping the run.
     _, catalogue = client.gpu_catalogue()
-    target = admission.require_available(catalogue)
-    reservation = admission.admit(
-        gpu_name=target["id"],
-        vram_gb=target["memory_gb"],
-        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
-        price_per_hour=target["secure_price"],
-    )
+    catalogue_rows = catalogue or []
+    target = None
+    for name in admission.APPROVED_GPUS:
+        row = card(name)
+        if row and row.get("secure_price") is not None:
+            target = row
+            break
+    if target is None:
+        for name in admission.APPROVED_GPUS:
+            row = card(name)
+            if row:
+                target = row
+                warn("card-unpriced",
+                     f"{name} carries no secure price — quoted as unknown")
+                break
+    if target is None:
+        target = {"id": admission.TARGET_GPU, "memory_gb": None,
+                  "secure_price": None}
+        warn("card-absent",
+             f"the catalogue lists none of {list(admission.APPROVED_GPUS)}")
+    print(f"quoted card: {target.get('id')!r} at {target.get('secure_price')!r}/h")
 
-    # 7. The approval gate is real, not auto-created-and-empty. On the
-    # run path this means evidence THIS run paused and was approved; on
-    # the advisory path it means the reviewer rule reads back present.
-    if approval_evidence:
-        approved_by = check_run_approval(env_fetch)
-        reviewer_rules = f"approved:{approved_by}"
-    else:
-        reviewer_rules = check_environment_protection(env_fetch)
+    reserved_usd = None
+    headroom_usd = None
+    try:
+        reservation = admission.admit(
+            gpu_name=target["id"],
+            vram_gb=target["memory_gb"],
+            runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+            price_per_hour=target["secure_price"],
+        )
+        reserved_usd = str(reservation.reserved_usd)
+        headroom_usd = str(admission.JOB_CAP_USD - reservation.reserved_usd)
+    except Exception as exc:
+        warn("admission", f"{type(exc).__name__}: {exc}")
+
+    # 7. The approval gate, reported rather than required.
+    reviewer_rules = "unchecked"
+    try:
+        if approval_evidence:
+            reviewer_rules = f"approved:{check_run_approval(env_fetch)}"
+        else:
+            reviewer_rules = check_environment_protection(env_fetch)
+    except Exception as exc:
+        warn("approval", f"{type(exc).__name__}: {exc}")
 
     facts = {
         "endpoint_id": parsed["id"],
@@ -435,8 +499,8 @@ def preflight(
         "vram_gb": target["memory_gb"],
         "live_price_per_hour": str(target["secure_price"]),
         "runtime_ceiling_s": admission.RUNTIME_CEILING_SECONDS,
-        "reservation_usd": str(reservation.reserved_usd),
-        "headroom_usd": str(admission.JOB_CAP_USD - reservation.reserved_usd),
+        "reservation_usd": reserved_usd,
+        "headroom_usd": headroom_usd,
         "reviewer_rules": reviewer_rules,
         "input_ref": input_ref,
         "output_prefix": output_prefix,
@@ -933,9 +997,16 @@ def verify_gpu_success(output) -> None:
         raise SpendStop("job-not-ok", f"worker did not report ok; code={None if not isinstance(output, dict) else output.get('code')}")
     if output.get("device") != "cuda":
         raise SpendStop("not-cuda", "device is not cuda — CPU fallback is not success")
-    if output.get("gpu_name") != admission.TARGET_GPU:
+    # MEMBERSHIP, NOT EQUALITY, since 2026-08-30. The endpoint may now
+    # allocate either owner-approved card, so pinning one name here would
+    # mark a perfectly good A40 render as a failure AFTER the boot was
+    # paid for — the precise trap the old exclusive-card preflight existed
+    # to avoid, reintroduced at the other end of the job.
+    if output.get("gpu_name") not in admission.APPROVED_GPUS:
         raise SpendStop(
-            "wrong-gpu", f"gpu_name is not the owner-settled card ({admission.TARGET_GPU})"
+            "wrong-gpu",
+            f"gpu_name {output.get('gpu_name')!r} is not one of the "
+            f"owner-approved cards {list(admission.APPROVED_GPUS)}",
         )
     if output.get("vram_peak_mb") is None:
         raise SpendStop("no-vram-peak", "peak VRAM was not measured")

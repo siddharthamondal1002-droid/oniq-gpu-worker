@@ -15,9 +15,12 @@ def _gpu_types_raw(price=0.5, lowest=0.22):
             "data": {
                 "gpuTypes": [
                     {
-                        "id": "NVIDIA RTX A5000",
-                        "displayName": "RTX A5000",
-                        "memoryInGb": 24,
+                        # The card comes from admission, never a literal:
+                        # the owner changed it twice in one day and every
+                        # hardcoded copy became a false failure.
+                        "id": admission.TARGET_GPU,
+                        "displayName": "approved card",
+                        "memoryInGb": 48,
                         "secureCloud": True,
                         "communityCloud": True,
                         "securePrice": price,
@@ -40,7 +43,7 @@ def _endpoint(env=None, gpus=None, mn=0, mx=1, standby=0):
         "workersMin": mn,
         "workersMax": mx,
         "workersStandby": standby,
-        "gpuTypeIds": gpus or ["NVIDIA RTX A5000"],
+        "gpuTypeIds": gpus or [admission.TARGET_GPU],
         "idleTimeout": 5,
         "env": env
         if env is not None
@@ -325,22 +328,24 @@ def test_preflight_on_the_run_path_uses_approval_evidence():
     assert facts["reviewer_rules"] == "approved:the-owner"
 
 
-def test_preflight_on_the_run_path_stops_without_an_approval():
+def test_a_missing_approval_is_reported_not_refused(capsys):
+    """Owner directive 2026-08-30. The approval record is still read and
+    still printed — but a dispatch the owner has already made by typing
+    SPEND is not re-litigated by asking GitHub whether it happened."""
     def fetch(url, token):
         if url.endswith("/approvals"):
             return 200, []
         return _env_ok(url, token)
 
-    client = FakeClient()
-    with pytest.raises(spend_run.SpendStop) as exc:
-        spend_run.preflight(
-            client,
-            input_ref="in/test.png",
-            output_prefix="out/validation",
-            env_fetch=fetch,
-            approval_evidence=True,
-        )
-    assert exc.value.code == "approval-not-recorded"
+    facts = spend_run.preflight(
+        FakeClient(),
+        input_ref="in/test.png",
+        output_prefix="out/validation",
+        env_fetch=fetch,
+        approval_evidence=True,
+    )
+    assert facts["reviewer_rules"] == "unchecked"
+    assert "WARNING [approval]" in capsys.readouterr().out
 
 
 def test_default_env_fetch_keeps_the_error_body(monkeypatch):
@@ -382,53 +387,74 @@ def test_preflight_happy_path_reserves_thirteen_cents():
     assert facts["reviewer_rules"] == 1
 
 
-def test_preflight_refuses_existing_pods():
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(pods=[{"id": "p1"}]))
-    assert exc.value.code == "unexpected-pods"
+# ------------------------------------------- preflight REPORTS, never vetoes
+#
+# Owner directive 2026-08-30: remove preflight. These tests used to assert
+# that each condition RAISED. They now assert the opposite, and they are
+# kept rather than deleted because the reporting is the part worth having:
+# the stale-card warning below is exactly what identified today's fault.
+#
+# The one thing that still stops a run is ABSENCE — no endpoint means
+# nothing to submit to — and that is asserted separately.
 
 
-def test_preflight_refuses_zero_endpoints():
+def test_an_existing_pod_is_reported_not_refused(capsys):
+    facts = _preflight(FakeClient(pods=[{"id": "p1"}]))
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [unexpected-pods]" in capsys.readouterr().out
+
+
+def test_zero_endpoints_still_stops_because_there_is_nothing_to_run_on():
+    """Absence, not disapproval. With no endpoint there is no dispatch to
+    make, so this is the one refusal preflight keeps."""
     with pytest.raises(spend_run.SpendStop) as exc:
         _preflight(FakeClient(endpoints=[]))
-    assert exc.value.code == "endpoint-not-singular"
+    assert exc.value.code == "endpoint-none"
 
 
-def test_preflight_refuses_ambiguous_endpoints_without_id():
+def test_ambiguous_endpoints_take_the_first_and_say_so(capsys):
     two = [_endpoint(), dict(_endpoint(), id="ep-456")]
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=two))
-    assert exc.value.code == "endpoint-not-singular"
-    facts = _preflight(FakeClient(endpoints=two), endpoint_id="ep-456")
-    assert facts["endpoint_id"] == "ep-456"
+    facts = _preflight(FakeClient(endpoints=two))
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [endpoint-not-singular]" in capsys.readouterr().out
+    named = _preflight(FakeClient(endpoints=two), endpoint_id="ep-456")
+    assert named["endpoint_id"] == "ep-456"
 
 
-def test_preflight_refuses_unparsed_endpoint_fields():
+def test_unparsed_endpoint_fields_are_reported_not_refused(capsys):
     weird = {"id": "ep-1", "minWorkers": 0, "maxWorkers": 1,
-             "gpuTypeIds": ["NVIDIA RTX A5000"], "env": _endpoint()["env"]}
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=[weird]))
-    assert exc.value.code == "endpoint-fields-unparsed"
+             "gpuTypeIds": [admission.TARGET_GPU], "env": _endpoint()["env"]}
+    facts = _preflight(FakeClient(endpoints=[weird]))
+    assert facts["endpoint_id"] == "ep-1"
+    assert "WARNING [endpoint-fields-unparsed]" in capsys.readouterr().out
 
 
-def test_preflight_refuses_non_target_endpoint():
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=[_endpoint(gpus=["NVIDIA GeForce RTX 3090"])]))
-    assert exc.value.code == "endpoint-not-target"
+def test_a_card_outside_the_approved_set_is_reported_not_refused(capsys):
+    """THE ONE THAT CAUSED THE OUTAGE. A stale card constant refused a
+    dispatch that would have worked — the gate failing on its own age
+    rather than on the endpoint. It warns now, and the run proceeds."""
+    facts = _preflight(FakeClient(endpoints=[_endpoint(gpus=["NVIDIA GeForce RTX 3090"])]))
+    out = capsys.readouterr().out
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [endpoint-card-unapproved]" in out
+    assert "NVIDIA GeForce RTX 3090" in out
 
 
-def test_preflight_refuses_bad_worker_bounds():
-    with pytest.raises(admission.AdmissionRefused):
-        _preflight(FakeClient(endpoints=[_endpoint(mn=1, mx=1)]))
+def test_bad_worker_bounds_are_reported_not_refused(capsys):
+    facts = _preflight(FakeClient(endpoints=[_endpoint(mn=1, mx=1)]))
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [endpoint-config]" in capsys.readouterr().out
 
 
-def test_preflight_names_missing_r2_vars_only():
+def test_missing_r2_vars_are_named_and_only_the_missing_ones(capsys):
+    """Still names exactly what is absent — a warning that listed the
+    variables which ARE set would be noise."""
     env = {"R2_S3_ENDPOINT": "https://x"}
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=[_endpoint(env=env)]))
-    assert exc.value.code == "r2-env-missing"
-    assert "R2_ACCESS_KEY_ID" in exc.value.message
-    assert "R2_S3_ENDPOINT" not in exc.value.message
+    _preflight(FakeClient(endpoints=[_endpoint(env=env)]))
+    out = capsys.readouterr().out
+    assert "WARNING [r2-env]" in out
+    assert "R2_ACCESS_KEY_ID" in out
+    assert "storage-not-configured" in out
 
 
 def test_preflight_never_prints_endpoint_secret_values(capsys):
@@ -439,17 +465,22 @@ def test_preflight_never_prints_endpoint_secret_values(capsys):
     assert "R2_SECRET_ACCESS_KEY" in printed  # the NAME is verified
 
 
-def test_preflight_requires_test_refs():
-    with pytest.raises(spend_run.SpendStop) as exc:
-        spend_run.preflight(FakeClient(), input_ref="", output_prefix="",
-                            env_fetch=_env_ok)
-    assert exc.value.code == "test-refs-missing"
+def test_absent_test_refs_are_reported_not_refused(capsys):
+    facts = spend_run.preflight(FakeClient(), input_ref="", output_prefix="",
+                                env_fetch=_env_ok)
+    out = capsys.readouterr().out
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [input-ref-missing]" in out
+    assert "WARNING [output-prefix-missing]" in out
 
 
-def test_preflight_stops_when_price_over_cap():
-    with pytest.raises(admission.AdmissionRefused) as exc:
-        _preflight(FakeClient(price=2.04))
-    assert exc.value.code == "over-job-cap"
+def test_a_price_over_the_cap_is_reported_not_refused(capsys):
+    """The cap is still computed and still printed; it no longer vetoes.
+    What actually bounds this job is the endpoint's own workersMax and the
+    per-job execution timeout, both enforced by RunPod."""
+    facts = _preflight(FakeClient(price=2.04))
+    assert facts["reservation_usd"] is None      # admit refused, so unquoted
+    assert "WARNING [admission]" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- one job
@@ -465,7 +496,7 @@ def _good_status(execution_ms=8000):
             "op": "image_preprocess",
             "output_key": "out/validation/job-1.jpeg",
             "device": "cuda",
-            "gpu_name": "NVIDIA RTX A5000",
+            "gpu_name": admission.TARGET_GPU,
             "vram_total_mb": 24576,
             "vram_peak_mb": 812,
             "output_bytes": 51234,
@@ -492,7 +523,7 @@ def test_one_job_happy_path_row():
     row = _run_one(client)
     assert row["termination"] == spend_run.TERMINATION_CONFIRMED
     assert row["cost_usd"] == "0.01"  # 8s at 0.5/h, ceiled to the cent
-    assert row["gpu_name"] == "NVIDIA RTX A5000"
+    assert row["gpu_name"] == admission.TARGET_GPU
     assert client.submitted[0][1]["op"] == "image_preprocess"
 
 
@@ -603,7 +634,7 @@ def _good_video_status(execution_ms=180_000):
             "op": "video_generate",
             "output_key": "out/validation/ltx-canary-001.mp4",
             "device": "cuda",
-            "gpu_name": "NVIDIA RTX A5000",
+            "gpu_name": admission.TARGET_GPU,
             "vram_total_mb": 24576,
             "vram_peak_mb": 9000,
             "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",
@@ -1023,16 +1054,24 @@ def test_actual_cost_rounds_up():
     assert spend_run.actual_cost_usd(80_000, Decimal("0.5")) == Decimal("0.02")
 
 
-def test_preflight_refuses_a_non_exclusive_gpu_list():
-    # Measured 2026-08-25: the created endpoint listed A5000 and L4
-    # beside the 3090 — a scheduler could allocate the wrong card and
-    # bill its boot before Phase 14 refuses it.
-    mixed = _endpoint(gpus=["NVIDIA RTX A5000", "NVIDIA L4",
-                            "NVIDIA GeForce RTX 3090"])
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(FakeClient(endpoints=[mixed]))
-    assert exc.value.code == "endpoint-gpu-list-not-exclusive"
-    assert "NVIDIA L4" in exc.value.message
+def test_a_multi_card_endpoint_names_only_the_unapproved_ones(capsys):
+    """The exclusive-card rule is gone: the endpoint deliberately carries
+    TWO approved cards now, because naming one left it unplaceable.
+
+    What survives is the useful half — cards OUTSIDE the owner's set are
+    named, and the approved ones are not scolded for being present."""
+    mixed = _endpoint(gpus=list(admission.APPROVED_GPUS) + ["NVIDIA L4"])
+    facts = _preflight(FakeClient(endpoints=[mixed]))
+    out = capsys.readouterr().out
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [endpoint-card-unapproved]" in out
+    assert "NVIDIA L4" in out
+
+
+def test_both_approved_cards_together_draw_no_warning_at_all(capsys):
+    both = _endpoint(gpus=list(admission.APPROVED_GPUS))
+    _preflight(FakeClient(endpoints=[both]))
+    assert "endpoint-card-unapproved" not in capsys.readouterr().out
 
 
 def test_preflight_finds_r2_env_on_the_template():
@@ -1053,17 +1092,22 @@ def test_preflight_finds_r2_env_on_the_template():
     assert facts["endpoint_id"] == "ep-123"
 
 
-def test_preflight_stops_on_a_positive_env_miss():
-    # An env set IS visible and lacks the names: hard stop.
+def test_a_positive_env_miss_is_reported_and_distinguished(capsys):
+    """An env set IS visible and lacks the names. That used to be a hard
+    stop; it is now a warning that still distinguishes itself from the
+    unreadable case, because 'we looked and they are absent' and 'no API
+    exposes env at all' are different facts."""
     ep = _endpoint(env={"OTHER_VAR": "x"})
     ep["templateId"] = "tpl-1"
     client = FakeClient(endpoints=[ep])
     client.get_endpoint = lambda eid: ("{}", {"id": eid})
     client.get_template = lambda tid: ("{}", {"id": tid, "env": {}})
     client.template_env_names_graphql = lambda tid: None
-    with pytest.raises(spend_run.SpendStop) as exc:
-        _preflight(client)
-    assert exc.value.code == "r2-env-missing"
+    facts = _preflight(client)
+    out = capsys.readouterr().out
+    assert facts["endpoint_id"] == "ep-123"
+    assert "WARNING [r2-env]:" in out
+    assert "endpoint environment lacks" in out
 
 
 def test_preflight_warns_and_passes_when_env_is_unreadable(capsys):
@@ -1237,7 +1281,7 @@ def _good_image_status(execution_ms=30_000):
             "op": "image_generate",
             "output_key": "out/validation/plate-001.png",
             "device": "cuda",
-            "gpu_name": "NVIDIA RTX A5000",
+            "gpu_name": admission.TARGET_GPU,
             "vram_total_mb": 24576,
             "vram_peak_mb": 9000,
             "model": "Lightricks/LTX-Video-0.9.7-distilled#distilled",
@@ -1419,8 +1463,14 @@ def _stop_code(client):
     return None
 
 
-#: every gate the new invariant owns. Standby is deliberately not here.
-INVARIANT_STOPS = {
+#: Owner directive 2026-08-30 emptied this. Every configuration gate the
+#: invariant used to own is gone; each condition is reported instead. The
+#: set is kept, empty, so that RE-ADDING a veto is a visible edit here
+#: rather than something that arrives quietly inside a diff.
+INVARIANT_STOPS = set()
+
+#: The conditions that used to stop a dispatch. None of them may now.
+FORMER_GATES = {
     "unexpected-pods",
     "endpoint-config-refused",
     "endpoint-not-target",
@@ -1430,44 +1480,52 @@ INVARIANT_STOPS = {
 
 
 def test_standby_one_alone_does_NOT_block():
-    """The directive's whole point: a standby of 1, with every real
-    condition satisfied, passes every gate the invariant owns.
+    """The earlier directive's point, still true: a standby of 1, with
+    every real condition satisfied, stops nothing.
 
-    Preflight continues past them into stages this fixture does not model
-    (test refs, live quote), so the assertion is that no INVARIANT gate
-    fired — not that preflight ran to completion.
+    Preflight continues past these into stages this fixture does not model
+    (live quote), so the assertion is that no CONFIGURATION gate fired —
+    not that preflight ran to completion.
     """
     code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersStandby=1)))
-    assert code not in INVARIANT_STOPS, code
+    assert code not in FORMER_GATES, code
 
 
-def test_a_running_pod_blocks():
+def test_a_running_pod_no_longer_blocks():
     code = _stop_code(_InvariantClient(pods=[{"id": "pod-1"}]))
-    assert code == "unexpected-pods"
+    assert code not in FORMER_GATES, code
 
 
-def test_min_workers_above_zero_blocks():
+def test_min_workers_above_zero_no_longer_blocks():
     code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersMin=1)))
-    assert code == "endpoint-config-refused"
+    assert code not in FORMER_GATES, code
 
 
-def test_max_workers_above_one_blocks():
+def test_max_workers_above_one_no_longer_blocks():
     code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(workersMax=2)))
-    assert code == "endpoint-config-refused"
+    assert code not in FORMER_GATES, code
 
 
-def test_a_second_gpu_on_the_allow_list_blocks():
+def test_a_second_gpu_no_longer_blocks():
+    """The endpoint carries two cards ON PURPOSE now — one card named left
+    it throttled with nothing placeable."""
     code = _stop_code(
         _InvariantClient(
-            endpoint=_inv_endpoint(gpuTypeIds=[admission.TARGET_GPU, "NVIDIA L4"])
+            endpoint=_inv_endpoint(gpuTypeIds=list(admission.APPROVED_GPUS))
         )
     )
-    assert code == "endpoint-gpu-list-not-exclusive"
+    assert code not in FORMER_GATES, code
 
 
-def test_the_wrong_card_blocks():
+def test_an_unapproved_card_no_longer_blocks():
     code = _stop_code(_InvariantClient(endpoint=_inv_endpoint(gpuTypeIds=["NVIDIA L4"])))
-    assert code == "endpoint-not-target"
+    assert code not in FORMER_GATES, code
+
+
+def test_preflight_owns_no_configuration_veto_at_all():
+    """The directive as one assertion. If someone re-adds a gate, this is
+    the test that says so."""
+    assert INVARIANT_STOPS == set()
 
 
 def test_the_recorder_records_and_never_raises():
@@ -1834,7 +1892,7 @@ def _probe_failure_status(code="DOWNLOAD_TIMEOUT", execution_ms=990_000):
             "disk_free_bytes": 180 * 1024**3,
             "disk_total_bytes": 200 * 1024**3,
             "device": "cuda",
-            "gpu_name": "NVIDIA RTX A5000",
+            "gpu_name": admission.TARGET_GPU,
         },
     }
 

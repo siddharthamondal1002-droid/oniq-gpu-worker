@@ -160,10 +160,24 @@ def test_runtime_ceiling_agrees_with_the_contract():
     assert admission.RUNTIME_CEILING_SECONDS == contract.RUNTIME_CEILING_SECONDS
 
 
-def test_target_is_the_a5000_and_allow_list_is_closed():
-    # Owner directive 2026-08-26 (third card of the day, settled).
-    assert admission.TARGET_GPU == "NVIDIA RTX A5000"
-    assert set(admission.ALLOWED_GPUS) == {admission.TARGET_GPU}
+def test_the_approved_set_is_two_cards_and_the_allow_list_is_closed():
+    """Owner directive 2026-08-30, superseding the single-A5000 pin.
+
+    TWO cards, because naming one left the endpoint throttled with nothing
+    placeable — RunPod wanting a worker and unable to get that card. The
+    list is still CLOSED: two approved names, not "any GPU"."""
+    assert admission.APPROVED_GPUS == ("NVIDIA RTX A6000", "NVIDIA A40")
+    assert admission.TARGET_GPU == admission.APPROVED_GPUS[0]
+    assert set(admission.ALLOWED_GPUS) == set(admission.APPROVED_GPUS)
+
+
+def test_the_retired_card_is_no_longer_admissible():
+    """The allow-list means what it says: a card the owner moved off is
+    refused, not quietly still eligible."""
+    with pytest.raises(admission.AdmissionRefused) as exc:
+        admission.admit(gpu_name="NVIDIA RTX A5000", vram_gb=24,
+                        runtime_seconds=900, price_per_hour="0.27")
+    assert exc.value.code == "gpu-type-not-allowed"
 
 
 # ---------------------------------------------------------------- available
@@ -185,8 +199,8 @@ def _gpu(gpu_id, mem, secure=True, price="0.31", on_demand="0.31", display=None,
 
 
 def test_available_target_is_returned():
-    cat = [_gpu("NVIDIA RTX A5000", 24, display="RTX A5000")]
-    assert admission.require_available(cat)["memory_gb"] == 24
+    cat = [_gpu(admission.TARGET_GPU, 48, display="approved card")]
+    assert admission.require_available(cat)["memory_gb"] == 48
 
 
 def test_missing_target_raises_with_alternatives():
@@ -201,7 +215,7 @@ def test_missing_target_raises_with_alternatives():
 
 
 def test_unpriced_target_is_unavailable_never_free():
-    cat = [_gpu("NVIDIA RTX A5000", 24, price=None, on_demand=None)]
+    cat = [_gpu(admission.TARGET_GPU, 48, price=None, on_demand=None)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -211,8 +225,8 @@ def test_secure_list_price_is_the_serverless_quote():
     # null — refused for a POD-provisioning harness. This harness admits
     # SERVERLESS jobs, which bill exactly this secure price; under the
     # serverless rule the same shape is eligible.
-    cat = [_gpu("NVIDIA RTX A5000", 24, price="0.27", on_demand=None)]
-    assert admission.require_available(cat)["id"] == "NVIDIA RTX A5000"
+    cat = [_gpu(admission.TARGET_GPU, 48, price="0.27", on_demand=None)]
+    assert admission.require_available(cat)["id"] == admission.TARGET_GPU
 
 
 def test_unavailable_never_substitutes():
@@ -222,7 +236,7 @@ def test_unavailable_never_substitutes():
 
 
 def test_community_only_target_is_not_secure_capacity():
-    cat = [_gpu("NVIDIA RTX A5000", 24, secure=False)]
+    cat = [_gpu(admission.TARGET_GPU, 48, secure=False)]
     with pytest.raises(admission.UnavailableGpu):
         admission.require_available(cat)
 
@@ -317,47 +331,49 @@ A5000_FRESH_RAW = {
 }
 
 
-def test_real_payload_2026_08_25_a5000_admits_under_the_serverless_rule():
+# The recorded A5000 bytes are kept even though the card is retired: what
+# they pin is the PRICE RULE and the reservation arithmetic, not which card
+# ONIQ rents. `target=` is passed explicitly now that it is no longer the
+# default, and the arithmetic is taken through reserve_usd rather than
+# admit — the allow-list is a separate question from the maths, and
+# coupling them is what made these tests fail when the owner changed cards.
+RETIRED_A5000 = "NVIDIA RTX A5000"
+
+
+def test_real_payload_2026_08_25_admits_under_the_serverless_rule():
     # The recorded 2026-08-25 bytes carry securePrice with a null
     # lowestPrice. Under the serverless rule the secure price IS the
-    # quote, so these very lesson bytes now admit — the reinterpretation,
-    # pinned on the original evidence.
-    entry = admission.require_available(_real_catalogue())
-    assert entry["id"] == "NVIDIA RTX A5000"
+    # quote, so these very lesson bytes still resolve — the
+    # reinterpretation, pinned on the original evidence.
+    entry = admission.require_available(_real_catalogue(), target=RETIRED_A5000)
+    assert entry["id"] == RETIRED_A5000
     assert entry["secure_price"] == 0.27
 
 
-def test_real_payload_fresh_a5000_is_available_on_secure_cloud():
-    entry = admission.require_available([rp.parse_gpu_type(A5000_FRESH_RAW)])
-    assert entry["id"] == "NVIDIA RTX A5000"
+def test_real_payload_fresh_bytes_are_available_on_secure_cloud():
+    entry = admission.require_available(
+        [rp.parse_gpu_type(A5000_FRESH_RAW)], target=RETIRED_A5000
+    )
+    assert entry["id"] == RETIRED_A5000
     assert entry["memory_gb"] == 24
     assert entry["secure_price"] == 0.27
 
 
-def test_real_payload_admits_the_a5000_at_seven_cents():
+def test_real_payload_reserves_seven_cents():
     # Fresh secure price on run #15 bytes: CEIL(0.27 * 900 / 3600, $0.01)
     # = $0.07, under the $0.50 job cap. The reservation math on real
-    # numbers, the cheapest card of the day.
-    entry = admission.require_available([rp.parse_gpu_type(A5000_FRESH_RAW)])
-    res = admission.admit(
-        gpu_name=entry["id"],
-        vram_gb=entry["memory_gb"],
-        runtime_seconds=900,
-        price_per_hour=entry["secure_price"],
-    )
-    assert res.reserved_usd == Decimal("0.07")
-    assert res.reserved_usd <= admission.JOB_CAP_USD
-
-
-def test_real_payload_a5000_admits_at_seven_cents_on_the_08_25_bytes():
+    # numbers.
     entry = admission.require_available(
-        _real_catalogue(), target="NVIDIA RTX A5000"
+        [rp.parse_gpu_type(A5000_FRESH_RAW)], target=RETIRED_A5000
     )
-    res = admission.admit(
-        gpu_name=entry["id"], vram_gb=entry["memory_gb"],
-        runtime_seconds=900, price_per_hour=entry["secure_price"],
-    )
-    assert res.reserved_usd == Decimal("0.07")
+    reserved = admission.reserve_usd(entry["secure_price"], 900)
+    assert reserved == Decimal("0.07")
+    assert reserved <= admission.JOB_CAP_USD
+
+
+def test_real_payload_reserves_seven_cents_on_the_08_25_bytes():
+    entry = admission.require_available(_real_catalogue(), target=RETIRED_A5000)
+    assert admission.reserve_usd(entry["secure_price"], 900) == Decimal("0.07")
 
 
 # ---------------------------------------------------------------- endpoint
