@@ -459,9 +459,24 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
         conditioned = dict(image=image)
     stats["conditioning_count"] = 1 if condition is not None else 0
 
-    upsampler = load_upsampler() if (profile.get("multiscale") and load_upsampler) else None
+    # MULTI-SCALE REQUIRES THE CONDITION PIPELINE, and this is not a style
+    # preference — it is a signature fact. VERIFIED against diffusers 0.38.0:
+    # LTXImageToVideoPipeline.__call__ accepts no `denoise_strength` (and no
+    # `conditions`, and no `image_cond_noise_scale`). The refine pass is
+    # DEFINED by denoise_strength — without it the second pass is a full
+    # re-generation at 4x the pixels rather than a refinement — so a fallback
+    # pipeline cannot run this path at all. Sending it anyway is the same
+    # TypeError class the conditions= guard already prevents, arriving through
+    # a different door.
+    if profile.get("multiscale") and not can_condition:
+        stats["upscaler_absent_reason"] = "fallback-pipeline-takes-no-denoise-strength"
+    upsampler = (
+        load_upsampler()
+        if (profile.get("multiscale") and can_condition and load_upsampler)
+        else None
+    )
     if upsampler is None:
-        if profile.get("multiscale") and load_upsampler:
+        if profile.get("multiscale") and can_condition and load_upsampler:
             # The profile said the component was there and the load did not
             # produce one. Recorded, never swallowed.
             stats["upscaler_absent_reason"] = "upsampler-load-returned-none"
