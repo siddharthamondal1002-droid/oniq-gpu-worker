@@ -376,3 +376,36 @@ def test_the_dockerfile_bakes_refuse_an_auth_error_in_both_blocks():
     assert text.count("def auth_refused(exc):") == 2
     assert text.count("AUTH REFUSED for") == 2
     assert text.count("status in (401, 403)") == 2
+
+
+def test_components_moved_into_split_passes_are_still_counted():
+    """MEASURED 2026-08-31, run 33434036705: the projection reported the LTX
+    bake at 2.32 GiB and printed "VERDICT: FITS" for a pipeline the registry
+    measures at 44.36 GiB.
+
+    `_block` isolates ONE block per DEST, so any component moved out of the
+    main bake into a split layer stopped being counted. The text encoder had
+    been invisible this way since the 2026-08-30 split; moving the 24.29 GiB
+    transformer out on 2026-08-31 made the omission larger than the number
+    being reported.
+
+    This is not a harmless inaccuracy. This projection is what decides whether
+    to start a build that takes a hosted runner the best part of an hour, and
+    a FITS read off a number missing 42 GiB is exactly the wasted forty
+    minutes it exists to prevent."""
+    bake = isz.parse_bakes(DOCKERFILE)[LTX]
+    counted = {p for p in bake["patterns"] if p.endswith("/*")}
+    # Every component the bake declares must be reachable by some pattern, no
+    # matter which layer fetches it.
+    for component in bake["components"]:
+        assert f"{component}/*" in counted, (component, sorted(counted))
+
+
+def test_both_ways_a_split_pass_names_its_component_are_read():
+    """The two splits are written differently — the transformer passes declare
+    a PREFIX constant, the older text-encoder passes inline the component in a
+    startswith. Reading only one form left the larger of the two uncounted."""
+    text = open("Dockerfile", encoding="utf-8").read()
+    prefixes = isz._split_prefixes(text, "/app/models/ltx")
+    assert "transformer/" in prefixes   # PREFIX = "transformer/"
+    assert "text_encoder/" in prefixes  # startswith("text_encoder/")
