@@ -127,6 +127,68 @@ EXPERIMENTAL = {
     },
 }
 
+# VOLUME-RESIDENT PRODUCTION. A third class, and it is deliberately NOT
+# "experimental" — this is the production text encoder every clip goes
+# through.
+#
+# WHY IT LEFT THE IMAGE, owner directive 2026-08-31. Moving the checkpoint to
+# LTX-Video-0.9.7-distilled — needed so its vae matches the pinned spatial
+# upsampler — put the media image at 57.97 GiB. Measured: a hosted runner
+# cannot build that (run 33434875038, and the last SUCCESSFUL publish left
+# 5.73 GiB free of 71.61). The text encoder is the single largest component,
+# so it moved here and the image came back to a size that builds.
+#
+# IT FAILS CLOSED, exactly like an experimental model, and that is a REAL
+# CHANGE from how production components behave. ltx/story/piper resolve
+# volume-first with the baked path as a fallback, so an unmounted or empty
+# volume cannot break them. This one has no baked copy to fall back to. The
+# owner accepted that dependency knowingly; the alternative was paying for a
+# larger build runner or giving up the 13B checkpoint.
+#
+# A clip that cannot find its text encoder must REFUSE and say so. It must
+# never quietly run with an untrained embedding, which is the failure a
+# silent fallback would produce.
+VOLUME_RESIDENT = {
+    "LTX_TEXT_ENCODER": {
+        "family": "ltx",
+        # Named for the CHECKPOINT, not just "text-encoder". The encoder and
+        # the transformer share an embedding space; hydrating one checkpoint's
+        # encoder beside another's transformer is a silent quality failure,
+        # and a shared directory name is how that would happen.
+        "directory": "text-encoder-0.9.7-distilled",
+        "repo": "Lightricks/LTX-Video-0.9.7-distilled",
+        "revision": "057509edea1493cae5e62e9d8f780ebda3fb4333",
+        "licence": "LTX Open Weights 0.X (accepted by the owner 2026-08-31)",
+        "allow": ["text_encoder/*"],
+        # MEASURED, run 33436186203, from the registry's own byte counts over
+        # exactly that pattern: 19,049,290,370 bytes = 17.74 GiB. Not derived
+        # by subtracting known components from the pipeline total — this
+        # number feeds modelhydrate's disk check, and an estimate there breaks
+        # the gate it exists to feed.
+        #
+        # Corroborated independently: the last build that BAKED this component
+        # (run 33327318610) logged "TEXT ENCODER COMPLETE: 6 file(s),
+        # 19049290411 bytes" for the previous checkpoint. 41 bytes apart, so
+        # the T5 encoder is the same model either side of the repoint.
+        "download_gib": 17.74
+    },
+}
+
+
+def spec_for(model_id: str):
+    """The spec for a volume-resident model of EITHER class, or None.
+
+    One lookup, because there are now two registries and five call sites that
+    used to index EXPERIMENTAL directly. A second registry that only some of
+    them knew about would resolve for hydration and not for loading, or the
+    reverse.
+    """
+    return EXPERIMENTAL.get(model_id) or VOLUME_RESIDENT.get(model_id)
+
+
+def known_ids() -> list:
+    return sorted({**EXPERIMENTAL, **VOLUME_RESIDENT})
+
 
 class ModelUnavailable(Exception):
     """A named refusal. `code` is the whole diagnosis."""
@@ -157,12 +219,12 @@ def volume_mounted() -> bool:
 
 def model_dir(model_id: str) -> str:
     """The path a model WOULD occupy. Pure; touches no disk."""
-    spec = EXPERIMENTAL.get(model_id)
+    spec = spec_for(model_id)
     if spec is None:
         raise ModelUnavailable(
             "MODEL_UNKNOWN",
-            f"{model_id!r} is not an experimental model; known ids are "
-            + ", ".join(sorted(EXPERIMENTAL)),
+            f"{model_id!r} is not a volume-resident model; known ids are "
+            + ", ".join(known_ids()),
         )
     return os.path.join(oniq_root(), spec["family"], spec["directory"])
 
@@ -205,12 +267,12 @@ def resolve(model_id: str) -> str:
     Never falls back. A Hunyuan request that cannot find Hunyuan must not
     become an LTX run wearing Hunyuan's name in the report.
     """
-    spec = EXPERIMENTAL.get(model_id)
+    spec = spec_for(model_id)
     if spec is None:
         raise ModelUnavailable(
             "MODEL_UNKNOWN",
-            f"{model_id!r} is not an experimental model; known ids are "
-            + ", ".join(sorted(EXPERIMENTAL)),
+            f"{model_id!r} is not a volume-resident model; known ids are "
+            + ", ".join(known_ids()),
         )
     if not volume_mounted():
         raise ModelUnavailable(

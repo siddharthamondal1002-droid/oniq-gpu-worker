@@ -402,10 +402,30 @@ def test_components_moved_into_split_passes_are_still_counted():
 
 
 def test_both_ways_a_split_pass_names_its_component_are_read():
-    """The two splits are written differently — the transformer passes declare
-    a PREFIX constant, the older text-encoder passes inline the component in a
-    startswith. Reading only one form left the larger of the two uncounted."""
+    """A split pass can name its component two ways — a PREFIX constant, or an
+    inline startswith. Reading only one form is what left the text encoder
+    uncounted and produced a FITS verdict on an image 42 GiB larger than
+    reported.
+
+    Checked against a FIXTURE, not against the live Dockerfile. It was written
+    against the Dockerfile and broke within the hour when the text-encoder
+    passes were removed — a parser capability should not be tested by which
+    forms a particular file happens to use today."""
+    fixture = '''
+CANDIDATES = ["a/b"]
+DEST = "/app/models/thing"
+allow_patterns=["model_index.json"]
+EOF
+DEST = "/app/models/thing"
+PREFIX = "transformer/"
+EOF
+DEST = "/app/models/thing"
+files = [s for s in sibs if s.rfilename.startswith("text_encoder/")]
+EOF
+'''
+    prefixes = isz._split_prefixes(fixture, "/app/models/thing")
+    assert prefixes == ["text_encoder/", "transformer/"]
+
+    # And the live Dockerfile's own split really is picked up.
     text = open("Dockerfile", encoding="utf-8").read()
-    prefixes = isz._split_prefixes(text, "/app/models/ltx")
-    assert "transformer/" in prefixes   # PREFIX = "transformer/"
-    assert "text_encoder/" in prefixes  # startswith("text_encoder/")
+    assert "transformer/" in isz._split_prefixes(text, "/app/models/ltx")

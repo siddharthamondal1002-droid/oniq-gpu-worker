@@ -274,3 +274,69 @@ def test_where_reports_the_refusal_code_rather_than_a_path(volume):
     report = modelroot.where()
     assert report["experimental"][MODEL] == {"error": "MODEL_NOT_HYDRATED"}
     assert report["production"]["ltx"] == "/app/models/ltx"
+
+
+class TestTheTextEncoderLivesOnTheVolume:
+    """OWNER DIRECTIVE 2026-08-31. Moving the checkpoint to
+    LTX-Video-0.9.7-distilled — needed so its vae matches the pinned spatial
+    upsampler — put the media image at 57.97 GiB, and a hosted runner cannot
+    build that. The text encoder is 17.74 GiB of it, so it left the image.
+
+    It is a THIRD class: production, but volume-resident and fail-closed.
+    ltx/story/piper fall back to the baked copy when the volume is missing;
+    this one has no baked copy to fall back to, and that difference is the
+    whole point of the tests below."""
+
+    ID = "LTX_TEXT_ENCODER"
+
+    def test_it_is_registered_and_is_not_experimental(self):
+        assert self.ID in modelroot.VOLUME_RESIDENT
+        assert self.ID not in modelroot.EXPERIMENTAL
+        assert self.ID in modelroot.known_ids()
+
+    def test_one_lookup_serves_both_registries(self):
+        # Five call sites used to index EXPERIMENTAL directly. A second
+        # registry only some of them knew about would resolve for hydration
+        # and not for loading, or the reverse.
+        assert modelroot.spec_for(self.ID) is modelroot.VOLUME_RESIDENT[self.ID]
+        assert modelroot.spec_for("HUNYUAN_15_I2V_480_STEP") is (
+            modelroot.EXPERIMENTAL["HUNYUAN_15_I2V_480_STEP"])
+        assert modelroot.spec_for("nope") is None
+
+    def test_it_names_the_checkpoint_it_belongs_to(self):
+        # The encoder and the transformer share an embedding space. A generic
+        # "text-encoder" directory is how one checkpoint's encoder ends up
+        # beside another's transformer — a silent quality failure, not a
+        # crash.
+        spec = modelroot.spec_for(self.ID)
+        assert "0.9.7-distilled" in spec["directory"]
+        assert spec["repo"] == "Lightricks/LTX-Video-0.9.7-distilled"
+        assert spec["allow"] == ["text_encoder/*"]
+
+    def test_the_revision_is_the_dockerfiles(self):
+        docker = open("Dockerfile", encoding="utf-8").read()
+        spec = modelroot.spec_for(self.ID)
+        assert f'PINNED_REVISION = "{spec["revision"]}"' in docker
+        assert f'("{spec["repo"]}", "")' in docker
+
+    def test_the_declared_size_is_the_measured_one(self):
+        # 19,049,290,370 bytes over text_encoder/*, run 33436186203. This
+        # number feeds modelhydrate's disk check; an estimate breaks the gate.
+        assert modelroot.spec_for(self.ID)["download_gib"] == 17.74
+        assert round(19_049_290_370 / 1024**3, 2) == 17.74
+
+    def test_it_fails_closed_with_a_named_reason(self, monkeypatch):
+        # THE POINT OF THE WHOLE CLASS. No baked fallback exists, so a clip
+        # that cannot find its text encoder must REFUSE and say why — never
+        # run on an untrained embedding.
+        monkeypatch.setattr(modelroot, "volume_mounted", lambda: False)
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.resolve(self.ID)
+        assert exc.value.code == "MODEL_VOLUME_UNAVAILABLE"
+
+    def test_an_unknown_id_lists_every_known_one(self, monkeypatch):
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.model_dir("NOT_A_MODEL")
+        assert exc.value.code == "MODEL_UNKNOWN"
+        for known in modelroot.known_ids():
+            assert known in exc.value.detail

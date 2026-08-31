@@ -138,7 +138,29 @@ def check(report=print, root=ROOT):
     ltx_bytes = weight_bytes(at("ltx", "transformer"))
     if not 0 < ltx_bytes <= LTX_GUARD_BYTES:
         raise ProofFailed(f"ltx transformer is {ltx_bytes} bytes")
-    report(f"PROOF ltx transformer bytes: {ltx_bytes} (inside the 2B-class guard)")
+    report(f"PROOF ltx transformer bytes: {ltx_bytes} "
+           f"(inside the {LTX_GUARD_BYTES} guard)")
+
+    # THE TEXT ENCODER MUST NOT BE HERE — owner directive 2026-08-31.
+    #
+    # Asserting an ABSENCE, which is unusual and deliberate. It left the image
+    # because a hosted runner cannot build a 57.97 GiB one, and it is 17.74
+    # GiB of that. If a future change quietly bakes it again, every check
+    # above still passes and the failure appears as a build that runs out of
+    # disk forty minutes in — so the image states plainly that it does not
+    # carry it.
+    encoder = at("ltx/text_encoder")
+    if os.path.isdir(encoder) and any(
+        n.endswith(".safetensors") for n in os.listdir(encoder)
+    ):
+        raise ProofFailed(
+            f"{encoder} carries weights, but the text encoder is meant to "
+            "live on the network volume (modelroot.VOLUME_RESIDENT"
+            "['LTX_TEXT_ENCODER']). Baking it back adds 17.74 GiB and puts "
+            "the image past what a hosted runner can build."
+        )
+    report("PROOF ltx text encoder: absent from the image, as intended "
+           "(hydrated onto the volume)")
 
     story_bytes = weight_bytes(at("story"))
     if not 0 < story_bytes <= STORY_GUARD_BYTES:

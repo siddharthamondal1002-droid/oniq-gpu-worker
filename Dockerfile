@@ -479,6 +479,20 @@ if not mine:
 else:
     snapshot_download(repo, revision=revision, token=TOKEN,
                       local_dir=DEST, allow_patterns=mine)
+
+# THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
@@ -532,6 +546,20 @@ if not mine:
 else:
     snapshot_download(repo, revision=revision, token=TOKEN,
                       local_dir=DEST, allow_patterns=mine)
+
+# THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
@@ -585,130 +613,54 @@ if not mine:
 else:
     snapshot_download(repo, revision=revision, token=TOKEN,
                       local_dir=DEST, allow_patterns=mine)
-import shutil
-shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
-for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
-             "/home/oniq/.cache/huggingface"):
-    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
-EOF
-
-# THE TEXT ENCODER, IN TWO LAYERS. Same repository, same pinned revision,
-# same token — split only so no single layer is large enough to be
-# un-pullable. Each pass lists the component's files from metadata, splits
-# them by cumulative size, and downloads its own half; snapshot_download
-# skips what is already on disk, so the passes compose rather than
-# duplicate. A repository whose encoder is one unsharded file puts it all
-# in pass 0 and leaves pass 1 empty — still correct, just unsplit.
-RUN --mount=type=secret,id=hf_token LTX_PASS=0 python3 - <<'EOF'
-import os
-
-from huggingface_hub import HfApi, snapshot_download
-
-TOKEN = None
-if os.path.exists("/run/secrets/hf_token"):
-    with open("/run/secrets/hf_token") as fh:
-        TOKEN = fh.read().strip() or None
-DEST = "/app/models/ltx"
-PASSES = 2
-PASS = int(os.environ["LTX_PASS"])
-
-with open("/app/models/LTX_REPO") as fh:
-    repo = fh.read().strip()
-with open("/app/models/LTX_REVISION") as fh:
-    revision = fh.read().strip()
-
-info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
-if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
-    raise SystemExit(f"registry answered for a different repository than {repo}")
-files = sorted(
-    (s.rfilename, s.size or 0) for s in info.siblings
-    if s.rfilename.startswith("text_encoder/")
-)
-if not files:
-    raise SystemExit("the pinned revision carries no text_encoder files")
-total = sum(size for _, size in files)
-mine, running = [], 0
-for name, size in files:
-    # The file's MIDPOINT decides its group, not its start: a large shard
-    # beginning just before the halfway mark would otherwise land wholly in
-    # the first pass and rebuild the imbalance this split exists to remove.
-    group = min(int((running + size / 2) * PASSES / total) if total else 0,
-                PASSES - 1)
-    if group == PASS:
-        mine.append(name)
-    running += size
-print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
-if not mine:
-    print("nothing for this pass — the encoder is not sharded this finely")
-else:
-    snapshot_download(repo, revision=revision, token=TOKEN,
-                      local_dir=DEST, allow_patterns=mine)
-import shutil
-shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
-for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
-             "/home/oniq/.cache/huggingface"):
-    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
-EOF
-
-RUN --mount=type=secret,id=hf_token LTX_PASS=1 python3 - <<'EOF'
-import os
-
-from huggingface_hub import HfApi, snapshot_download
-
-TOKEN = None
-if os.path.exists("/run/secrets/hf_token"):
-    with open("/run/secrets/hf_token") as fh:
-        TOKEN = fh.read().strip() or None
-DEST = "/app/models/ltx"
-PASSES = 2
-PASS = int(os.environ["LTX_PASS"])
-
-with open("/app/models/LTX_REPO") as fh:
-    repo = fh.read().strip()
-with open("/app/models/LTX_REVISION") as fh:
-    revision = fh.read().strip()
-
-info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
-if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
-    raise SystemExit(f"registry answered for a different repository than {repo}")
-files = sorted(
-    (s.rfilename, s.size or 0) for s in info.siblings
-    if s.rfilename.startswith("text_encoder/")
-)
-if not files:
-    raise SystemExit("the pinned revision carries no text_encoder files")
-total = sum(size for _, size in files)
-mine, running = [], 0
-for name, size in files:
-    # The file's MIDPOINT decides its group, not its start: a large shard
-    # beginning just before the halfway mark would otherwise land wholly in
-    # the first pass and rebuild the imbalance this split exists to remove.
-    group = min(int((running + size / 2) * PASSES / total) if total else 0,
-                PASSES - 1)
-    if group == PASS:
-        mine.append(name)
-    running += size
-print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
-if mine:
-    snapshot_download(repo, revision=revision, token=TOKEN,
-                      local_dir=DEST, allow_patterns=mine)
 
 # THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
-# silently landed half an encoder would fail at job time on a rented card,
-# which is the class of failure this whole bake exists to prevent.
-missing = [name for name, _ in files
-           if not os.path.exists(os.path.join(DEST, name))]
-if missing:
-    raise SystemExit(f"text_encoder incomplete after all passes: {missing[:5]}")
-landed = sum(os.path.getsize(os.path.join(DEST, name)) for name, _ in files)
-print(f"TEXT ENCODER COMPLETE: {len(files)} file(s), {landed} bytes")
-
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
              "/home/oniq/.cache/huggingface"):
     shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
 EOF
+
+# THE TEXT ENCODER IS NOT IN THIS IMAGE — owner directive 2026-08-31.
+#
+# It used to be baked here in two layers. Moving the checkpoint to
+# LTX-Video-0.9.7-distilled, so its vae matches the pinned spatial upsampler,
+# put the media image at 57.97 GiB, and a hosted runner cannot build that:
+# run 33434875038 measured 33.76 GiB after reclaim, and the last SUCCESSFUL
+# publish (33327318610) finished a 40.10 GiB image with 5.73 GiB to spare.
+#
+# The text encoder is the single largest component the image can do without —
+# 17.74 GiB, measured in run 33436186203 as 19,049,290,370 bytes over
+# text_encoder/*. Taking it out brings the image to ~40.2 GiB, which is the
+# size that already builds. The owner chose this over paying for a larger
+# build runner or giving up the 13B checkpoint.
+#
+# IT NOW LIVES ON THE NETWORK VOLUME as modelroot.VOLUME_RESIDENT
+# ["LTX_TEXT_ENCODER"], hydrated once by the model_hydrate op and loaded by
+# videogen through modelroot.resolve. That is a REAL CHANGE IN FAILURE MODE
+# and it is deliberate: ltx/story/piper fall back to the baked copy when the
+# volume is absent, and this one has no baked copy to fall back to. A clip
+# that cannot find its text encoder REFUSES and names the reason. It must
+# never quietly run with an untrained embedding, which is what a silent
+# fallback would produce.
+#
+# The survey above still requires text_encoder to EXIST in the repository
+# before a byte moves — the pipeline is incomplete without it. What changed is
+# only where the bytes are fetched to.
+
 
 # ---------------------------------------------------------------------------
 # THE SPATIAL LATENT UPSCALER — OFF BY DEFAULT, AND OFF MEANS ABSENT.

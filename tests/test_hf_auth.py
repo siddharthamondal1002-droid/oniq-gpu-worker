@@ -394,17 +394,24 @@ def test_the_size_guards_both_survive():
     assert bakes[1]["size_guard_bytes"] == 20 * 1024**3
 
 
-def test_the_text_encoder_passes_cover_every_file_exactly_once():
-    """The split must be a PARTITION. A file assigned to both passes is
-    wasted bandwidth; a file assigned to neither is a broken pipeline that
-    only shows up when a rented card tries to load it.
+def test_the_transformer_passes_cover_every_file_exactly_once():
+    """The split must be a PARTITION. A file assigned to two passes is wasted
+    bandwidth; a file assigned to none is a broken pipeline that only shows up
+    when a rented card tries to load it.
 
-    This runs the Dockerfile's own grouping arithmetic — lifted from the
-    bake, not reimplemented — over the shard layouts a repository can
-    plausibly have.
+    This runs the Dockerfile's own grouping arithmetic — lifted from the bake,
+    not reimplemented — over the shard layouts a repository can plausibly
+    have.
+
+    RETARGETED 2026-08-31 from the text-encoder passes to the transformer
+    ones. The text encoder left the image entirely (owner directive: a hosted
+    runner cannot build a 57.97 GiB image, and it is 17.74 GiB of that), and
+    the transformer took its place as the component too large for one layer.
+    Same algorithm, same partition property, same reason — so the test moved
+    rather than being deleted with the code it was written for.
     """
-    passes = _bakes_by_role()["ltx_passes"]
-    assert len(passes) == 2, "the split is written as two passes"
+    passes = _bakes_by_role()["transformer_passes"]
+    assert len(passes) == 3, "the split is written as three passes"
 
     def group_of(running, size, total, n_passes):
         return min(int((running + size / 2) * n_passes / total) if total else 0,
@@ -416,30 +423,38 @@ def test_the_text_encoder_passes_cover_every_file_exactly_once():
 
     GB = 1024 ** 3
     layouts = {
-        "four equal shards": [(f"text_encoder/m-{i}.safetensors", 2 * GB)
+        "four equal shards": [(f"transformer/m-{i}.safetensors", 2 * GB)
                               for i in range(4)],
-        "one unsharded file": [("text_encoder/model.safetensors", 9 * GB)],
-        "uneven shards + config": [("text_encoder/config.json", 1000),
-                                   ("text_encoder/m-1.safetensors", 4 * GB),
-                                   ("text_encoder/m-2.safetensors", 4 * GB),
-                                   ("text_encoder/m-3.safetensors", 1 * GB)],
+        "one unsharded file": [("transformer/model.safetensors", 9 * GB)],
+        "uneven shards + config": [("transformer/config.json", 1000),
+                                   ("transformer/m-1.safetensors", 4 * GB),
+                                   ("transformer/m-2.safetensors", 4 * GB),
+                                   ("transformer/m-3.safetensors", 1 * GB)],
     }
     for label, files in layouts.items():
         files = sorted(files)
         total = sum(size for _, size in files)
         assigned, running = {}, 0
         for name, size in files:
-            assigned.setdefault(group_of(running, size, total, 2), []).append(name)
+            assigned.setdefault(group_of(running, size, total, 3), []).append(name)
             running += size
         flat = [n for names in assigned.values() for n in names]
         assert sorted(flat) == sorted(n for n, _ in files), label
-        assert len(flat) == len(set(flat)), f"{label}: a file is in both passes"
+        assert len(flat) == len(set(flat)), f"{label}: a file is in two passes"
 
 
-def test_the_last_text_encoder_pass_refuses_an_incomplete_component():
-    """A split download that lands half an encoder must fail the BUILD, not
-    a paid job. Only the final pass can know the component is whole."""
-    first, last = _bakes_by_role()["ltx_passes"]
-    assert "text_encoder incomplete after all passes" in last
-    assert "TEXT ENCODER COMPLETE" in last
-    assert "incomplete after all passes" not in first
+def test_the_last_transformer_pass_refuses_an_incomplete_component():
+    """A split download that lands part of a transformer must fail the BUILD,
+    not a paid job. Only the final pass can know the component is whole.
+
+    RETARGETED 2026-08-31 with the test above: the text encoder left the image
+    and the transformer took its place as the split component. The check is
+    guarded by `PASS == PASSES - 1` rather than living in a distinct last
+    block, because the three passes share one body — so this asserts the GUARD
+    exists, which is the thing that makes only the final pass verify."""
+    passes = _bakes_by_role()["transformer_passes"]
+    for block in passes:
+        assert "transformer incomplete after all passes" in block
+        assert "TRANSFORMER COMPLETE" in block
+        # The guard is what stops pass 0 declaring a two-thirds download whole.
+        assert "if PASS == PASSES - 1:" in block

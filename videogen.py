@@ -193,6 +193,47 @@ def _video_condition(image, frame_index=None, strength=None):
         return None
 
 
+# THE TEXT ENCODER COMES FROM THE VOLUME, NOT FROM THE IMAGE.
+#
+# Owner directive 2026-08-31. The 13B repoint put the image past what a hosted
+# runner can build, and this component is 17.74 GiB of it — see
+# modelroot.VOLUME_RESIDENT["LTX_TEXT_ENCODER"] and the Dockerfile's own note.
+#
+# WHY PASSING IT IN IS SAFE, verified rather than assumed. diffusers 0.38.0's
+# pipeline_utils.py loads each component with:
+#
+#     if name in passed_class_obj:
+#         loaded_sub_model = passed_class_obj[name]
+#     else:
+#         loaded_sub_model = load_sub_model(...)
+#
+# so a component handed to from_pretrained is used directly and its folder is
+# never read. That is what lets the image ship a pipeline directory with no
+# text_encoder/ in it.
+#
+# IT FAILS CLOSED. modelroot.resolve raises a named ModelUnavailable when the
+# volume is absent, unhydrated or corrupt, and that refusal travels to the
+# caller intact. A clip that cannot find its own text encoder must not run.
+LTX_TEXT_ENCODER = "LTX_TEXT_ENCODER"
+
+
+def _text_encoder():
+    """The T5 encoder, from the volume, on the same dtype as the pipeline."""
+    # RESOLVED FIRST, before torch or transformers are imported. A missing or
+    # unhydrated volume is a configuration fact, and diagnosing it should not
+    # depend on the ML stack loading successfully — nor pay for the import.
+    path = modelroot.resolve(LTX_TEXT_ENCODER)
+
+    import torch
+    from transformers import T5EncoderModel
+
+    return T5EncoderModel.from_pretrained(
+        os.path.join(path, "text_encoder"),
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+
+
 def _load_real_pipeline():
     """Load the baked pipeline onto CUDA. Never touches the network.
 
@@ -220,7 +261,8 @@ def _load_real_pipeline():
             from diffusers import LTXConditionPipeline
 
             pipe = LTXConditionPipeline.from_pretrained(
-                _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+                _model_dir(), text_encoder=_text_encoder(),
+                torch_dtype=torch.bfloat16, local_files_only=True
             )
             pipe.to("cuda")
             pipe.vae.enable_tiling()
@@ -239,7 +281,8 @@ def _load_real_pipeline():
     from diffusers import LTXImageToVideoPipeline
 
     pipe = LTXImageToVideoPipeline.from_pretrained(
-        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), text_encoder=_text_encoder(),
+        torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()
@@ -288,7 +331,8 @@ def _load_real_text_pipeline():
     from diffusers import LTXPipeline
 
     pipe = LTXPipeline.from_pretrained(
-        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), text_encoder=_text_encoder(),
+        torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()

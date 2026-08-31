@@ -113,7 +113,7 @@ def state(model_id: str) -> str:
         # Files with no marker: an interrupted fetch. Not CORRUPT — nothing
         # promised them — but not usable either.
         return MISSING if not manifest(path) else DOWNLOADING
-    spec = modelroot.EXPERIMENTAL[model_id]
+    spec = modelroot.spec_for(model_id)
     if marker.get("revision") != spec["revision"]:
         return CORRUPT
     if modelroot.verify(path, marker):
@@ -162,10 +162,12 @@ def _release_lock(path: str) -> None:
 
 def hydrate(model_id: str, downloader=None, token=None) -> dict:
     """Fetch one experimental model onto the volume. Idempotent."""
-    spec = modelroot.EXPERIMENTAL.get(model_id)
+    spec = modelroot.spec_for(model_id)
     if spec is None:
         raise HydrationRefused(
-            CORRUPT, f"{model_id!r} is not a known experimental model"
+            CORRUPT,
+            f"{model_id!r} is not a known volume-resident model; known ids "
+            "are " + ", ".join(modelroot.known_ids()),
         )
     if not modelroot.volume_mounted():
         raise HydrationRefused(
