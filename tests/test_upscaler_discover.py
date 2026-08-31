@@ -138,3 +138,64 @@ def urllib_error(code):
     import urllib.error
 
     return urllib.error.HTTPError("u", code, "no", None, None)
+
+
+class TestBothRepositoryShapes:
+    """The first live run (2026-08-31) got BOTH of these wrong, which is the
+    only reason they are pinned here: a resolver that mis-reads the registry
+    is worse than none, because it condemns a good candidate quietly."""
+
+    def test_a_licence_named_after_the_licence_is_found(self):
+        # Lightricks ships LTX-Video-Open-Weights-License-0.X.txt. An exact
+        # LICENSE/NOTICE list missed it and reported the repo unlicensed.
+        assert ud._licence_files(
+            [".gitattributes", "LTX-Video-Open-Weights-License-0.X.txt",
+             "README.md", "model_index.json"]
+        ) == ["LTX-Video-Open-Weights-License-0.X.txt"]
+
+    def test_a_repository_with_genuinely_no_terms_still_reports_none(self):
+        assert ud._licence_files(
+            [".gitattributes", "config.json",
+             "diffusion_pytorch_model.safetensors"]) == []
+
+    def test_a_pipeline_repo_finds_the_component_config_in_its_subfolder(self):
+        info = {
+            "sha": "c" * 40,
+            "cardData": {"license": "other"},
+            "siblings": [
+                {"rfilename": "model_index.json", "size": 300},
+                {"rfilename": "LTX-Video-Open-Weights-License-0.X.txt", "size": 11000},
+                {"rfilename": "latent_upsampler/config.json", "size": 231},
+                {"rfilename": "latent_upsampler/diffusion_pytorch_model.safetensors",
+                 "size": 505_009_832},
+                {"rfilename": "vae/diffusion_pytorch_model.safetensors",
+                 "size": 2_400_000_000},
+            ],
+        }
+        get, get_text = _fakes(info=info)
+        row = ud.measure(OFFICIAL, SECRET, get, get_text)
+        assert row["is_pipeline"] is True
+        assert row["config_path"] == "latent_upsampler/config.json"
+        # The GUARD APPLIES TO THE COMPONENT, not the pipeline: counting the
+        # vae's 2.4 GB against a 1 GiB component guard failed a repo that is
+        # fine.
+        assert row["weight_bytes"] == 505_009_832
+        assert row["within_size_guard"] is True
+        assert row["licence_files"] == ["LTX-Video-Open-Weights-License-0.X.txt"]
+        assert row["verdict"] == "PINNABLE"
+
+    def test_a_bare_component_repo_still_reads_the_root_config(self):
+        get, get_text = _fakes()
+        row = ud.measure(THIRD_PARTY, SECRET, get, get_text)
+        assert row["is_pipeline"] is False
+        assert row["config_path"] == "config.json"
+        assert row["component_prefix"] == "(repository root)"
+
+    def test_a_missing_config_says_where_it_looked(self):
+        info = dict(GOOD_INFO)
+        info["siblings"] = [{"rfilename": "model_index.json", "size": 300},
+                            {"rfilename": "LICENSE", "size": 10}]
+        get, get_text = _fakes(info=info)
+        row = ud.measure(OFFICIAL, SECRET, get, get_text)
+        assert row["config_path"] is None
+        assert "searched" in row["config_mismatch"]["config.json"]

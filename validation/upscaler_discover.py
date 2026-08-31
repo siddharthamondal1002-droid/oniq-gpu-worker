@@ -50,7 +50,7 @@ CANDIDATES = (
     "a-r-r-o-w/LTX-0.9.8-Latent-Upsampler",
 )
 
-RAW = "https://huggingface.co/{repo}/resolve/{revision}/config.json"
+RAW = "https://huggingface.co/{repo}/resolve/{revision}/{path}"
 
 # Exactly what the Dockerfile's upscaler stage asserts field by field. Kept
 # here so the read reports the SAME verdict the build would reach, rather than
@@ -71,7 +71,19 @@ SIZE_GUARD_BYTES = 1024**3
 
 # A licence has to SHIP with the weights: the build refuses a bake whose
 # snapshot carries no terms beside the bytes.
-LICENCE_FILES = ("LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md", "NOTICE.txt")
+#
+# MATCHED BY SUBSTRING, not by an exact filename list. The first run of this
+# module (2026-08-31) reported "licence files NONE" for
+# Lightricks/ltxv-spatial-upscaler-0.9.7, which actually ships
+# LTX-Video-Open-Weights-License-0.X.txt — a false negative that would have
+# condemned the one licence-clean candidate. Publishers name their terms after
+# the licence, not after the convention.
+LICENCE_MARKERS = ("LICEN", "NOTICE", "COPYING", "TERMS")
+
+
+def _licence_files(root_files) -> list:
+    return [p for p in root_files
+            if any(m in p.upper() for m in LICENCE_MARKERS)]
 
 
 def _get_text(url: str, token, timeout: int = 60) -> str:
@@ -105,22 +117,44 @@ def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
         for s in info.get("siblings") or []
     }
     row["root_files"] = sorted(p for p in paths if "/" not in p)
-    row["licence_files"] = [p for p in row["root_files"] if p.upper() in
-                            {f.upper() for f in LICENCE_FILES}]
+    row["licence_files"] = _licence_files(row["root_files"])
+
+    # TWO REPOSITORY SHAPES, and the difference is not cosmetic.
+    #
+    #   BARE COMPONENT   config.json at the root, weights beside it. Loaded
+    #                    with LTXLatentUpsamplerModel.from_pretrained, which
+    #                    is what the Dockerfile's bake does today.
+    #   PIPELINE         model_index.json at the root and the component in a
+    #                    subfolder. Loaded with
+    #                    LTXLatentUpsamplePipeline.from_pretrained, and it
+    #                    carries a VAE too — which is why its byte total is
+    #                    several GiB and the component guard cannot be applied
+    #                    to the repository as a whole.
+    row["is_pipeline"] = "model_index.json" in paths
+    subfolders = sorted({p.split("/", 1)[0] for p in paths if "/" in p})
+    row["subfolders"] = subfolders
+    candidates = ["config.json"] + [f"{d}/config.json" for d in subfolders
+                                    if "upsampl" in d.lower() or "upscal" in d.lower()]
+    row["config_path"] = next((c for c in candidates if c in paths), None)
+
+    prefix = row["config_path"].rsplit("/", 1)[0] + "/" if (
+        row["config_path"] and "/" in row["config_path"]) else ""
+    row["component_prefix"] = prefix or "(repository root)"
     row["weight_bytes"] = sum(
         size for p, size in paths.items()
-        if p.endswith((".safetensors", ".bin", ".pt", ".pth"))
+        if p.startswith(prefix) and p.endswith((".safetensors", ".bin", ".pt", ".pth"))
     )
+    row["repo_bytes"] = sum(paths.values())
     row["within_size_guard"] = 0 < row["weight_bytes"] <= SIZE_GUARD_BYTES
 
     # The config decides whether this component is even the right SHAPE. Read
     # at the resolved revision, never at a branch name, so what is reported is
     # what a pin to that sha would actually bake.
-    if row["revision"]:
+    if row["revision"] and row["config_path"]:
         try:
-            cfg = json.loads(
-                get_text(RAW.format(repo=repo, revision=row["revision"]), token)
-            )
+            cfg = json.loads(get_text(
+                RAW.format(repo=repo, revision=row["revision"],
+                           path=row["config_path"]), token))
             row["config"] = {k: cfg.get(k) for k in EXPECTED}
             row["config_mismatch"] = {
                 k: cfg.get(k) for k, v in EXPECTED.items() if cfg.get(k) != v
@@ -130,7 +164,9 @@ def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
             row["config_mismatch"] = {"config.json": _why(exc)}
     else:
         row["config"] = None
-        row["config_mismatch"] = {"revision": "not resolved"}
+        row["config_mismatch"] = {
+            "config.json": f"not found (searched {candidates})"
+            if row["revision"] else "revision not resolved"}
 
     row["verdict"] = (
         "PINNABLE"
@@ -160,8 +196,13 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
         print(f"    license_link  {row.get('licence_link')!r}")
         print(f"    licence files {row.get('licence_files') or 'NONE — the build refuses this'}")
         print(f"    root files    {row.get('root_files')}")
-        print(f"    weight bytes  {row.get('weight_bytes')} "
+        print(f"    shape         {'PIPELINE (model_index.json)' if row.get('is_pipeline') else 'BARE COMPONENT'}")
+        print(f"    subfolders    {row.get('subfolders')}")
+        print(f"    config at     {row.get('config_path')}")
+        print(f"    component     {row.get('component_prefix')}")
+        print(f"    component wt  {row.get('weight_bytes')} "
               f"(guard {SIZE_GUARD_BYTES}, within={row.get('within_size_guard')})")
+        print(f"    repo bytes    {row.get('repo_bytes')}")
         print(f"    config        {row.get('config')}")
         if row.get("config_mismatch"):
             print(f"    MISMATCH      {row['config_mismatch']}")
