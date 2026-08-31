@@ -71,24 +71,30 @@ def test_it_catches_a_second_unverified_revision_declared_in_the_pin(tmp_path, m
 
 
 def test_a_sha_quoted_in_the_pins_PROSE_is_not_a_declaration():
-    """The pin explains itself by citing the LTX transformer's own verified
-    revision. A raw-text scan would fail on the documentation rather than on
-    the data, and a check that accuses the explanation is one people delete."""
-    pin = build_proof._read("ltx-upscaler.pin")
-    active = build_proof._active_lines(pin)
-    # The prose cites the LTX transformer's revision, both upsampler
-    # candidates' revisions, and two vae content hashes — and, since the
-    # latent-space mismatch was measured, the upsampler's own revision written
-    # out and commented. Every one of those is documentation. NONE is a
-    # declaration, and a raw-text scan would have called this file five
-    # different pins.
-    for quoted in ("8984fa25007f376c1a299016d0957a37a2f797bb",
-                   "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f",
-                   "265ca87cb5dff5e37f924286e957324e282fe7710a952a7dafc0df43883e2010"):
-        assert quoted in pin
-    assert active == [], active
-    assert build_proof.run().failures == []
+    """The pin explains itself by citing revisions and content hashes. A
+    raw-text scan would fail on the documentation rather than on the data, and
+    a check that accuses the explanation is one people delete.
 
+    THE PROPERTY, NOT THE PARTICULAR HASHES. This test named three specific
+    shas and broke twice in one day as the prose was rewritten — first when
+    the latent-space mismatch was recorded, then when the checkpoint moved to
+    meet it. What matters is that the file quotes SEVERAL hex identifiers and
+    the parser declares exactly ONE line, so it now asserts that instead."""
+    import re
+
+    pin = build_proof._read("ltx-upscaler.pin")
+    quoted = set(re.findall(r"\b[0-9a-f]{40}\b|\b[0-9a-f]{64}\b", pin))
+    assert len(quoted) >= 3, sorted(quoted)
+
+    active = build_proof._active_lines(pin)
+    assert len(active) == 1, active
+    repo, revision = active[0].split()
+    assert repo == "Lightricks/ltxv-spatial-upscaler-0.9.7"
+    # Every OTHER hex identifier in the file is prose, and none of them leaked
+    # into the declaration.
+    for other in quoted - {revision}:
+        assert other not in active[0]
+    assert build_proof.run().failures == []
 
 def test_it_catches_a_signature_manifest_for_the_wrong_diffusers(tmp_path, monkeypatch):
     """A manifest describing a library the image does not install would pass

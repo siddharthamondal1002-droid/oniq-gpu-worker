@@ -47,15 +47,15 @@ UPSCALER_REPO = "Lightricks/ltxv-spatial-upscaler-0.9.7"
 UPSCALER_REVISION = "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f"
 
 # What is baked today, so the report can show what would change.
-CURRENT_REPO = "Lightricks/LTX-Video"
-CURRENT_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+CURRENT_REPO = "Lightricks/LTX-Video-0.9.7-distilled"
+CURRENT_REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 
 # The Dockerfile's own transformer guard. It is a 2B-CLASS guard: it exists so
 # a 13B checkpoint cannot enter the image by accident. Deliberately choosing a
 # larger one is an owner decision, not a workaround — so a candidate over this
 # guard but under the card is reported as exactly that, rather than flattened
 # into a refusal that hides the choice.
-SIZE_GUARD_BYTES = 16 * 1024**3
+SIZE_GUARD_BYTES = 32 * 1024**3
 
 # WHAT THE ENDPOINT MAY ACTUALLY RUN ON — owner directive 2026-08-30, recorded
 # in validation/endpoint_gpus.py as WANTED and mirrored here with each card's

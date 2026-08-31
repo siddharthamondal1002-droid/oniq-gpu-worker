@@ -24,7 +24,7 @@ CANDIDATES = [
     ("Vendor/ltx", ""),
 ]
 DEST = "/app/models/ltx"
-SIZE_GUARD_BYTES = 16 * 1024**3
+SIZE_GUARD_BYTES = 32 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 if "model_index.json" not in paths:
     raise RuntimeError("no model_index.json")
@@ -144,11 +144,16 @@ def test_only_files_matching_the_patterns_are_counted():
 
 
 def test_a_candidate_over_its_guard_is_skipped_and_never_sized():
-    """The second regression, measured in run 50: the 13B repository was
+    """The second regression, measured in run 50: an over-guard repository was
     sized at 44 GiB and the image declared not to fit, when the build
-    would have refused that candidate outright."""
+    would have refused that candidate outright.
+
+    The size here is 40 GiB rather than the original 26: a 13B is what ONIQ
+    now deliberately bakes, so the guard moved 16 -> 32 GiB with it. What is
+    under test is that an over-guard candidate is SKIPPED rather than sized,
+    whatever the guard happens to be."""
     bake = isz.parse_bakes(DOCKERFILE)[LTX]
-    out = isz.survey("r", bake, lambda _: _ltx(26))
+    out = isz.survey("r", bake, lambda _: _ltx(40))
     assert out["verdict"] == "SKIP"
     assert out["bytes"] is None
     assert "guard" in out["detail"]
@@ -209,7 +214,10 @@ def test_an_unreachable_first_candidate_falls_through_to_a_passing_one(capsys):
         if repo == "Vendor/ltx-2b":
             raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
         if repo == "Vendor/ltx-13b":
-            return _ltx(26)
+            # Over the raised 32 GiB guard, so the fall-through still has
+            # something to fall through past. 26 GiB was over the OLD guard;
+            # a 13B is now what ONIQ bakes on purpose.
+            return _ltx(40)
         return _ltx(4)
 
     code, rows = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
@@ -350,7 +358,10 @@ def test_a_404_still_falls_through_because_that_is_a_judgement(capsys):
         if repo == "Vendor/ltx-2b":
             raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
         if repo == "Vendor/ltx-13b":
-            return _ltx(26)
+            # Over the raised 32 GiB guard, so the fall-through still has
+            # something to fall through past. 26 GiB was over the OLD guard;
+            # a 13B is now what ONIQ bakes on purpose.
+            return _ltx(40)
         return _ltx(4)
 
     code, rows = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)

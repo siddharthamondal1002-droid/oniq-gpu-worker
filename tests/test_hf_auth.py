@@ -13,8 +13,11 @@ import pytest
 from validation import hf_auth
 
 GIB = 1024**3
-REPO = "Lightricks/LTX-Video"
-REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+# Moved 2026-08-31 with the owner's checkpoint directive: the old
+# checkpoint's vae is a different network from the pinned spatial
+# upsampler's, so multi-scale could not be enabled against it.
+REPO = "Lightricks/LTX-Video-0.9.7-distilled"
+REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 SECRET = "hf_thisisnotarealtokenvalue"
 
 
@@ -62,7 +65,7 @@ def test_the_intended_model_is_the_head_of_the_real_candidate_list():
 def test_the_gates_come_from_the_dockerfile_not_from_here():
     want = hf_auth.intended(_dockerfile())
     assert want["guard_prefix"] == "transformer/"
-    assert want["size_guard_bytes"] == 16 * GIB
+    assert want["size_guard_bytes"] == 32 * GIB
     assert "text_encoder" in want["components"]
 
 
@@ -108,9 +111,19 @@ def test_no_commit_sha_means_nothing_to_pin_to():
     assert exc.value.code == "revision-unknown"
 
 
-def test_a_thirteen_b_wearing_the_name_fails_the_shape_guard():
+def test_a_transformer_over_the_guard_fails_the_shape_guard():
+    """The guard is RAISED, not removed, and this is what proves it.
+
+    It used to read "a thirteen B wearing the name", with 26 GiB against a
+    16 GiB guard. A 13B is now what ONIQ deliberately bakes (owner directive
+    2026-08-31), so the size moved to one the 32 GiB guard still refuses —
+    70.75 GiB, which is what run 33432424021 actually measured for
+    Lightricks/LTX-2-Pre-Trained. A guard that admits everything is not a
+    guard, so the refusal is pinned against a real repository rather than an
+    invented number."""
     with pytest.raises(hf_auth.Blocked) as exc:
-        hf_auth.probe(_dockerfile(), SECRET, _ok(_info(transformer=26 * GIB)))
+        hf_auth.probe(_dockerfile(), SECRET,
+                      _ok(_info(transformer=int(70.75 * GIB))))
     assert exc.value.code == "guard-failed"
 
 
@@ -210,7 +223,15 @@ def _bakes_by_role():
     """
     roles = {}
     for block in _bake_blocks():
-        if "LTX_PASS" in block:
+        if "LTX_TX_PASS" in block:
+            # The TRANSFORMER passes, added 2026-08-31 when the checkpoint
+            # moved to 0.9.7-distilled: at 24.29 GiB it can no longer ride in
+            # the first layer. Named BEFORE the /app/models/ltx test below for
+            # the reason this function's docstring gives — these write into
+            # that same directory, so an unnamed pass would be filed as the
+            # transformer bake, silently replacing it and taking the count.
+            roles.setdefault("transformer_passes", []).append(block)
+        elif "LTX_PASS" in block:
             roles.setdefault("ltx_passes", []).append(block)
         elif "ltx-upscaler.pin" in block:
             # BEFORE the /app/models/ltx test below, because the upscaler
@@ -237,13 +258,15 @@ def test_every_bake_is_syntactically_valid_python():
 
     blocks = _bake_blocks()
     roles = _bakes_by_role()
-    # Three named bakes plus however many text-encoder passes the layer
-    # split uses; every one of them is compiled, none is skipped.
-    # Three named bakes, the optional upscaler, plus however many
-    # text-encoder passes the layer split uses; every one compiled, none
-    # skipped.
-    assert len(blocks) == 3 + len(roles.get("ltx_passes", [])) + (
-        1 if "upscaler" in roles else 0
+    # Three named bakes, the optional upscaler, plus however many transformer
+    # and text-encoder passes the layer split uses; every one compiled, none
+    # skipped. The arithmetic is spelled out rather than hardcoded so that
+    # adding a pass cannot quietly drop a block from this check.
+    assert len(blocks) == (
+        3
+        + len(roles.get("transformer_passes", []))
+        + len(roles.get("ltx_passes", []))
+        + (1 if "upscaler" in roles else 0)
     )
     for block in blocks:
         ast.parse(block)
@@ -295,7 +318,7 @@ def test_the_ltx_bake_has_exactly_one_candidate():
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video"]
+    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video-0.9.7-distilled"]
 
 
 def test_the_ltx_bake_pins_the_exact_revision_the_owner_named():
@@ -367,7 +390,7 @@ def test_the_size_guards_both_survive():
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert bakes[0]["size_guard_bytes"] == 16 * 1024**3
+    assert bakes[0]["size_guard_bytes"] == 32 * 1024**3
     assert bakes[1]["size_guard_bytes"] == 20 * 1024**3
 
 

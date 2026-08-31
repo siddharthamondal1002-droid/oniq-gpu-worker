@@ -230,8 +230,8 @@ def measure(repo: str, token, get=_get, get_text=_get_text, revision=None) -> di
 # ONIQ's own baked vae. If that vae is byte-identical to the one shipped beside
 # the upsampler, the latent space is provably the same and the 0.9.7-vs-2B
 # question is closed rather than argued.
-BAKED_REPO = "Lightricks/LTX-Video"
-BAKED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+BAKED_REPO = "Lightricks/LTX-Video-0.9.7-distilled"
+BAKED_REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 
 
 def _vae_tree(repo: str, revision: str, token, get) -> dict:

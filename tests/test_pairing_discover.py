@@ -123,12 +123,17 @@ class TestPairingIsNotFitting:
         assert row["fits_card"] is False
         assert row["verdict"].startswith("WILL NOT FIT")
 
-    def test_a_13b_over_the_guard_but_under_the_card_is_a_decision_not_a_refusal(self):
-        # ~26 GiB on a 48 GiB card. The 16 GiB guard exists to stop a 13B
-        # arriving BY ACCIDENT; choosing one on purpose is the owner's call,
-        # so this must not read as "impossible".
-        get, get_text = _fakes(_info(int(26 * GIB)), UPSTREAM_VAE)
-        row = pd.measure("them/ltx-13b", UPSTREAM_VAE, SECRET, None, get, get_text)
+    def test_over_the_guard_but_under_the_card_is_a_decision_not_a_refusal(self):
+        # 40 GiB against a 32 GiB guard on a 48 GiB card. The guard exists to
+        # stop an oversized checkpoint arriving BY ACCIDENT; choosing one on
+        # purpose is the owner's call, so this must not read as "impossible".
+        #
+        # The size here moved from 26 GiB when the guard was raised 16 -> 32
+        # for the 0.9.7-distilled repoint. The PROPERTY under test is the
+        # three-way distinction — inside the guard, between guard and card,
+        # over the card — not any particular number.
+        get, get_text = _fakes(_info(int(40 * GIB)), UPSTREAM_VAE)
+        row = pd.measure("them/ltx-huge-ish", UPSTREAM_VAE, SECRET, None, get, get_text)
         assert row["within_size_guard"] is False and row["fits_card"] is True
         assert row["verdict"].startswith("PAIRS AND FITS, OVER TODAY'S GUARD")
         assert "owner decision" in row["verdict"]
@@ -188,14 +193,13 @@ class TestItRefusesRatherThanGuessing:
 
 class TestItStaysInStepWithThePin:
     def test_the_pinned_upsampler_matches_the_pin_file(self):
-        # Two places naming one artifact is how they drift. The pin's line is
-        # commented (the pairing failed), so it is matched as prose.
-        import re
-
+        # Two places naming one artifact is how they drift. The pin is LIVE
+        # again — the checkpoint moved to meet it on 2026-08-31 — so this
+        # reads the declaration rather than the prose.
         pin = open("ltx-upscaler.pin", encoding="utf-8").read()
-        written = [l.lstrip("# ").strip() for l in pin.splitlines()
-                   if re.fullmatch(r"#\s*Lightricks/\S+\s+[0-9a-f]{40}\s*", l)]
-        assert written == [f"{pd.UPSCALER_REPO} {pd.UPSCALER_REVISION}"]
+        declared = [l.split("#", 1)[0].strip() for l in pin.splitlines()
+                    if l.split("#", 1)[0].strip()]
+        assert declared == [f"{pd.UPSCALER_REPO} {pd.UPSCALER_REVISION}"]
 
     def test_the_current_checkpoint_matches_the_dockerfiles_pin(self):
         docker = open("Dockerfile", encoding="utf-8").read()

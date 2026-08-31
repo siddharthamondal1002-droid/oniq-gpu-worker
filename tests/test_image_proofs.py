@@ -14,8 +14,11 @@ import pytest
 from validation.proofs import baked_assets, no_credential
 
 GIB = 1024**3
-GOOD_LTX = "Lightricks/LTX-Video"
-SHA = "8984fa25007f376c1a299016d0957a37a2f797bb"
+# Moved 2026-08-31 with the owner's checkpoint directive: the old
+# checkpoint's vae is a different network from the pinned spatial
+# upsampler's, so multi-scale could not be enabled against it.
+GOOD_LTX = "Lightricks/LTX-Video-0.9.7-distilled"
+SHA = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 
 
 def _tree(tmp_path, ltx_id=GOOD_LTX, story="Qwen/Qwen3-8B-AWQ", revision=SHA,

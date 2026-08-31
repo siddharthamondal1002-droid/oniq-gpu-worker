@@ -20,18 +20,26 @@ import json
 import os
 import sys
 
-# The exact identity the owner chose (2026-08-28, option 1), and the exact
-# revision. Not derived from the Dockerfile here on purpose: this is the
-# independent side of the check, and a value read from the same file that
-# produced the image would agree with it by construction rather than by
-# fact.
-EXPECT_LTX = "Lightricks/LTX-Video"
-EXPECT_LTX_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+# The exact identity the owner chose, and the exact revision. Not derived from
+# the Dockerfile here on purpose: this is the independent side of the check,
+# and a value read from the same file that produced the image would agree with
+# it by construction rather than by fact.
+#
+# MOVED 2026-08-31 (owner directive) from Lightricks/LTX-Video@8984fa25. That
+# checkpoint's vae is a different network from the one the pinned spatial
+# upsampler was trained beside, measured in run 33426496040, so multi-scale
+# could not be enabled against it. Run 33432424021 measured this one as
+# PAIRING, and the owner chose it over the 2B-class 0.9.5 that also pairs.
+EXPECT_LTX = "Lightricks/LTX-Video-0.9.7-distilled"
+EXPECT_LTX_REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 # LTX is NOT Apache. The owner accepted the LTX Open Weights terms as they
 # stand at the pinned revision; the registry reports them as "other".
 EXPECT_LTX_LICENCE = "other"
 EXPECT_STORY_PREFIX = "Qwen/Qwen3-8B"
-LTX_GUARD_BYTES = 16 * 1024**3
+# Raised with the Dockerfile's own guard, same owner directive: this
+# checkpoint's transformer measures 24.29 GiB. Still a real refusal — the same
+# registry read measured LTX-2-Pre-Trained at 70.75 GiB.
+LTX_GUARD_BYTES = 32 * 1024**3
 STORY_GUARD_BYTES = 20 * 1024**3
 
 ROOT = "/app/models"

@@ -106,9 +106,9 @@ def run() -> Proof:
 
     bakes = image_size.parse_bakes(docker)
     p.check("LTX bake has exactly one candidate",
-            bakes[0]["candidates"] == ["Lightricks/LTX-Video"])
+            bakes[0]["candidates"] == ["Lightricks/LTX-Video-0.9.7-distilled"])
     p.check("LTX revision pinned",
-            "8984fa25007f376c1a299016d0957a37a2f797bb" in docker)
+            "057509edea1493cae5e62e9d8f780ebda3fb4333" in docker)
     p.check("Qwen licence gate present", "Apache" in docker and "/app/models/story" in docker)
     p.check("Piper baked", "/app/models/piper" in docker)
     p.check("upscaler stage present", "THE SPATIAL LATENT UPSCALER" in docker)

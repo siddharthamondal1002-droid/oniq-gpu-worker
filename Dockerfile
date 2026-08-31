@@ -160,13 +160,23 @@ def auth_refused(exc):
 # walked past the absent head and landed somewhere unrecorded. Guarding a
 # fall-through is weaker than not having one, so there is nothing to fall
 # through to and every failure below is terminal.
+# OWNER DIRECTIVE 2026-08-31 — the 13B distilled 0.9.7 checkpoint.
+#
+# This moved because of a MEASUREMENT, not a preference. Run 33426496040
+# found that the vae at Lightricks/LTX-Video@8984fa25 is a different network
+# from the one the pinned spatial upsampler was trained beside — four stages
+# against five, no timestep-conditioned decoder — so multi-scale could not be
+# enabled without silently refining latents the upsampler had never seen.
+# Run 33432424021 then measured every Lightricks candidate against the
+# upsampler's own vae config; this one PAIRS, and the owner chose it over the
+# 2B-class 0.9.5 that also pairs.
 CANDIDATES = [
-    ("Lightricks/LTX-Video", ""),
+    ("Lightricks/LTX-Video-0.9.7-distilled", ""),
 ]
 # THE PIN. A repository name names a moving branch; a sha names bytes —
 # and it also fixes the LICENCE TERMS, because the terms at a commit
 # cannot change after the fact. The build refuses any other revision.
-PINNED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+PINNED_REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 
 # THE LTX LICENCE GATE — owner directive 2026-08-28.
 #
@@ -186,7 +196,19 @@ PINNED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
 # prevents, and it is why LICENSE*/NOTICE* joined allow_patterns.
 ALLOWED_LICENCES = {"other"}
 DEST = "/app/models/ltx"
-SIZE_GUARD_BYTES = 16 * 1024**3
+# RAISED FROM 16 GiB TO 32 GiB — owner directive 2026-08-31, taken knowingly
+# alongside the checkpoint choice above.
+#
+# The old value was a 2B-CLASS guard: it existed so a 13B checkpoint could not
+# enter the image by accident. The owner has now chosen one on purpose, and
+# 0.9.7-distilled's transformer measures 24.29 GiB, so the guard had to move
+# or the build would refuse the very model it was told to bake.
+#
+# It is RAISED, NOT REMOVED, and the new value is still a real refusal: the
+# same registry read measured Lightricks/LTX-2-Pre-Trained at 70.75 GiB of
+# transformer, which this still rejects. A guard that admits everything is
+# not a guard.
+SIZE_GUARD_BYTES = 32 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 # WHICH COMPONENTS THIS RUN DOWNLOADS. The survey above still checks that
 # EVERY component in COMPONENTS exists before a byte moves; this narrower
@@ -199,7 +221,13 @@ COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 # worker was observed doing for over three hours, re-downloading layers it
 # had already completed. Splitting the text encoder into its own passes
 # caps the worst-case restart at roughly a third of that.
-FIRST_PASS = ("transformer", "vae", "tokenizer", "scheduler")
+# THE TRANSFORMER IS NO LONGER HERE. At 8984fa25 it was 7.17 GiB and rode
+# along with the small components; 0.9.7-distilled's is 24.29 GiB, which would
+# make this single no-resume layer ~27 GiB — worse than the 16.05 GiB layer
+# that was measured re-downloading itself for over three hours. It now goes
+# through its own three-way split below, the same midpoint mechanism the text
+# encoder already uses, capping the worst-case restart at roughly 8 GiB.
+FIRST_PASS = ("vae", "tokenizer", "scheduler")
 
 # The credential arrives on a tmpfs for the duration of this RUN only, via
 # BuildKit's secret mount. Read here, passed explicitly to the two calls
@@ -244,7 +272,8 @@ def survey(api, repo):
     )
     if transformer_bytes > SIZE_GUARD_BYTES:
         raise RuntimeError(
-            f"transformer {transformer_bytes} metadata bytes exceed the 2B-class guard"
+            f"transformer {transformer_bytes} metadata bytes exceed the "
+            f"{SIZE_GUARD_BYTES} guard"
         )
 
     # The commit this build will pin to. A repository name names a moving
@@ -392,6 +421,175 @@ shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 shutil.rmtree(os.path.expanduser("~/.cache/huggingface"), ignore_errors=True)
 shutil.rmtree("/root/.cache/huggingface", ignore_errors=True)
 shutil.rmtree("/home/oniq/.cache/huggingface", ignore_errors=True)
+EOF
+
+# THE TRANSFORMER, IN THREE LAYERS. Identical mechanism to the text encoder
+# below — list the component's shards from metadata, split them by cumulative
+# size on each file's MIDPOINT, download this pass's share — and here for the
+# same reason: a container layer is one download stream with NO RESUME, so a
+# worker that loses the stream restarts the whole layer. 0.9.7-distilled's
+# transformer is 24.29 GiB; in one layer that is the failure mode this image
+# has already paid for once, and in three it is roughly 8 GiB.
+#
+# A repository whose transformer is one unsharded file puts it all in pass 0
+# and leaves the others empty — still correct, just unsplit.
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=0 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PREFIX = "transformer/"
+PASSES = 3
+PASS = int(os.environ["LTX_TX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith(PREFIX)
+)
+if not files:
+    raise SystemExit("the pinned revision carries no transformer files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
+if not mine:
+    print("nothing for this pass — the transformer is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=1 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PREFIX = "transformer/"
+PASSES = 3
+PASS = int(os.environ["LTX_TX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith(PREFIX)
+)
+if not files:
+    raise SystemExit("the pinned revision carries no transformer files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
+if not mine:
+    print("nothing for this pass — the transformer is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=2 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PREFIX = "transformer/"
+PASSES = 3
+PASS = int(os.environ["LTX_TX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith(PREFIX)
+)
+if not files:
+    raise SystemExit("the pinned revision carries no transformer files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
+if not mine:
+    print("nothing for this pass — the transformer is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
 EOF
 
 # THE TEXT ENCODER, IN TWO LAYERS. Same repository, same pinned revision,
