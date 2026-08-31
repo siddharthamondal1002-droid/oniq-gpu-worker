@@ -915,3 +915,27 @@ def test_the_base_canvas_is_near_the_official_downscale_factor():
     ratio = contract.VIDEO_WIDTH / film_w
     assert abs(ratio - ltxcaps.DOWNSCALE_FACTOR) < 0.02
     assert 720 % videogen.VAE_SPATIAL_RATIO != 0, "720 would have been exact but is illegal"
+
+
+def test_the_reference_contract_numbers_are_pinned_on_this_side_too():
+    """THE OTHER HALF OF A TWO-REPO CONTRACT.
+
+    supabase/functions/_shared/characterRef.ts states the identical prefix,
+    scope and strength band, and its own suite asserts those literals. The two
+    repositories cannot import each other and CI checks out one at a time, so
+    each pins the numbers itself and a drift fails in whichever repo moved.
+
+    That is the lesson of the 1000-character prompt ceiling: a bound known to
+    only one end of a contract is a deterministic failure waiting for a long
+    enough input, and it cost a 27% still-failure rate before anybody saw it.
+    """
+    assert contract.REFERENCE_PREFIX == "story/ref/"
+    assert contract.REFERENCE_SCOPE_CANON == "canon"
+    assert contract.MIN_REFERENCE_STRENGTH == 0.05
+    assert contract.MAX_REFERENCE_STRENGTH == 0.95
+    # And the shape the app builds is the shape this side accepts.
+    assert contract.validate_job({
+        "op": "image_generate",
+        "output_key": "out/a.png",
+        "params": {"prompt": "p", "reference_key": "story/ref/canon/abc/v1.png"},
+    })["params"]["reference_key"] == "story/ref/canon/abc/v1.png"
