@@ -74,6 +74,9 @@ COPY modelroot.py /app/modelroot.py
 COPY modelhydrate.py /app/modelhydrate.py
 COPY preview.py /app/preview.py
 COPY videogen.py /app/videogen.py
+# ltxcaps derives the inference profile from the BAKED checkpoint. videogen
+# imports it, so it must ship or the worker dies on import at start-up.
+COPY ltxcaps.py /app/ltxcaps.py
 COPY modelprobe.py /app/modelprobe.py
 COPY storygen.py /app/storygen.py
 COPY audio.py /app/audio.py

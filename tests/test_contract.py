@@ -202,10 +202,36 @@ def test_video_job_refuses_every_knob_but_the_prompt():
 
 
 def test_video_constants_are_the_recorded_server_decisions():
-    assert (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT) == (704, 480)
+    assert (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT) == (704, 1248)
     assert contract.VIDEO_WIDTH % 32 == 0 and contract.VIDEO_HEIGHT % 32 == 0
     assert contract.VIDEO_NUM_FRAMES % 8 == 1  # LTX's 8k+1 rule
     assert contract.VIDEO_FPS == 24
+
+
+def test_the_canvas_is_portrait_and_matches_the_film():
+    """The audit's primary finding, as an executable guard.
+
+    A landscape canvas feeding a 1080x1920 film cost a 4.00x upscale and threw
+    away 61.6% of every frame's width. This asserts the canvas is portrait AND
+    that its aspect is close enough to the film's that the assembly's
+    cover-crop removes almost nothing.
+    """
+    assert contract.VIDEO_HEIGHT > contract.VIDEO_WIDTH, "canvas must be portrait"
+    film_w, film_h = 1080, 1920
+    canvas = contract.VIDEO_WIDTH / contract.VIDEO_HEIGHT
+    film = film_w / film_h
+    assert abs(canvas - film) < 0.01, f"aspect {canvas:.4f} vs film {film:.4f}"
+
+    # The crop the assembly will actually perform.
+    scale = max(film_w / contract.VIDEO_WIDTH, film_h / contract.VIDEO_HEIGHT)
+    kept = film_w / (contract.VIDEO_WIDTH * scale)
+    assert kept > 0.99, f"cover-crop keeps only {kept:.1%} of the width"
+
+    # And the pixel deficit, which was 16.00x before this change.
+    visible = min(contract.VIDEO_WIDTH, round(film_w / scale)) * min(
+        contract.VIDEO_HEIGHT, round(film_h / scale)
+    )
+    assert (film_w * film_h) / visible < 3.0
 
 
 def test_video_evidence_fields_are_whitelisted():
@@ -351,7 +377,10 @@ def test_image_generate_bounds_the_prompt():
 def test_image_generate_takes_no_watermark_field():
     # A conditioning frame is an intermediate. The mark belongs to the
     # delivered film, burned by the stage that knows the entitlement.
-    assert contract._IMAGE_GEN_PARAM_FIELDS == frozenset({"prompt"})
+    assert contract._IMAGE_GEN_PARAM_FIELDS == frozenset(
+        {"prompt", "seed", "negative_prompt"}
+    )
+    assert "watermark" not in contract._IMAGE_GEN_PARAM_FIELDS
     with pytest.raises(contract.ContractError):
         contract.validate_job(
             _image_job(params={"prompt": "ok", "watermark": False})

@@ -126,10 +126,22 @@ def test_contract_bounds_narration_length():
 
 
 def test_video_generate_contract_is_untouched_by_audio():
-    """Audio must not widen the video op. The surface is exactly the
-    prompt plus the server-derived watermark entitlement (monetization
-    resolution loop, 2026-08-27) — narration still cannot leak in."""
-    assert contract._VIDEO_PARAM_FIELDS == frozenset({"prompt", "watermark"})
+    """Audio must not widen the video op.
+
+    The surface is the prompt, the server-derived watermark entitlement
+    (monetization resolution loop, 2026-08-27), and the two per-shot sampler
+    inputs added by the quality work of 2026-08-31 — seed and negative_prompt,
+    both of which the app DERIVES rather than letting a user type.
+
+    The guard's point was never the number of fields; it is that AUDIO cannot
+    reach a video job. Widening the assertion to an exact set keeps that: a
+    narration field appearing here still fails, and so does any other name
+    nobody has argued for.
+    """
+    assert contract._VIDEO_PARAM_FIELDS == frozenset(
+        {"prompt", "watermark", "seed", "negative_prompt"}
+    )
+    assert "narration" not in contract._VIDEO_PARAM_FIELDS
     with pytest.raises(contract.ContractError):
         contract.validate_job(
             {

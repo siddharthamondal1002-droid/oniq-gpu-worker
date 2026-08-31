@@ -173,6 +173,9 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         # thumbnail back with the reply.
         "preview.py",
         "videogen.py",
+        # ltxcaps joined 2026-08-31: videogen imports it to derive the sampler
+        # profile from the baked checkpoint, so it ships like any other module.
+        "ltxcaps.py",
         # modelprobe joined 2026-08-29 with the benchmark op.
         "modelprobe.py",
         "storygen.py",
@@ -263,6 +266,7 @@ def test_dockerignore_denies_by_default():
         "!modelroot.py",
         "!modelhydrate.py",
         "!preview.py",
+        "!ltxcaps.py",
         "!videogen.py",
         "!modelprobe.py",
         "!storygen.py",
@@ -358,6 +362,10 @@ def test_the_closure_actually_reaches_the_engines():
         "storage",
         "preview",
         "videogen",
+        # The checkpoint-derived inference profile (2026-08-31). videogen
+        # imports it for every generate op, so it is part of the shipped
+        # closure and the COPY/.dockerignore guards above must see it.
+        "ltxcaps",
         "storygen",
         "audio",
         # modelprobe joined 2026-08-29 with the benchmark op. It is imported

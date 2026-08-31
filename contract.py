@@ -100,11 +100,53 @@ PREVIEW_MAX_BYTES = 900_000
 # only degree of freedom is the motion prompt; resolution, frame count,
 # fps and the model are constants here and in videogen.py, so no job can
 # request a bigger canvas, a longer clip, or a different model.
+# THE CANVAS IS PORTRAIT, AND THAT IS THE WHOLE POINT (owner directive,
+# 2026-08-31, after the capability audit).
+#
+# It was 704x480 LANDSCAPE while the film it feeds is 1080x1920 PORTRAIT, and
+# nothing in between could reconcile them. The assembly does
+# `scale=...:force_original_aspect_ratio=increase,crop=1080:1920`, so every
+# frame was scaled 4.00x and then had 61.6% of its WIDTH thrown away. Measured
+# on the delivered artifact: 270x480 = 129,600 source pixels were stretched to
+# fill 1080x1920 = 2,073,600 — SIXTEEN output pixels invented per real one,
+# with no upscaler and no face restoration anywhere in the path. That, and not
+# the model, is why faces were hazy.
+#
+# 704x1248 is chosen, not rounded to:
+#   - both axes divisible by 32, which the VAE's spatial compression requires;
+#   - 0.5641 against the film's 0.5625, so the crop falls from 61.6% to 0.28%;
+#   - 2.60x the pixels of the old canvas, taking the deficit from 16.00x to
+#     2.37x — a 6.75x improvement — without the jump to a full 1080-wide
+#     latent, which projects past this card's memory at 97 frames.
+#
+# THE PROJECTION IS NOT A MEASUREMENT. Scaling the measured 13,803 MB peak by
+# pixel count gives ~35.9 GB of the A5000-class 48 GB card and ~101s against
+# the 600s endpoint ceiling. Attention does not scale linearly, so the true
+# figure will differ; videogen fails CLOSED on OOM rather than trusting this.
 VIDEO_WIDTH = 704
-VIDEO_HEIGHT = 480
+VIDEO_HEIGHT = 1248
 VIDEO_NUM_FRAMES = 97  # LTX wants 8k+1 frames; 97 @ 24fps ≈ 4.0s
 VIDEO_FPS = 24
 MAX_PROMPT_CHARS = 1000
+
+# The VAE's spatial compression makes a non-multiple-of-32 canvas silently
+# resize inside the pipeline, which would reintroduce exactly the resampling
+# this change exists to remove. Asserted at import so a future edit to the two
+# numbers above cannot land quietly.
+assert VIDEO_WIDTH % 32 == 0, "VIDEO_WIDTH must be divisible by 32"
+assert VIDEO_HEIGHT % 32 == 0, "VIDEO_HEIGHT must be divisible by 32"
+assert VIDEO_HEIGHT > VIDEO_WIDTH, "the film is portrait; the canvas must be too"
+
+# Bounds on a caller-supplied negative prompt. Per-shot negatives are the
+# point (a face-artifact list belongs to a shot with a face in it, not to a
+# landscape), but an unbounded one would eat the model's own token budget and
+# push the positive prompt out of the window.
+MAX_NEGATIVE_PROMPT_CHARS = 400
+
+# A caller-supplied seed is a 64-bit unsigned integer. It is DERIVED by the
+# app from job/scene/shot/attempt — never random, never a clock — so the same
+# attempt reproduces and a different attempt genuinely differs.
+MAX_SEED = 2**64 - 1
 
 # story_generate: ONIQ's own causal LLM (owner directive 2026-08-27). The
 # prompt is long by nature — a brief, a budget and a schema — so it has
@@ -159,6 +201,58 @@ _TOP_LEVEL_FIELDS = frozenset({"op", "input_key", "output_key", "params"})
 # or revision: a caller may say which row of an authorised benchmark to run,
 # never what to download or how to run it.
 _PROBE_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS | {"model", "preview"}
+
+
+def _sampling_params(params_raw: dict) -> dict:
+    """The two per-shot sampler inputs, validated once for both generate ops.
+
+    SEED AND NEGATIVE PROMPT ARE THE CALLER'S, and everything else about the
+    sampler stays the server's. They are here because neither can be decided
+    by the worker without making the product worse:
+
+      - a module-level SEED made every retry re-sample IDENTICALLY, so the
+        ten attempts the owner authorised on 2026-08-31 were ten copies of one
+        image. The app derives it from job/scene/shot/attempt, so the same
+        attempt reproduces and a different attempt genuinely differs.
+      - one global negative prompt cannot serve both a close-up face and an
+        empty landscape. A face-artifact list belongs to the shot that has a
+        face in it.
+
+    Both are OPTIONAL. Absent means "the server's own default applies", so
+    every existing caller keeps its current behaviour byte for byte.
+    """
+    out: dict = {}
+
+    if "seed" in params_raw:
+        seed = params_raw["seed"]
+        # bool is an int subclass in Python and True would silently become 1.
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ContractError("invalid-input", "params.seed must be an integer")
+        if not 0 <= seed <= MAX_SEED:
+            raise ContractError(
+                "invalid-input", f"params.seed must be within 0..{MAX_SEED}"
+            )
+        out["seed"] = seed
+
+    if "negative_prompt" in params_raw:
+        neg = params_raw["negative_prompt"]
+        if not isinstance(neg, str):
+            raise ContractError(
+                "invalid-input", "params.negative_prompt must be a string"
+            )
+        neg = neg.strip()
+        if len(neg) > MAX_NEGATIVE_PROMPT_CHARS:
+            raise ContractError(
+                "invalid-input",
+                f"params.negative_prompt may not exceed "
+                f"{MAX_NEGATIVE_PROMPT_CHARS} characters",
+            )
+        # An empty string is a caller asking for NO negative prompt, which is
+        # different from not asking at all. Both are legal; they differ, and
+        # the difference is preserved rather than collapsed.
+        out["negative_prompt"] = neg
+
+    return out
 # model_hydrate carries a model id and nothing else. No keys, because it
 # reads no object and writes none; no params, because there is nothing to
 # tune about a download whose revision is pinned server-side.
@@ -176,7 +270,7 @@ _PARAM_FIELDS = frozenset({"target_max_dim", "format", "quality"})
 # watermark is a SERVER-derived entitlement relayed by the application —
 # absent means TRUE (marked), the fail-safe: an old or malformed caller
 # can only ever produce the watermarked product, never a free clean one.
-_VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark"})
+_VIDEO_PARAM_FIELDS = frozenset({"prompt", "watermark", "seed", "negative_prompt"})
 
 # model_probe ONLY. Owner directive 2026-08-30: "Do not rebuild the image
 # merely to change frames, steps, checkpoint revision, offload mode or
@@ -198,7 +292,7 @@ MIN_PROBE_FRAMES = 5
 MAX_PROBE_FRAMES = 121
 MIN_PROBE_STEPS = 1
 MAX_PROBE_STEPS = 50
-_IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt"})
+_IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt", "seed", "negative_prompt"})
 _STORY_PARAM_FIELDS = frozenset({"prompt", "max_tokens"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
 _CONCAT_PARAM_FIELDS = frozenset({"segment_keys"})
@@ -233,6 +327,37 @@ OUTPUT_WHITELIST = frozenset(
         # story_generate evidence — the text itself plus its measurements
         "story_text",
         "story_chars",
+        # QUALITY DIAGNOSTICS (owner directive, 2026-08-31). Every clip must
+        # carry enough to diagnose a bad face without re-running it: which
+        # weights, which sampler numbers, which seed. The 2026-08-30 film was
+        # undiagnosable precisely because none of this was recorded — guidance
+        # was never even passed, so no value existed to report.
+        #
+        # NO SECRETS AND NO STORAGE URLS pass through here; the whitelist is
+        # what makes that checkable rather than merely intended.
+        "pipeline_class",
+        "scheduler_class",
+        "distilled",
+        "condition_pipeline_supported",
+        "latent_upsampler_baked",
+        "num_inference_steps",
+        "guidance_scale",
+        "guidance_rescale",
+        "decode_timestep",
+        "decode_noise_scale",
+        "image_cond_noise_scale",
+        "defaults_source",
+        "seed",
+        "negative_prompt_chars",
+        "conditioning_count",
+        # WHICH pipeline class actually ran, as opposed to the one the
+        # checkpoint's model_index names. `pipeline_class` above is the
+        # snapshot's own declaration; this is what was instantiated, and the
+        # two differ whenever the condition pipeline is used or falls back.
+        "pipeline_used",
+        "conditioning",
+        "conditioning_strength",
+        "upscaler_used",
         # WHICH precision actually loaded. 4-bit and bf16 differ by ~12GB
         # of the card, and the load can silently fall back, so the mode is
         # reported by the job rather than assumed from the config.
@@ -494,7 +619,7 @@ def validate_job(raw) -> dict:
             "input_key": None,
             "output_key": output_key,
             "preview": preview,
-            "params": {"prompt": prompt.strip()},
+            "params": {"prompt": prompt.strip(), **_sampling_params(params_raw)},
         }
 
     if op == "model_hydrate":
@@ -599,7 +724,11 @@ def validate_job(raw) -> dict:
             "op": op,
             "input_key": input_key,
             "output_key": output_key,
-            "params": {"prompt": prompt.strip(), "watermark": watermark},
+            "params": {
+                "prompt": prompt.strip(),
+                "watermark": watermark,
+                **_sampling_params(params_raw),
+            },
         }
 
     if op == "video_concat":

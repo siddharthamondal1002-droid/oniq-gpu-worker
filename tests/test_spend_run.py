@@ -645,7 +645,7 @@ def _good_video_status(execution_ms=180_000):
             "fps": 24,
             "video_seconds": 4.04,
             "width": 704,
-            "height": 480,
+            "height": 1248,
             "format": "mp4",
             "output_bytes": 2_400_000,
             "duration_ms": 160_000,
@@ -676,7 +676,7 @@ def test_one_video_job_row_carries_measured_economics():
     row = _run_one_video(client)
     assert row["op"] == "video_generate"
     assert row["model"].endswith("#distilled")
-    assert row["resolution"] == "704x480"
+    assert row["resolution"] == "704x1248"
     assert row["frames"] == 97
     assert row["video_seconds"] == "4.04"
     assert row["cost_usd"] == "0.03"
@@ -1289,7 +1289,7 @@ def _good_image_status(execution_ms=30_000):
             "inference_ms": 6_000,
             "encode_ms": 90,
             "width": 704,
-            "height": 480,
+            "height": 1248,
             "format": "png",
             "output_bytes": 410_000,
             "duration_ms": 21_000,

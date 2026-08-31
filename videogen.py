@@ -46,16 +46,83 @@ def _model_dir() -> str:
 def _model_id_file() -> str:
     return MODEL_ID_FILE or modelroot.resolve_production_file("MODEL_ID")
 
-# Sampler settings — server decisions, deliberately boring for the first
-# measurement: a fixed seed so a re-run is comparable, a stock negative
-# prompt, and a step count that respects a distilled checkpoint if the
-# build resolved one (recorded in MODEL_ID as "...#distilled").
+# Sampler settings. THE STEP COUNT AND GUIDANCE NOW COME FROM THE CHECKPOINT
+# (ltxcaps.py), not from this file, because they are properties of the weights
+# rather than of the worker — see that module's header for why a substring test
+# against a repository name was never evidence of distillation.
+#
+# SEED IS A FALLBACK, NOT A POLICY. It stays 42 only for callers that send no
+# seed of their own, so nothing that worked before changes. Every production
+# caller now derives a seed from job/scene/shot/attempt: a module-level
+# constant made the ten retry attempts authorised on 2026-08-31 re-sample the
+# SAME image ten times, which is a retry budget that cannot succeed.
 SEED = 42
+
+# The fallback negative prompt, for callers that send none. It is deliberately
+# the ORIGINAL string: this change gives callers the ability to send a better,
+# shot-specific one, and does not silently retune the default underneath a
+# caller that did not ask.
 NEGATIVE_PROMPT = (
     "worst quality, inconsistent motion, blurry, jittery, distorted"
 )
-STEPS_DISTILLED = 8
-STEPS_FULL = 30
+
+
+def _profile():
+    """The inference settings this baked checkpoint should be sampled with."""
+    import ltxcaps
+
+    caps = ltxcaps.inspect_checkpoint(_model_dir(), model_id())
+    return caps, ltxcaps.inference_profile(caps)
+
+
+def _sampler_kwargs(job: dict, profile: dict) -> dict:
+    """Merge the checkpoint's profile with this job's own two inputs."""
+    params = job.get("params") or {}
+    seed = params.get("seed", SEED)
+    negative = params.get("negative_prompt")
+    if negative is None:
+        negative = NEGATIVE_PROMPT
+    return {
+        "negative_prompt": negative,
+        "num_inference_steps": profile["num_inference_steps"],
+        "guidance_scale": profile["guidance_scale"],
+        "guidance_rescale": profile["guidance_rescale"],
+        "seed": seed,
+    }
+
+
+def _generator(seed: int):
+    """A CUDA generator pinned to this job's seed, or None off-GPU."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.Generator(device="cuda").manual_seed(int(seed))
+    except ImportError:
+        pass
+    return None
+
+
+class OutOfMemory(RuntimeError):
+    """The canvas did not fit. Refused, never silently downscaled."""
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """Is this the card running out, rather than the code being wrong?
+
+    Matched on the exception TYPE where torch offers one, and on the message
+    only as a fallback — a substring test alone would also catch a prompt that
+    merely contained the words.
+    """
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except (ImportError, AttributeError):
+        pass
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda oom" in text
 
 
 def model_id() -> str:
@@ -66,9 +133,86 @@ def model_id() -> str:
         return "missing"
 
 
+# THE CONDITIONING STRENGTH, and it is the DOCUMENTED default, not a tuned one.
+#
+# LTXConditionPipeline takes conditions as LTXVideoCondition(image|video,
+# frame_index, strength); strength 1.0 is "hold this frame as given". That is
+# the documented value and the one this worker sends, because no measurement
+# on this hardware exists to justify any other and inventing one would be the
+# same class of mistake the audit was opened to fix — a number nobody chose,
+# nobody recorded, and nobody could compare a good clip against a bad one on.
+# A future tuning pass changes this WITH a figure next to it.
+CONDITION_STRENGTH = 1.0
+CONDITION_FRAME_INDEX = 0
+
+
+def _video_condition(image):
+    """The explicit frame-0 condition, or None when it cannot be built.
+
+    WHY THIS IS A SEPARATE FUNCTION. Two callers need it to degrade rather
+    than explode: the CPU contract rig has no diffusers at all, and a
+    checkpoint whose components do not support the condition pipeline must
+    still be able to animate a still. Returning None puts both on the plain
+    image= path, which is exactly what the worker did before.
+    """
+    try:
+        from diffusers import LTXVideoCondition
+    except Exception:  # noqa: BLE001 - any import failure means "no condition"
+        try:
+            from diffusers.pipelines.ltx.pipeline_ltx_condition import (  # type: ignore
+                LTXVideoCondition,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+    try:
+        return LTXVideoCondition(
+            image=image,
+            frame_index=CONDITION_FRAME_INDEX,
+            strength=CONDITION_STRENGTH,
+        )
+    except TypeError:
+        # A diffusers version whose condition object is shaped differently.
+        # Degrading is honest; guessing at the shape is not.
+        return None
+
+
 def _load_real_pipeline():
-    """Load the baked pipeline onto CUDA. Never touches the network."""
+    """Load the baked pipeline onto CUDA. Never touches the network.
+
+    LTXConditionPipeline WHERE THE CHECKPOINT SUPPORTS IT, which this one
+    does. It takes the identical five components as LTXImageToVideoPipeline —
+    scheduler, vae, text_encoder, tokenizer, transformer — so nothing new is
+    downloaded and nothing new is baked; `ltxcaps.inspect_checkpoint` proves
+    that from the snapshot on disk rather than from the repository's name.
+    What it adds is EXPLICIT control of the conditioning: which frame is being
+    conditioned on, how hard to hold it (`strength`), and how much noise is
+    added to it (`image_cond_noise_scale`). On the i2v pipeline those are
+    implicit, unrecorded, and unavailable to a diagnosis — which is why a clip
+    that drifted off its own opening frame could not be told apart from one
+    that never held it.
+
+    Falls back to LTXImageToVideoPipeline when the checkpoint or the installed
+    diffusers cannot support conditioning. A fallback here is not a provider
+    fallback: it is the same weights on the same GPU with less control.
+    """
     import torch
+
+    caps, _profile_unused = _profile()
+    if caps.get("condition_pipeline_supported"):
+        try:
+            from diffusers import LTXConditionPipeline
+
+            pipe = LTXConditionPipeline.from_pretrained(
+                _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+            )
+            pipe.to("cuda")
+            pipe.vae.enable_tiling()
+            return pipe
+        except (ImportError, AttributeError, TypeError, ValueError, OSError):
+            # Named exceptions only: an OOM or a CUDA fault must NOT be caught
+            # here and silently retried on a different pipeline class.
+            pass
+
     from diffusers import LTXImageToVideoPipeline
 
     pipe = LTXImageToVideoPipeline.from_pretrained(
@@ -99,54 +243,65 @@ def _load_real_text_pipeline():
     return pipe
 
 
-def _generate_still(pipe, prompt: str):
+def _generate_still(pipe, prompt: str, sampler: dict):
     """One deterministic T2V pass at the shortest legal length. Returns
-    the frames; frame 0 is the still the caller keeps."""
-    steps = STEPS_DISTILLED if "distilled" in model_id() else STEPS_FULL
-    generator = None
-    try:
-        import torch
+    the frames; frame 0 is the still the caller keeps.
 
-        if torch.cuda.is_available():
-            generator = torch.Generator(device="cuda").manual_seed(SEED)
-    except ImportError:
-        pass
+    Every sampler value is now passed EXPLICITLY. Guidance in particular was
+    never sent before, so the pipeline's own default applied silently and no
+    record of it reached the job's metrics — a value nobody chose and nobody
+    could see.
+    """
     result = pipe(
         prompt=prompt,
-        negative_prompt=NEGATIVE_PROMPT,
+        negative_prompt=sampler["negative_prompt"],
         width=contract.VIDEO_WIDTH,
         height=contract.VIDEO_HEIGHT,
         num_frames=contract.IMAGE_GEN_NUM_FRAMES,
-        num_inference_steps=steps,
-        generator=generator,
+        num_inference_steps=sampler["num_inference_steps"],
+        guidance_scale=sampler["guidance_scale"],
+        guidance_rescale=sampler["guidance_rescale"],
+        generator=_generator(sampler["seed"]),
     )
     return result.frames[0]
 
 
-def _generate(pipe, image, prompt: str):
-    """One deterministic I2V pass. Returns a list of PIL frames."""
-    steps = (
-        STEPS_DISTILLED if "distilled" in model_id() else STEPS_FULL
-    )
-    generator = None
-    try:
-        import torch
+def _generate(pipe, image, prompt: str, sampler: dict, profile: dict):
+    """One deterministic I2V pass. Returns a list of PIL frames.
 
-        if torch.cuda.is_available():
-            generator = torch.Generator(device="cuda").manual_seed(SEED)
-    except ImportError:
-        pass
-    result = pipe(
-        image=image,
+    The VAE decode settings travel with the sampler now. They are the
+    pipeline's own documented values rather than numbers invented here, and
+    they are sent explicitly for the same reason guidance is: a value that is
+    never passed is a value that cannot be recorded, and an unrecorded value
+    cannot be compared between a good clip and a bad one.
+    """
+    common = dict(
         prompt=prompt,
-        negative_prompt=NEGATIVE_PROMPT,
+        negative_prompt=sampler["negative_prompt"],
         width=contract.VIDEO_WIDTH,
         height=contract.VIDEO_HEIGHT,
         num_frames=contract.VIDEO_NUM_FRAMES,
-        num_inference_steps=steps,
-        generator=generator,
+        num_inference_steps=sampler["num_inference_steps"],
+        guidance_scale=sampler["guidance_scale"],
+        guidance_rescale=sampler["guidance_rescale"],
+        decode_timestep=profile["decode_timestep"],
+        decode_noise_scale=profile["decode_noise_scale"],
+        generator=_generator(sampler["seed"]),
     )
-    return result.frames[0]
+    condition = _video_condition(image) if profile.get("conditioning") else None
+    if condition is not None:
+        # EXPLICIT CONDITIONING. The frame is named, the strength is named,
+        # and the noise added to it is named — all three reach the metrics, so
+        # a clip that drifted off its opening frame can be told apart from one
+        # that was never asked to hold it.
+        result = pipe(
+            conditions=[condition],
+            image_cond_noise_scale=profile["image_cond_noise_scale"],
+            **common,
+        )
+    else:
+        result = pipe(image=image, **common)
+    return result.frames[0], 1 if condition is not None else 0
 
 
 def _encode_mp4(frames, output_path: str) -> None:
@@ -250,8 +405,27 @@ def run(job: dict, input_path: str, output_path: str, load_pipeline=None) -> dic
     if torch is not None and torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
+    caps, profile = _profile()
+    sampler = _sampler_kwargs(job, profile)
+
     infer_started = time.monotonic()
-    frames = _generate(pipe, image, job["params"]["prompt"])
+    try:
+        frames, conditioning_count = _generate(
+            pipe, image, job["params"]["prompt"], sampler, profile
+        )
+    except Exception as exc:  # noqa: BLE001 - re-raised, never swallowed
+        # FAIL CLOSED ON OOM. The portrait canvas is 2.6x the pixels the old
+        # one was, and the VRAM projection behind that choice is arithmetic,
+        # not a measurement. A worker that quietly dropped to a smaller canvas
+        # would reintroduce the upscale this change removes, and would do it
+        # invisibly; refusing is the honest failure and the caller already
+        # treats a failed clip as "this shot carries as a still".
+        if _is_oom(exc):
+            raise OutOfMemory(
+                f"{contract.VIDEO_WIDTH}x{contract.VIDEO_HEIGHT} at "
+                f"{contract.VIDEO_NUM_FRAMES} frames did not fit: {exc}"
+            ) from exc
+        raise
     inference_ms = int((time.monotonic() - infer_started) * 1000)
 
     if torch is not None and torch.cuda.is_available():
@@ -289,6 +463,14 @@ def run(job: dict, input_path: str, output_path: str, load_pipeline=None) -> dic
         "watermarked": marked,
         "output_bytes": os.path.getsize(output_path),
         "duration_ms": int((time.monotonic() - started) * 1000),
+        "seed": sampler["seed"],
+        "negative_prompt_chars": len(sampler["negative_prompt"]),
+        "conditioning_count": conditioning_count,
+        # The class that actually ran, not the one model_index.json declares.
+        "pipeline_used": type(pipe).__name__,
+        "conditioning_strength": CONDITION_STRENGTH if conditioning_count else None,
+        "upscaler_used": False,
+        **__import__("ltxcaps").diagnostics(caps, profile),
         **metrics,
     }
 
@@ -339,7 +521,17 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
         torch.cuda.reset_peak_memory_stats()
 
     infer_started = time.monotonic()
-    frames = _generate_still(pipe, job["params"]["prompt"])
+    caps, profile = _profile()
+    sampler = _sampler_kwargs(job, profile)
+    try:
+        frames = _generate_still(pipe, job["params"]["prompt"], sampler)
+    except Exception as exc:  # noqa: BLE001 - re-raised, never swallowed
+        if _is_oom(exc):
+            raise OutOfMemory(
+                f"still at {contract.VIDEO_WIDTH}x{contract.VIDEO_HEIGHT} "
+                f"did not fit: {exc}"
+            ) from exc
+        raise
     inference_ms = int((time.monotonic() - infer_started) * 1000)
 
     if not frames:
@@ -368,6 +560,13 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
         "format": contract.IMAGE_GEN_FORMAT,
         "output_bytes": os.path.getsize(output_path),
         "duration_ms": int((time.monotonic() - started) * 1000),
+        "seed": sampler["seed"],
+        "negative_prompt_chars": len(sampler["negative_prompt"]),
+        "conditioning_count": 0,
+        "pipeline_used": type(pipe).__name__,
+        "conditioning_strength": None,
+        "upscaler_used": False,
+        **__import__("ltxcaps").diagnostics(caps, profile),
         **_gpu_metrics(),
     }
     # ONLY WHEN ASKED. A production still goes to R2 and its reply says so;
