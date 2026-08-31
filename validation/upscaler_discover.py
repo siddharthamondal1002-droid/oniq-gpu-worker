@@ -116,6 +116,17 @@ def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
         (s.get("rfilename") or ""): (s.get("size") or 0)
         for s in info.get("siblings") or []
     }
+    # THE CONTENT HASH, where the registry gives one. Two repositories can
+    # publish files of identical SIZE and different bytes; only the hash
+    # settles whether they are the same artifact. Git-LFS stores a sha256 per
+    # blob and HuggingFace returns it with blobs=true, so this is free.
+    row["blob_hashes"] = {
+        (s.get("rfilename") or ""): ((s.get("lfs") or {}).get("oid")
+                                     or (s.get("lfs") or {}).get("sha256"))
+        for s in info.get("siblings") or []
+        if (s.get("rfilename") or "").endswith((".safetensors", ".bin"))
+        and (s.get("lfs") or {})
+    }
     row["root_files"] = sorted(p for p in paths if "/" not in p)
     row["licence_files"] = _licence_files(row["root_files"])
 
@@ -215,6 +226,8 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
         print(f"    component wt  {row.get('weight_bytes')} "
               f"(guard {SIZE_GUARD_BYTES}, within={row.get('within_size_guard')})")
         print(f"    repo bytes    {row.get('repo_bytes')}")
+        for name, digest in sorted((row.get("blob_hashes") or {}).items()):
+            print(f"    sha256        {digest}  {name}")
         print(f"    class         {row.get('declared_class')!r}")
         print(f"    config        {row.get('config')}")
         if row.get("defaulted"):
