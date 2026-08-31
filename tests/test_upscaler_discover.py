@@ -349,3 +349,82 @@ class TestOneReaderForTheHash:
         # not carry one, which is why this read exists at all.
         assert ud.TREE_API.startswith("https://huggingface.co/api/models/")
         assert "/tree/{revision}/{path}" in ud.TREE_API
+
+
+class TestWhatADifferenceMeans:
+    """DIFFERENT BYTES IS NOT DIFFERENT LATENT SPACE — and the run on
+    2026-08-31 measured exactly that case, so the distinction is load-bearing
+    rather than hypothetical. The baked vae hashed to 265ca87c… and the
+    upscaler's to 3419989c… in both currencies. Whether that matters is a
+    question about the CONFIG the upsample pipeline normalises with, not about
+    the bytes."""
+
+    VAE = "vae/diffusion_pytorch_model.safetensors"
+    BAKED_CFG = {"_class_name": "AutoencoderKLLTXVideo", "_diffusers_version": "0.28.0",
+                 "latent_channels": 128, "latents_mean": [0.1] * 128,
+                 "latents_std": [1.0] * 128, "scaling_factor": 1.0}
+
+    def _run(self, theirs_cfg, baked_sha="a" * 64, cand_sha="b" * 64):
+        def get(url, token, timeout=60):
+            sha = baked_sha if ud.BAKED_REPO in url else cand_sha
+            entry = {"type": "file", "path": self.VAE, "size": 1_600_000_000,
+                     "oid": "g" * 40, "xetHash": None}
+            if sha:
+                entry["lfs"] = {"oid": sha, "size": 1_600_000_000, "pointerSize": 134}
+            return [entry]
+
+        seen = []
+
+        def get_text(url, token, timeout=60):
+            seen.append(url)
+            return json.dumps(self.BAKED_CFG if ud.BAKED_REPO in url else theirs_cfg)
+
+        rows = [{"repo": "them/repo", "revision": "d" * 40,
+                 "blob_hashes": {self.VAE: cand_sha}}]
+        return ud.vae_crosscheck(rows, "tok", get, get_text), seen
+
+    def test_identical_configs_make_a_byte_difference_a_packaging_difference(self):
+        out, _ = self._run(dict(self.BAKED_CFG))
+        assert out["matches"]["them/repo"] == "DIFFERENT (sha256)"
+        assert out["config_delta"]["them/repo"] == {}
+
+    def test_a_different_normalisation_is_named_field_by_field(self):
+        # latents_mean and latents_std ARE the normalisation
+        # LTXLatentUpsamplePipeline applies. A checkpoint that disagrees on
+        # them does not share a latent space, whatever the weights hash to.
+        theirs = dict(self.BAKED_CFG, latents_mean=[0.9] * 128)
+        out, _ = self._run(theirs)
+        assert list(out["config_delta"]["them/repo"]) == ["latents_mean"]
+
+    def test_a_diffusers_version_bump_is_not_a_latent_space_change(self):
+        theirs = dict(self.BAKED_CFG, _diffusers_version="0.38.0")
+        out, _ = self._run(theirs)
+        assert out["config_delta"]["them/repo"] == {}
+
+    def test_the_config_is_not_fetched_when_the_bytes_already_agree(self):
+        # Nothing to interpret, and a read that costs nothing still costs a
+        # reader's attention when it prints an answer to a question nobody
+        # asked.
+        out, seen = self._run(dict(self.BAKED_CFG), cand_sha="a" * 64)
+        assert out["matches"]["them/repo"] == "SAME (sha256)"
+        assert out["config_delta"] == {} and seen == []
+
+    def test_an_unreadable_config_says_so_rather_than_reporting_agreement(self):
+        def get(url, token, timeout=60):
+            sha = "a" * 64 if ud.BAKED_REPO in url else "b" * 64
+            return [{"type": "file", "path": self.VAE, "size": 1, "oid": "g" * 40,
+                     "lfs": {"oid": sha, "size": 1, "pointerSize": 134}}]
+
+        def get_text(url, token, timeout=60):
+            raise urllib_error(404)
+
+        rows = [{"repo": "them/repo", "revision": "d" * 40,
+                 "blob_hashes": {self.VAE: "b" * 64}}]
+        out = ud.vae_crosscheck(rows, "tok", get, get_text)
+        assert "404" in out["config_delta"]["them/repo"]["_error"]
+
+    def test_a_long_vector_prints_as_its_head_and_its_length(self):
+        printed = ud._brief([0.1] * 128)
+        assert printed.endswith("128 values]") and len(printed) < 80
+        assert ud._brief([1, 2]) == "[1, 2]"
+        assert ud._brief(128) == "128"

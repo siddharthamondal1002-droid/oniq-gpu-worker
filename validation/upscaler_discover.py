@@ -272,6 +272,10 @@ def _vae_tree(repo: str, revision: str, token, get) -> dict:
         files[path] = {
             "sha256": _lfs_sha256(entry),
             "xet": entry.get("xetHash"),
+            # Same weights at a different dtype differ in BYTES and in SIZE;
+            # same weights re-serialised differ in bytes alone. The size is
+            # what tells those two apart.
+            "size": entry.get("size"),
             # KEPT SO A BARREN READ DIAGNOSES ITSELF. The last unexplained
             # absence cost three runs and a wrong note in the pin, because
             # nothing recorded what the registry had actually returned.
@@ -303,7 +307,49 @@ def _same_content(mine: dict, theirs: dict) -> str:
     return "UNKNOWN — no content hash returned in either currency"
 
 
-def vae_crosscheck(rows, token, get=_get) -> dict:
+def _vae_config(repo: str, revision: str, token, get_text) -> dict:
+    """The vae's own config.json at that revision."""
+    try:
+        return json.loads(get_text(
+            RAW.format(repo=repo, revision=revision,
+                       path=f"{VAE_PREFIX}/config.json"), token))
+    except Exception as exc:
+        return {"_error": _why(exc)}
+
+
+# Metadata about WHERE a config came from, never about what it configures.
+_PROVENANCE = {"_diffusers_version", "_name_or_path", "_class_name"}
+
+
+def _config_delta(mine: dict, theirs: dict) -> dict:
+    """Every configured value the two vaes disagree on.
+
+    DIFFERENT BYTES IS NOT DIFFERENT LATENT SPACE. Two safetensors files can
+    hold the same weights at a different dtype, or the same weights
+    re-serialised, and hash differently either way. What
+    LTXLatentUpsamplePipeline actually reads off the vae is its CONFIG —
+    latents_mean and latents_std are the normalisation it applies, and
+    latent_channels is the shape the upsampler was built for. If those agree,
+    a byte difference is a packaging difference; if they disagree, the two
+    checkpoints do not share a latent space and no hash was needed to know it.
+    """
+    keys = (set(mine) | set(theirs)) - _PROVENANCE
+    return {k: [mine.get(k), theirs.get(k)] for k in sorted(keys)
+            if mine.get(k) != theirs.get(k)}
+
+
+def _brief(value, keep: int = 4):
+    """A long list printed as its head and its length, never in full.
+
+    latents_mean and latents_std are 128 floats each. Printing two of them
+    turns the one line that matters into four screens nobody reads.
+    """
+    if isinstance(value, list) and len(value) > keep:
+        return f"[{', '.join(repr(v) for v in value[:keep])}, ... {len(value)} values]"
+    return repr(value)
+
+
+def vae_crosscheck(rows, token, get=_get, get_text=_get_text) -> dict:
     """Is the vae beside the upsampler the vae ONIQ bakes?"""
     out: dict = {"baked": f"{BAKED_REPO}@{BAKED_REVISION}"}
     baked = _vae_tree(BAKED_REPO, BAKED_REVISION, token, get)
@@ -327,6 +373,25 @@ def vae_crosscheck(rows, token, get=_get) -> dict:
         out["matches"][repo] = (
             f"UNREADABLE — {theirs['error']}" if theirs["error"]
             else _same_content(baked["files"], theirs["files"]))
+
+    # WHAT A BYTE DIFFERENCE MEANS. Only asked when the bytes actually differ:
+    # identical files need no interpreting, and an absent hash is not a
+    # difference to interpret.
+    baked_cfg = None
+    out["config_delta"] = {}
+    for repo, verdict in out["matches"].items():
+        if not verdict.startswith("DIFFERENT"):
+            continue
+        if baked_cfg is None:
+            baked_cfg = _vae_config(BAKED_REPO, BAKED_REVISION, token, get_text)
+        theirs = _vae_config(
+            repo, dict((r["repo"], r.get("revision")) for r in rows)[repo],
+            token, get_text)
+        if "_error" in baked_cfg or "_error" in theirs:
+            out["config_delta"][repo] = {
+                "_error": baked_cfg.get("_error") or theirs.get("_error")}
+        else:
+            out["config_delta"][repo] = _config_delta(baked_cfg, theirs)
 
     if any(v.startswith("UNKNOWN") for v in out["matches"].values()) or (
             not baked["files"]):
@@ -397,7 +462,7 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
             print(f"    MISMATCH      {row['config_mismatch']}")
         print(f"    VERDICT       {row['verdict']}")
 
-    cross = vae_crosscheck(rows, token, get)
+    cross = vae_crosscheck(rows, token, get, get_text)
     print("")
     print("  VAE CROSS-CHECK — is the latent space the same one ONIQ bakes?")
     print(f"    baked          {cross.get('baked')}")
@@ -409,6 +474,21 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
             print(f"    {repo}")
             _print_vae("vae", block, indent="      ")
         print(f"    SAME LATENTS   {cross.get('matches')}")
+        for repo, delta in (cross.get("config_delta") or {}).items():
+            if delta.get("_error"):
+                print(f"    vae config     UNREADABLE — {delta['_error']}")
+            elif not delta:
+                print("    vae config     IDENTICAL — the weights differ in "
+                      "bytes, but every configured value agrees, including "
+                      "the latents_mean/latents_std this pipeline normalises "
+                      "with. A packaging difference, not a latent-space one.")
+            else:
+                print(f"    vae config     DIFFERS on {len(delta)} field(s) — "
+                      "the two checkpoints do NOT share a latent space:")
+                for key, (ours, theirs_) in delta.items():
+                    print(f"      {key}")
+                    print(f"        baked {_brief(ours)}")
+                    print(f"        {repo.split('/')[-1]} {_brief(theirs_)}")
         if cross.get("note"):
             print(f"    NOTE           {cross['note']}")
 
