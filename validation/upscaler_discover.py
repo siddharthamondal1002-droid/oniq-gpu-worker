@@ -55,8 +55,8 @@ RAW = "https://huggingface.co/{repo}/resolve/{revision}/{path}"
 # Exactly what the Dockerfile's upscaler stage asserts field by field. Kept
 # here so the read reports the SAME verdict the build would reach, rather than
 # a looser one that lets a doomed pin through to a 25-minute build.
+MODEL_CLASS = "LTXLatentUpsamplerModel"
 EXPECTED = {
-    "_class_name": "LTXLatentUpsamplerModel",
     "dims": 3,
     "in_channels": 128,
     "mid_channels": 512,
@@ -156,9 +156,21 @@ def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
                 RAW.format(repo=repo, revision=row["revision"],
                            path=row["config_path"]), token))
             row["config"] = {k: cfg.get(k) for k in EXPECTED}
+            row["declared_class"] = cfg.get("_class_name")
+            # ABSENT IS NOT WRONG. The build constructs the model with
+            # LTXLatentUpsamplerModel.from_config and asserts the RESOLVED
+            # config, so a field the publisher left to the class default is
+            # verified there rather than here. Lightricks' config declares only
+            # _class_name; treating that as six mismatches condemned the one
+            # licence-clean candidate (measured 2026-08-31). Only a field that
+            # is PRESENT AND WRONG is a mismatch.
+            row["defaulted"] = sorted(k for k in EXPECTED if k not in cfg)
             row["config_mismatch"] = {
-                k: cfg.get(k) for k, v in EXPECTED.items() if cfg.get(k) != v
+                k: cfg.get(k) for k, v in EXPECTED.items()
+                if k in cfg and cfg.get(k) != v
             }
+            if cfg.get("_class_name") != MODEL_CLASS:
+                row["config_mismatch"]["_class_name"] = cfg.get("_class_name")
         except Exception as exc:
             row["config"] = None
             row["config_mismatch"] = {"config.json": _why(exc)}
@@ -203,7 +215,11 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
         print(f"    component wt  {row.get('weight_bytes')} "
               f"(guard {SIZE_GUARD_BYTES}, within={row.get('within_size_guard')})")
         print(f"    repo bytes    {row.get('repo_bytes')}")
+        print(f"    class         {row.get('declared_class')!r}")
         print(f"    config        {row.get('config')}")
+        if row.get("defaulted"):
+            print(f"    defaulted     {row['defaulted']} "
+                  f"(verified at build time by from_config)")
         if row.get("config_mismatch"):
             print(f"    MISMATCH      {row['config_mismatch']}")
         print(f"    VERDICT       {row['verdict']}")

@@ -30,7 +30,7 @@ GOOD_INFO = {
         {"rfilename": "diffusion_pytorch_model.safetensors", "size": 505_000_000},
     ],
 }
-GOOD_CONFIG = json.dumps(dict(ud.EXPECTED))
+GOOD_CONFIG = json.dumps({"_class_name": ud.MODEL_CLASS, **ud.EXPECTED})
 
 
 def _fakes(info=GOOD_INFO, config=GOOD_CONFIG, seen=None):
@@ -67,7 +67,7 @@ class TestTheGatesMatchTheBuild:
         assert "SIZE_GUARD_BYTES = 1024**3" in docker
 
     def test_a_wrong_config_field_is_not_pinnable(self):
-        bad = dict(ud.EXPECTED)
+        bad = {"_class_name": ud.MODEL_CLASS, **ud.EXPECTED}
         bad["temporal_upsample"] = True  # would change the frame count
         get, get_text = _fakes(config=json.dumps(bad))
         row = ud.measure(OFFICIAL, SECRET, get, get_text)
@@ -199,3 +199,42 @@ class TestBothRepositoryShapes:
         row = ud.measure(OFFICIAL, SECRET, get, get_text)
         assert row["config_path"] is None
         assert "searched" in row["config_mismatch"]["config.json"]
+
+
+class TestAbsentIsNotWrong:
+    """Lightricks' config declares only _class_name and leaves the rest to the
+    class defaults. The build constructs the model and asserts the RESOLVED
+    values, so this read must not condemn a config for being terse — that
+    false negative is what blocked the only licence-clean candidate."""
+
+    LIGHTRICKS_CONFIG = json.dumps({
+        "_class_name": "LTXLatentUpsamplerModel",
+        "_diffusers_version": "0.35.0.dev0",
+    })
+
+    def test_a_config_that_defaults_everything_is_still_pinnable(self):
+        get, get_text = _fakes(config=self.LIGHTRICKS_CONFIG)
+        row = ud.measure(OFFICIAL, SECRET, get, get_text)
+        assert row["config_mismatch"] == {}
+        assert row["defaulted"] == sorted(ud.EXPECTED)
+        assert row["verdict"] == "PINNABLE"
+
+    def test_a_present_but_wrong_field_is_still_caught(self):
+        get, get_text = _fakes(config=json.dumps(
+            {"_class_name": ud.MODEL_CLASS, "in_channels": 64}))
+        row = ud.measure(OFFICIAL, SECRET, get, get_text)
+        assert row["config_mismatch"] == {"in_channels": 64}
+        assert row["verdict"] == "NOT PINNABLE"
+
+    def test_the_wrong_class_is_caught_however_terse_the_config(self):
+        get, get_text = _fakes(config=json.dumps({"_class_name": "AutoencoderKL"}))
+        row = ud.measure(OFFICIAL, SECRET, get, get_text)
+        assert row["config_mismatch"]["_class_name"] == "AutoencoderKL"
+        assert row["verdict"] == "NOT PINNABLE"
+
+    def test_the_build_asserts_the_constructed_model_not_the_json(self):
+        # The read is only honest if the build really does resolve defaults.
+        docker = open("Dockerfile", encoding="utf-8").read()
+        assert "LTXLatentUpsamplerModel.from_config(cfg)" in docker
+        assert "getattr(model.config, k, None)" in docker
+        assert "SIZE_GUARD_BYTES = 1024**3" in docker

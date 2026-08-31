@@ -90,3 +90,61 @@
 # film's 1080 becomes a DOWNSCALE of real detail. GPU time is unmeasured; the
 # refine pass is real additional inference at 4x the pixels and no cost claim
 # should be made about it before a real generation.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESOLVED 2026-08-31 — measured from the registry, not transcribed
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# gpu-validation.yml mode `upscaler-discover` read both candidates the diffusers
+# documentation names, with the runner's HF_TOKEN, and measured:
+#
+#   Lightricks/ltxv-spatial-upscaler-0.9.7
+#     revision   c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f
+#     licence    ships LTX-Video-Open-Weights-License-0.X.txt
+#     shape      diffusers PIPELINE — latent_upsampler/, media/, vae/
+#     component  latent_upsampler/ is 505,009,832 bytes
+#     config     declares _class_name and defaults the rest
+#
+#   a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+#     revision   e0c981533db26531c47dec16a124586cea53f11f
+#     licence    NONE. Three files, no LICENSE, no NOTICE, no licence tag.
+#     component  505,009,832 bytes — BYTE-IDENTICAL to the Lightricks one
+#
+# The two components are the same size to the byte, so they are the same
+# weights: one published by Lightricks under their terms, one re-uploaded
+# without any. That settles it. The third-party copy offers nothing the
+# official one does not, and offers it with no licence at all, so this pin
+# names the Lightricks repository.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# OWNER LICENCE ACCEPTANCE — 2026-08-31
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Owner directive, 2026-08-31. The owner verified that ONIQ is below the LTX
+# $10M annual-revenue threshold and therefore qualifies under the LTX-Video 0.X
+# Open Weights community licence, which grants the use, reproduction and
+# distribution rights ONIQ needs at no cost for entities under that threshold;
+# the paid commercial licence applies at or above $10M.
+#
+# The acceptance is NOT a licence to ignore the conditions. The owner's words:
+# "Preserve the applicable licence/attribution and use restrictions in the
+# production distribution." The bake enforces the mechanical half — it refuses
+# to redistribute weights whose LICENSE/NOTICE does not travel with them, and
+# LTX-Video-Open-Weights-License-0.X.txt is moved down beside the component it
+# licenses.
+#
+# An agent did not and cannot accept this on the owner's behalf; the record
+# exists so the acceptance has a date and an author next to the code it governs,
+# the same way the 2026-08-13 movie-on/classic-off flip does.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT REMAINS UNMEASURED
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This is the 0.9.7 component and ONIQ bakes the base LTX-Video (2B). The
+# byte-identical size strongly suggests the "0.9.8" upsampler is the same
+# artifact under a different name, so the version skew is probably cosmetic —
+# but PROBABLY IS NOT MEASURED. Whether multi-scale actually improves ONIQ's
+# output is unknown until a real generation is run and looked at.
+
+Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f

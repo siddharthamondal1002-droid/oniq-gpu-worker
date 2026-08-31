@@ -53,15 +53,19 @@ def test_it_catches_a_syntax_error_in_a_bake(tmp_path, monkeypatch):
     assert any(f.startswith("bake block") for f in build_proof.run().failures)
 
 
-def test_it_catches_an_unverified_revision_declared_in_the_pin(tmp_path, monkeypatch):
+def test_it_catches_a_second_unverified_revision_declared_in_the_pin(tmp_path, monkeypatch):
     """A fabricated sha is a licence problem, not a bug — the owner accepted
-    terms at specific bytes, and nobody else can do that for them."""
+    terms at specific bytes, and nobody else can do that for them.
+
+    The pin now carries ONE verified declaration, so the way this goes wrong
+    has changed shape: somebody appends a second repository the owner never
+    accepted. The build would bake whichever it read first, which is exactly
+    the ambiguity a pin exists to remove."""
     root = _sandbox(tmp_path, monkeypatch)
     with open(root / "ltx-upscaler.pin", "a", encoding="utf-8") as fh:
         fh.write("a-r-r-o-w/LTX-0.9.8-Latent-Upsampler " + "d" * 40 + "\n")
     failures = build_proof.run().failures
-    assert "no unverified revision is declared" in failures
-    assert "pin declares no revision, so the stage is a no-op" in failures
+    assert any("at most one line" in f for f in failures), failures
 
 
 def test_a_sha_quoted_in_the_pins_PROSE_is_not_a_declaration():
@@ -70,8 +74,14 @@ def test_a_sha_quoted_in_the_pins_PROSE_is_not_a_declaration():
     the data, and a check that accuses the explanation is one people delete."""
     pin = build_proof._read("ltx-upscaler.pin")
     assert "8984fa25007f376c1a299016d0957a37a2f797bb" in pin
-    assert build_proof._active_lines(pin) == []
-    assert "no unverified revision is declared" not in build_proof.run().failures
+    active = build_proof._active_lines(pin)
+    # The prose cites the LTX transformer's revision AND now records the two
+    # upsampler candidates measured on 2026-08-31. None of those are
+    # declarations; exactly one line is.
+    assert len(active) == 1, active
+    assert "8984fa25007f376c1a299016d0957a37a2f797bb" not in active[0]
+    assert "e0c981533db26531c47dec16a124586cea53f11f" not in active[0]
+    assert build_proof.run().failures == []
 
 
 def test_it_catches_a_signature_manifest_for_the_wrong_diffusers(tmp_path, monkeypatch):
@@ -92,3 +102,65 @@ def test_it_names_what_it_cannot_prove(capsys):
     assert "NOT PROVEN HERE" in out
     for absent in ("digest", "image size", "layer sizes"):
         assert absent in out
+
+
+class TestTheUpscalerPinIsPolicedNotJustAllowed:
+    """The pin went from "must be empty" to "must be well-formed" on
+    2026-08-31, once the registry had actually been read. That is a tightening
+    only if a half-declaration still fails, so each way of getting it wrong is
+    broken here and asserted to be caught."""
+
+    def _pin(self, tmp_path, monkeypatch, line):
+        root = _sandbox(tmp_path, monkeypatch)
+        path = os.path.join(root, "ltx-upscaler.pin")
+        original = open(path, encoding="utf-8").read()
+        kept = "\n".join(l for l in original.splitlines()
+                         if l.strip().startswith("#") or not l.strip())
+        open(path, "w", encoding="utf-8").write(kept + "\n" + line + "\n")
+        return build_proof.run()
+
+    def test_the_real_pin_passes(self):
+        p = build_proof.run()
+        assert p.failures == [], p.failures
+
+    def test_a_branch_name_instead_of_a_sha_is_caught(self, tmp_path, monkeypatch):
+        p = self._pin(tmp_path, monkeypatch,
+                      "Lightricks/ltxv-spatial-upscaler-0.9.7 main")
+        assert any("40-char sha" in f for f in p.failures), p.failures
+
+    def test_a_short_sha_is_caught(self, tmp_path, monkeypatch):
+        p = self._pin(tmp_path, monkeypatch,
+                      "Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168")
+        assert any("40-char sha" in f for f in p.failures), p.failures
+
+    def test_a_revision_with_no_repository_is_caught(self, tmp_path, monkeypatch):
+        p = self._pin(tmp_path, monkeypatch,
+                      "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f")
+        assert any("<repo> <revision>" in f for f in p.failures), p.failures
+
+    def test_an_unnamespaced_repository_is_caught(self, tmp_path, monkeypatch):
+        p = self._pin(tmp_path, monkeypatch,
+                      "ltxv-spatial-upscaler c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f")
+        assert any("namespaced" in f for f in p.failures), p.failures
+
+    def test_a_pin_without_the_owner_licence_record_is_caught(self, tmp_path, monkeypatch):
+        root = _sandbox(tmp_path, monkeypatch)
+        path = os.path.join(root, "ltx-upscaler.pin")
+        # A declaration with the acceptance record stripped out: the revision
+        # IS the licence, so a pin that does not say who accepted it, and when,
+        # is a pin nobody can audit.
+        open(path, "w", encoding="utf-8").write(
+            "# no acceptance recorded here\n"
+            "Lightricks/ltxv-spatial-upscaler-0.9.7 "
+            "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f\n")
+        p = build_proof.run()
+        assert any("licence acceptance" in f for f in p.failures), p.failures
+
+    def test_two_declarations_are_caught(self, tmp_path, monkeypatch):
+        p = self._pin(
+            tmp_path, monkeypatch,
+            "Lightricks/ltxv-spatial-upscaler-0.9.7 "
+            "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f\n"
+            "a-r-r-o-w/LTX-0.9.8-Latent-Upsampler "
+            "e0c981533db26531c47dec16a124586cea53f11f")
+        assert any("at most one line" in f for f in p.failures), p.failures

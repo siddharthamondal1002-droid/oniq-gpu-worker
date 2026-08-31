@@ -119,14 +119,36 @@ def run() -> Proof:
     p.check("upscaler size guard", "SIZE_GUARD_BYTES" in docker)
 
     print("5. the upscaler pin")
-    pin = _active_lines(_read("ltx-upscaler.pin"))
-    p.check("pin declares no revision, so the stage is a no-op", not pin,
+    pin_text = _read("ltx-upscaler.pin")
+    pin = _active_lines(pin_text)
+    # EMPTY IS LEGAL — the stage is then a no-op and the image ships without
+    # multi-scale. What must never happen is a HALF-declaration: a revision
+    # nobody resolved, a bare branch name, or a repository named without terms.
+    #
+    # Until 2026-08-31 this asserted the pin was empty, which was right while
+    # nothing had been verified. Now that the registry has actually been read,
+    # the check TIGHTENS rather than disappears: a declared pin must be exactly
+    # "<repo> <40-hex>", and the file must carry a dated owner record of the
+    # licence acceptance, because a revision IS the licence and an agent cannot
+    # accept one on anybody's behalf.
+    p.check("pin declares at most one line", len(pin) <= 1,
             f"{len(pin)} declaration(s)")
-    # A sha may legitimately appear in the PROSE (the LTX transformer's own
-    # revision, quoted as the precedent); what must never appear is a
-    # DECLARED upscaler revision nobody verified.
-    p.check("no unverified revision is declared",
-            not any(re.search(r"\b[0-9a-f]{40}\b", l) for l in pin))
+    if pin:
+        parts = pin[0].split()
+        p.check("declared pin is '<repo> <revision>'", len(parts) == 2, pin[0])
+        p.check("declared revision is a 40-char sha, never a branch",
+                len(parts) > 1 and bool(re.fullmatch(r"[0-9a-f]{40}", parts[1])),
+                parts[1] if len(parts) > 1 else "(none)")
+        p.check("declared repository is namespaced",
+                len(parts) > 0 and parts[0].count("/") == 1, parts[0])
+        p.check("the licence acceptance is recorded beside the pin",
+                "OWNER LICENCE ACCEPTANCE" in pin_text)
+    else:
+        # A sha may legitimately appear in the PROSE (the LTX transformer's own
+        # revision, quoted as the precedent); what must never appear is a
+        # DECLARED upscaler revision nobody verified.
+        p.check("no unverified revision is declared",
+                not any(re.search(r"\b[0-9a-f]{40}\b", l) for l in pin))
 
     print("6. container user")
     p.check("runs as non-root", "USER oniq:oniq" in instructions)

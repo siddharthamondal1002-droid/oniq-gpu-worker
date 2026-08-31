@@ -609,21 +609,73 @@ if getattr(info, "sha", None) != REVISION:
         f"pinned to {REVISION} — refusing to bake different bytes"
     )
 
+# WHICH FILES ARE THE COMPONENT? Two repository shapes ship this model and
+# the difference is load-bearing.
+#
+#   BARE COMPONENT  config.json at the root, weights beside it.
+#   PIPELINE        model_index.json at the root, the component in a
+#                   subfolder, and a vae alongside it.
+#
+# MEASURED 2026-08-31 against the registry. a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+# is the first shape and ships NO licence of any kind, so this bake refuses it.
+# Lightricks/ltxv-spatial-upscaler-0.9.7 is the second, ships
+# LTX-Video-Open-Weights-License-0.X.txt, and its latent_upsampler component is
+# 505,009,832 bytes — byte-identical to the third party's, so they are the same
+# weights and only one of them carries terms ONIQ can accept. Reading both
+# shapes is exactly what lets the licence-clean copy be the one baked.
+names = {f.rfilename: (f.size or 0) for f in info.siblings}
+subdirs = sorted({p.split("/", 1)[0] for p in names if "/" in p})
+config_rel = next(
+    (c for c in ["config.json"] + [f"{d}/config.json" for d in subdirs
+                                   if "upsampl" in d.lower() or "upscal" in d.lower()]
+     if c in names),
+    None,
+)
+if not config_rel:
+    raise SystemExit(
+        f"{REPO} at {REVISION} carries no upsampler config.json (root files "
+        f"{sorted(p for p in names if '/' not in p)}, subfolders {subdirs})"
+    )
+PREFIX = config_rel.rsplit("/", 1)[0] + "/" if "/" in config_rel else ""
+
+# THE GUARD IS ON THE COMPONENT, NOT THE REPOSITORY. A pipeline repo carries a
+# vae as well; counting its bytes against a component guard would refuse a
+# repository that is entirely correct.
 weights = sum(
-    (f.size or 0) for f in info.siblings
-    if f.rfilename.endswith((".safetensors", ".bin"))
+    size for path, size in names.items()
+    if path.startswith(PREFIX) and path.endswith((".safetensors", ".bin"))
 )
 if not 0 < weights <= SIZE_GUARD_BYTES:
     raise SystemExit(
-        f"{REPO} carries {weights} weight bytes; the upscaler guard is "
-        f"{SIZE_GUARD_BYTES}. That is not a spatial latent upsampler."
+        f"{REPO} component {PREFIX or '(root)'} carries {weights} weight "
+        f"bytes; the upscaler guard is {SIZE_GUARD_BYTES}. That is not a "
+        "spatial latent upsampler."
     )
 
+STAGE = DEST + "_src"
 snapshot_download(
-    REPO, revision=REVISION, token=TOKEN, local_dir=DEST,
-    allow_patterns=["*.json", "*.safetensors", "LICENSE*", "NOTICE*",
-                    "*icense*.txt", "*icence*.txt"],
+    REPO, revision=REVISION, token=TOKEN, local_dir=STAGE,
+    allow_patterns=[f"{PREFIX}*.json", f"{PREFIX}*.safetensors",
+                    "LICENSE*", "NOTICE*", "*icense*.txt", "*icence*.txt"],
 )
+
+# FLATTEN, so DEST *is* the component. ltxcaps finds the upsampler by scanning
+# UPSCALER_DIRS under the model root and videogen calls
+# LTXLatentUpsamplerModel.from_pretrained(DEST); both expect the config and the
+# weights directly in DEST rather than one level down.
+os.makedirs(DEST, exist_ok=True)
+component_dir = os.path.join(STAGE, PREFIX.rstrip("/")) if PREFIX else STAGE
+for name in os.listdir(component_dir):
+    src = os.path.join(component_dir, name)
+    if os.path.isfile(src):
+        shutil.move(src, os.path.join(DEST, name))
+# The terms travel WITH the weights. In a pipeline repo they sit at the root,
+# so they are moved down beside the component they license.
+for name in os.listdir(STAGE):
+    src = os.path.join(STAGE, name)
+    if os.path.isfile(src):
+        shutil.move(src, os.path.join(DEST, name))
+shutil.rmtree(STAGE, ignore_errors=True)
 
 # THE TERMS MUST TRAVEL WITH THE WEIGHTS — the same compliance check the LTX
 # bake makes, for the same reason: an image that redistributes someone's model
@@ -639,24 +691,35 @@ if not licence_files:
         "redistribute the weights without their terms"
     )
 
-# IT MUST BE THE MODEL THE CODE WILL CONSTRUCT, field by field.
+# IT MUST BE THE MODEL THE CODE WILL CONSTRUCT.
 #
-# A config that merely LOADS under the right class is not enough: a temporal
-# upsampler, a 2-D variant or a different channel width would all construct
-# happily and then produce latents the refine pass cannot use — at job time,
-# on a rented card, which is the class of failure this whole bake exists to
-# prevent.
+# CHECKED ON THE CONSTRUCTED MODEL, NOT ON THE RAW JSON. Measured 2026-08-31:
+# Lightricks' latent_upsampler/config.json declares _class_name and leaves the
+# architecture to LTXLatentUpsamplerModel's own defaults, so asserting raw keys
+# refused a component that is in fact correct. Constructing it and reading the
+# resolved config back is STRICTER rather than looser — it verifies what the
+# model IS once defaults resolve, instead of what someone happened to write in
+# a file.
+#
+# A config that merely LOADS under the right class is still not enough: a
+# temporal upsampler, a 2-D variant or a different channel width would all
+# construct happily and then produce latents the refine pass cannot use — at
+# job time, on a rented card, which is the class of failure this whole bake
+# exists to prevent. Hence the resolved values are asserted too.
 #
 # The expected shape is VERIFIED FROM UPSTREAM (diffusers 0.38.0,
 # pipelines/ltx/modeling_latent_upsampler.py) and cross-checks against the
 # published artifact size: 128/512/4 with dims=3 is 126.25 M parameters, which
-# at fp32 is 505 MB — the size the 0.9.8 upsampler actually ships at, to the
-# megabyte. Two independent facts agreeing is why these are assertions rather
-# than hopes.
+# at fp32 is 505 MB — the size BOTH published copies ship at, to the byte. Two
+# independent facts agreeing is why these are assertions rather than hopes.
 with open(os.path.join(DEST, "config.json")) as fh:
     cfg = json.load(fh)
+if cfg.get("_class_name") != "LTXLatentUpsamplerModel":
+    raise SystemExit(
+        f"{DEST}/config.json declares {cfg.get('_class_name')!r}, not "
+        "LTXLatentUpsamplerModel"
+    )
 EXPECTED = {
-    "_class_name": "LTXLatentUpsamplerModel",
     "dims": 3,
     "in_channels": 128,
     "mid_channels": 512,
@@ -666,14 +729,16 @@ EXPECTED = {
     # is 97 frames. This one must move pixels, not time.
     "temporal_upsample": False,
 }
-wrong = {k: cfg.get(k) for k, v in EXPECTED.items() if cfg.get(k) != v}
+from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
+model = LTXLatentUpsamplerModel.from_config(cfg)  # raises if not loadable
+resolved = {k: getattr(model.config, k, None) for k in EXPECTED}
+wrong = {k: resolved[k] for k, v in EXPECTED.items() if resolved[k] != v}
 if wrong:
     raise SystemExit(
-        f"{DEST}/config.json is not the 0.9.8 spatial upsampler: {wrong} "
-        f"(expected {EXPECTED})"
+        f"{DEST} constructs to {wrong}, which is not the spatial upsampler "
+        f"this pipeline needs (expected {EXPECTED})"
     )
-from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
-LTXLatentUpsamplerModel.from_config(cfg)  # raises if the config is not loadable
+print(f"UPSCALER CONFIG resolved {resolved} from {config_rel}")
 
 on_disk = sum(
     os.path.getsize(os.path.join(r, n))
