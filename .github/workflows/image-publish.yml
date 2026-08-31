@@ -206,9 +206,21 @@ jobs:
           #   projected image (FLOOR)                       57.94 GiB
           # The LTX row grew 26.47 -> 44.36 GiB with the 2026-08-31 owner
           # directive that moved the checkpoint to the 13B distilled 0.9.7 so
-          # its vae matches the pinned spatial upsampler. The floor moved with
-          # it; whether a hosted runner clears the new one is measured by the
-          # image-size mode, not assumed here.
+          # its vae matches the pinned spatial upsampler.
+          #
+          # MEASURED: A HOSTED RUNNER CANNOT BUILD THAT. Three facts agree,
+          # and none of them is a projection alone:
+          #   - run 33434875038 projects the image at 57.97 GiB against
+          #     33.76 GiB after reclaim, and says DOES NOT FIT;
+          #   - the last SUCCESSFUL publish (run 33327318610, 2026-08-30,
+          #     sha256:90ff7079) measured the image at 40.10 GiB and left the
+          #     runner with 5.73 GiB free of 71.61 GiB — nearly full;
+          #   - the new checkpoint adds 17.89 GiB, which is three times that
+          #     remaining headroom.
+          # So the FLOOR below will refuse this build in seconds rather than
+          # after forty minutes, which is what it is for. Clearing it needs a
+          # bigger disk than ubuntu-latest has, or a smaller image — an owner
+          # decision either way, recorded here rather than worked around.
           # The floor is that projection, not a round number: below it the
           # build certainly cannot finish, and starting one anyway wastes
           # the runner's time to learn what a $0 read already knew. It is
