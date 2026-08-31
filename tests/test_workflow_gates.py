@@ -542,6 +542,13 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # and chooses neither. Metadata and one config.json, no weights, no
         # RunPod credential — a $0 read like ltx-discover beside it.
         "upscaler-discover",
+        # pairing-discover joined 2026-08-31, the read-only MIRROR of the
+        # above: upscaler-discover measured that no published upsampler pairs
+        # with the checkpoint baked today, so this asks the other half —
+        # which CHECKPOINT pairs with the pinned upsampler, and does its
+        # transformer fit the cards the endpoint may use. Same shape: metadata
+        # and config.json, no weights, no RunPod credential, $0.
+        "pairing-discover",
         # frames-pull joined 2026-08-29 (owner directive: judge LTX from
         # frames, not metadata). It READS objects that already exist over
         # the bucket's public base and cuts stills out of them. It holds
