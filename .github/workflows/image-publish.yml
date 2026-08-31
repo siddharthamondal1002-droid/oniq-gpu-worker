@@ -199,28 +199,24 @@ jobs:
           # A build that dies at 90% costs 40 minutes and produces nothing.
           # MEASURED, validation run 54 for the base/story/piper rows and run
           # 33432424021 for the LTX row, at the pinned model:
-          #   base stage                                    7.79 GiB
-          #   Lightricks/LTX-Video-0.9.7-distilled @ 057509ed  44.36 GiB
+          #   base stage                                     7.82 GiB
+          #   LTX-Video-0.9.7-distilled @ 057509ed, MINUS
+          #     the text encoder, which is on the volume    26.62 GiB
           #   Qwen/Qwen3-8B-AWQ                              5.69 GiB
           #   piper                                          0.10 GiB
-          #   projected image (FLOOR)                       57.94 GiB
+          #   projected image (FLOOR)                       40.23 GiB
           # The LTX row grew 26.47 -> 44.36 GiB with the 2026-08-31 owner
           # directive that moved the checkpoint to the 13B distilled 0.9.7 so
           # its vae matches the pinned spatial upsampler.
           #
-          # MEASURED: A HOSTED RUNNER CANNOT BUILD THAT. Three facts agree,
-          # and none of them is a projection alone:
-          #   - run 33434875038 projects the image at 57.97 GiB against
-          #     33.76 GiB after reclaim, and says DOES NOT FIT;
-          #   - the last SUCCESSFUL publish (run 33327318610, 2026-08-30,
-          #     sha256:90ff7079) measured the image at 40.10 GiB and left the
-          #     runner with 5.73 GiB free of 71.61 GiB — nearly full;
-          #   - the new checkpoint adds 17.89 GiB, which is three times that
-          #     remaining headroom.
-          # So the FLOOR below will refuse this build in seconds rather than
-          # after forty minutes, which is what it is for. Clearing it needs a
-          # bigger disk than ubuntu-latest has, or a smaller image — an owner
-          # decision either way, recorded here rather than worked around.
+          # THE TEXT ENCODER IS NOT IN THIS IMAGE — owner directive
+          # 2026-08-31. With it, the checkpoint change put the image at
+          # 57.97 GiB (run 33434875038) and a hosted runner could not build
+          # it: the last successful publish had finished a 40.10 GiB image
+          # with only 5.73 GiB of 71.61 to spare. Its 17.74 GiB now live on
+          # the network volume instead, which brings the image back to
+          # 40.23 GiB — within a tenth of a GiB of the one that already
+          # builds. Measured, run 33437051402.
           # The floor is that projection, not a round number: below it the
           # build certainly cannot finish, and starting one anyway wastes
           # the runner's time to learn what a $0 read already knew. It is
@@ -229,7 +225,7 @@ jobs:
           # Shell arithmetic, not a heredoc: a heredoc terminator indented
           # inside a YAML block scalar never closes, since <<- strips tabs
           # and not spaces.
-          FLOOR=62200000000
+          FLOOR=44000000000
           if [ "${AVAIL}" -lt "${FLOOR}" ]; then
             echo "BLOCKED: only ${AVAIL} bytes free, below the ${FLOOR} byte floor."
             awk -v a="${AVAIL}" -v f="${FLOOR}" 'BEGIN{printf "  free %.2f GiB, need %.2f GiB, short by %.2f GiB\n", a/1073741824, f/1073741824, (f-a)/1073741824}'

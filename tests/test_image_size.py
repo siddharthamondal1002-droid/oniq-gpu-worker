@@ -429,3 +429,33 @@ EOF
     # And the live Dockerfile's own split really is picked up.
     text = open("Dockerfile", encoding="utf-8").read()
     assert "transformer/" in isz._split_prefixes(text, "/app/models/ltx")
+
+
+def test_the_reclaim_figure_does_not_contradict_a_real_build():
+    """A conservative placeholder is fine until it starts contradicting a
+    measurement; then it is simply wrong.
+
+    With RECLAIMABLE_BYTES at its old 20 GiB placeholder this module answered
+    DOES NOT FIT for a 40.23 GiB image — while a 40.10 GiB image had
+    demonstrably just been built and pushed on this exact runner (run
+    33327318610). The figure is now derived from that run's own end state, and
+    it must stay large enough to admit the image that provably fits."""
+    PROVEN_BUILT_BYTES = 43_053_207_454  # measured, run 33327318610
+    assert isz.RUNNER_USABLE_BYTES > PROVEN_BUILT_BYTES
+
+    # And it stays a LOWER bound, never the whole disk: a figure that admitted
+    # everything could bless a build that dies at 90%.
+    assert isz.RUNNER_USABLE_BYTES < isz.RUNNER_TOTAL_BYTES
+
+
+def test_the_image_without_the_text_encoder_fits_the_runner():
+    """The whole point of moving it. 40.23 GiB against a reclaim floor of
+    45.85 GiB — measured in run 33437051402 after the move."""
+    # THE REAL Dockerfile, not this module's DOCKERFILE fixture — the claim
+    # is about what ONIQ actually ships, and a synthetic string cannot make it.
+    real = open("Dockerfile", encoding="utf-8").read()
+    bake = isz.parse_bakes(real)[LTX]
+    assert "text_encoder/*" not in bake["patterns"]
+    # Every OTHER component the pipeline needs is still fetched by the image.
+    for component in ("transformer", "vae", "tokenizer", "scheduler"):
+        assert f"{component}/*" in bake["patterns"]
