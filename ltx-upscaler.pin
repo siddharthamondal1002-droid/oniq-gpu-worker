@@ -163,12 +163,33 @@
 #     — ONIQ's OWN baked vae, not Lightricks'.
 #
 # STILL UNRESOLVED. Whether the vae ONIQ bakes is byte-identical to the one the
-# upsampler shipped beside is UNKNOWN, not disproven: HuggingFace returned no
-# lfs.oid for Lightricks/LTX-Video@8984fa25's vae (most likely Xet-backed
-# storage rather than classic LFS), so there is nothing to compare. Upstream
-# uses this same upsampler with both the 0.9.7 and 0.9.8 pipelines, each
-# passing its own vae, which is evidence the latent space is stable across
-# those checkpoints — evidence, not proof.
+# upsampler shipped beside is UNKNOWN, not disproven. The upscaler repo's vae
+# hashes to 3419989c7059923ee4134b858e0511d0b294a7c88b7745169763b37ebc4db7f0;
+# the baked checkpoint's vae came back from model-info with an lfs entry that
+# had no oid inside it, printed as "baked vae None" in run 33424489532, so
+# there was nothing to compare it against.
+#
+# THE CAUSE IS NOT ESTABLISHED, and the earlier note here guessed one. It said
+# the blob was "most likely Xet-backed rather than classic LFS". The owner has
+# since confirmed the storage IS Xet-backed — that part is now a fact rather
+# than a conjecture — but it does not explain the absence, and the note was
+# wrong to treat it as an explanation. huggingface_hub's own HfApi.copy_files
+# reads BOTH off a single file (`if not src_file.lfs: continue`, then `if not
+# src_file.xet_hash: raise`), which means a Xet-backed blob still keeps its
+# git-LFS sha256. Xet storage and a missing oid are two separate facts.
+#
+# WHAT CHANGED, so the next $0 run answers this instead of guessing again. The
+# cross-check now reads the TREE endpoint rather than model-info's siblings
+# list — per huggingface_hub's parsers, RepoFile carries lfs.oid AND xetHash
+# while RepoSibling carries neither reliably — compares like with like in
+# either currency, and prints the registry's raw entry for any file that
+# returns no hash at all. Re-running `gpu-validation.yml` mode
+# `upscaler-discover` costs nothing and either settles this or records exactly
+# what the registry withheld.
+#
+# Meanwhile: upstream uses this same upsampler with both the 0.9.7 and 0.9.8
+# pipelines, each passing its own vae, which is evidence the latent space is
+# stable across those checkpoints — evidence, not proof.
 #
 # AND STILL NOT MEASURED. Whether multi-scale actually improves ONIQ's output
 # is unknown until a real generation is run and looked at.

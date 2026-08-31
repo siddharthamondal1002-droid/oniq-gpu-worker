@@ -243,25 +243,109 @@ class TestAbsentIsNotWrong:
 class TestUnknownIsNotFalse:
     """The cross-check's first run printed SAME LATENTS: False for a repo whose
     hash had not come back. Absent data is not negative data — the third time
-    this module made that mistake, so it is pinned."""
+    this module made that mistake, so it is pinned.
 
-    def _cross(self, baked_oid, candidate_oid):
+    It now reads the TREE endpoint rather than model-info's siblings list,
+    because that is the only one huggingface_hub's own parsers say carries a
+    Xet hash, and because siblings returned an lfs dict with no oid in it for
+    the very file this comparison exists to check."""
+
+    VAE = "vae/diffusion_pytorch_model.safetensors"
+
+    def _cross(self, baked, candidate):
+        """`baked` and `candidate` are (sha256, xetHash) pairs; None for absent."""
+
+        def entry(pair):
+            sha, xet = pair
+            e = {"type": "file", "path": self.VAE, "size": 2_400_000_000,
+                 "oid": "g" * 40}
+            if sha:
+                e["lfs"] = {"oid": sha, "size": 2_400_000_000, "pointerSize": 134}
+            if xet:
+                e["xetHash"] = xet
+            return e
+
         def get(url, token, timeout=60):
-            return {"siblings": [{"rfilename": "vae/diffusion_pytorch_model.safetensors",
-                                  "lfs": {"oid": baked_oid} if baked_oid else {}}]}
-        rows = [{"repo": "cand", "blob_hashes":
-                 {"vae/diffusion_pytorch_model.safetensors": candidate_oid}}]
+            assert "/tree/" in url, url
+            return [entry(baked if ud.BAKED_REPO in url else candidate)]
+
+        rows = [{"repo": "cand", "revision": "d" * 40,
+                 "blob_hashes": {self.VAE: candidate[0]}}]
         return ud.vae_crosscheck(rows, "tok", get)
 
     def test_a_missing_baked_hash_is_unknown_not_a_mismatch(self):
-        out = self._cross(None, "a" * 64)
+        out = self._cross((None, None), ("a" * 64, None))
         assert out["matches"]["cand"].startswith("UNKNOWN")
         assert "UNRESOLVED" in out["note"]
 
     def test_two_real_and_equal_hashes_are_the_same(self):
-        out = self._cross("a" * 64, "a" * 64)
-        assert out["matches"]["cand"] == "SAME"
+        out = self._cross(("a" * 64, None), ("a" * 64, None))
+        assert out["matches"]["cand"] == "SAME (sha256)"
 
     def test_two_real_and_different_hashes_are_different(self):
-        out = self._cross("a" * 64, "b" * 64)
-        assert out["matches"]["cand"] == "DIFFERENT"
+        out = self._cross(("a" * 64, None), ("b" * 64, None))
+        assert out["matches"]["cand"] == "DIFFERENT (sha256)"
+
+    def test_the_raw_entry_is_kept_when_neither_hash_comes_back(self):
+        # The absence that cost three runs left no record of what the registry
+        # had actually returned, so the note in the pin guessed at a cause.
+        out = self._cross((None, None), (None, None))
+        raw = out["baked_vae"]["files"][self.VAE]["raw"]
+        assert raw["type"] == "file" and raw["size"] == 2_400_000_000
+
+    def test_an_unreadable_tree_says_so_rather_than_reporting_a_mismatch(self):
+        def get(url, token, timeout=60):
+            raise urllib_error(404)
+
+        rows = [{"repo": "cand", "revision": "d" * 40,
+                 "blob_hashes": {self.VAE: "a" * 64}}]
+        out = ud.vae_crosscheck(rows, "tok", get)
+        assert "404" in out["error"]
+        assert "matches" not in out
+
+
+class TestLikeIsComparedWithLike:
+    """A sha256 and a Xet hash are different functions over the same bytes.
+    Comparing one to the other answers DIFFERENT for two identical files — the
+    same shape of false negative, one layer down."""
+
+    def _files(self, sha=None, xet=None):
+        return {"vae/x.safetensors": {"sha256": sha, "xet": xet, "raw": {}}}
+
+    def test_a_xet_hash_settles_it_when_no_sha256_came_back(self):
+        assert ud._same_content(self._files(xet="x" * 64),
+                                self._files(xet="x" * 64)) == "SAME (xet)"
+        assert ud._same_content(self._files(xet="x" * 64),
+                                self._files(xet="y" * 64)) == "DIFFERENT (xet)"
+
+    def test_a_sha256_is_never_compared_against_a_xet_hash(self):
+        # One side has only a sha256, the other only a Xet hash. There is no
+        # comparison to make, and inventing one would answer DIFFERENT.
+        assert ud._same_content(self._files(sha="a" * 64),
+                                self._files(xet="a" * 64)).startswith("UNKNOWN")
+
+    def test_sha256_is_preferred_when_both_currencies_are_present(self):
+        # Both are deterministic, but sha256 is the one the rest of this module
+        # already prints and the one the pin quotes.
+        out = ud._same_content(self._files(sha="a" * 64, xet="x" * 64),
+                               self._files(sha="a" * 64, xet="y" * 64))
+        assert out == "SAME (sha256)"
+
+
+class TestOneReaderForTheHash:
+    def test_both_paths_read_the_lfs_sha256_the_same_way(self):
+        # measure() fell back from `oid` to `sha256`; the cross-check read only
+        # `oid`. Two readings of one field is how a laxer path and a stricter
+        # path drift apart, and the stricter one then reports an absence.
+        assert ud._lfs_sha256({"lfs": {"oid": "a" * 64}}) == "a" * 64
+        assert ud._lfs_sha256({"lfs": {"sha256": "b" * 64}}) == "b" * 64
+        assert ud._lfs_sha256({"lfs": {}}) is None
+        assert ud._lfs_sha256({}) is None
+
+    def test_the_tree_endpoint_is_the_one_huggingface_hub_documents(self):
+        # HfApi.list_repo_tree builds
+        #   {endpoint}/api/{repo_type}s/{repo_id}/tree/{revision}{path}
+        # and its RepoFile parser pops "xetHash". Model-info's RepoSibling does
+        # not carry one, which is why this read exists at all.
+        assert ud.TREE_API.startswith("https://huggingface.co/api/models/")
+        assert "/tree/{revision}/{path}" in ud.TREE_API

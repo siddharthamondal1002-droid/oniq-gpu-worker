@@ -52,6 +52,15 @@ CANDIDATES = (
 
 RAW = "https://huggingface.co/{repo}/resolve/{revision}/{path}"
 
+# The tree endpoint, taken from huggingface_hub's HfApi.list_repo_tree:
+#   f"{endpoint}/api/{repo_type}s/{repo_id}/tree/{revision}{path_in_repo}"
+# It is the only read here that returns a Xet hash — model-info's siblings
+# list does not carry one. See _vae_tree for why that matters.
+TREE_API = "https://huggingface.co/api/models/{repo}/tree/{revision}/{path}"
+
+# The component whose latent space the upsampler was trained against.
+VAE_PREFIX = "vae"
+
 # Exactly what the Dockerfile's upscaler stage asserts field by field. Kept
 # here so the read reports the SAME verdict the build would reach, rather than
 # a looser one that lets a doomed pin through to a 25-minute build.
@@ -94,6 +103,18 @@ def _get_text(url: str, token, timeout: int = 60) -> str:
         return resp.read().decode("utf-8")
 
 
+def _lfs_sha256(entry) -> str | None:
+    """The sha256 git-LFS records for one file, or None if none came back.
+
+    ONE reader for both callers. The cross-check used to inline its own copy
+    that read only `oid`, while this one also fell back to `sha256`; two
+    readings of one field is how a laxer path and a stricter path drift apart,
+    and the stricter one then reports an absence the other would not have.
+    """
+    lfs = entry.get("lfs") or {}
+    return lfs.get("oid") or lfs.get("sha256")
+
+
 def measure(repo: str, token, get=_get, get_text=_get_text, revision=None) -> dict:
     """One candidate, against the gates the build would apply to it."""
     row: dict = {"repo": repo}
@@ -125,8 +146,7 @@ def measure(repo: str, token, get=_get, get_text=_get_text, revision=None) -> di
     # settles whether they are the same artifact. Git-LFS stores a sha256 per
     # blob and HuggingFace returns it with blobs=true, so this is free.
     row["blob_hashes"] = {
-        (s.get("rfilename") or ""): ((s.get("lfs") or {}).get("oid")
-                                     or (s.get("lfs") or {}).get("sha256"))
+        (s.get("rfilename") or ""): _lfs_sha256(s)
         for s in info.get("siblings") or []
         if (s.get("rfilename") or "").endswith((".safetensors", ".bin"))
         and (s.get("lfs") or {})
@@ -214,49 +234,130 @@ BAKED_REPO = "Lightricks/LTX-Video"
 BAKED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
 
 
+def _vae_tree(repo: str, revision: str, token, get) -> dict:
+    """The vae component's content hashes, read from the TREE endpoint.
+
+    Returns {"files": {path: {"sha256", "xet", "raw"}}, "error": str | None}.
+
+    WHY NOT THE SIBLINGS LIST, which every other read here uses. Run
+    33424489532 printed `baked vae None` for
+    Lightricks/LTX-Video@8984fa25's vae/diffusion_pytorch_model.safetensors:
+    model-info returned an lfs dict for that file with no oid inside it, and
+    an absence compared against real hashes answered SAME LATENTS: False.
+
+    huggingface_hub's own parsers say where a hash actually lives.
+    RepoSibling — what model-info returns — carries only rfilename, size,
+    blob_id and lfs. RepoFile — what THIS endpoint returns — carries lfs.oid
+    AND xetHash. And HfApi.copy_files reads both off one file, `if not
+    src_file.lfs: continue` then `if not src_file.xet_hash: raise`, which
+    means a Xet-backed blob still keeps its LFS sha256. So Xet storage does
+    not on its own explain a missing oid, and this is the read that can
+    return a hash in either currency.
+
+    One page is read, not the full Link-header pagination: this is pointed at
+    a single component folder holding a handful of files, and a vae that
+    needed a second page would be a different repository shape entirely.
+    """
+    url = TREE_API.format(repo=repo, revision=revision, path=VAE_PREFIX)
+    try:
+        entries = get(url, token)
+    except Exception as exc:
+        return {"files": {}, "error": _why(exc)}
+    files = {}
+    for entry in entries if isinstance(entries, list) else []:
+        path = entry.get("path") or ""
+        if entry.get("type") == "directory" or not path.endswith(
+                (".safetensors", ".bin")):
+            continue
+        files[path] = {
+            "sha256": _lfs_sha256(entry),
+            "xet": entry.get("xetHash"),
+            # KEPT SO A BARREN READ DIAGNOSES ITSELF. The last unexplained
+            # absence cost three runs and a wrong note in the pin, because
+            # nothing recorded what the registry had actually returned.
+            "raw": {k: v for k, v in entry.items()
+                    if k in ("oid", "lfs", "xetHash", "size", "type")},
+        }
+    return {"files": files, "error": None}
+
+
+def _same_content(mine: dict, theirs: dict) -> str:
+    """SAME / DIFFERENT / UNKNOWN for two sets of file hashes.
+
+    LIKE IS COMPARED WITH LIKE. A sha256 and a Xet hash are different
+    functions over the same bytes, so they are never compared to each other —
+    that would answer DIFFERENT for two identical files, which is precisely
+    the class of false negative this cross-check has already produced three
+    times. Either currency settles it alone; both are deterministic over
+    content.
+
+    UNKNOWN IS NOT FALSE. A hash that did not come back is not a hash that
+    disagreed, so the third value exists and the caller must handle it.
+    """
+    for currency in ("sha256", "xet"):
+        ours = {h[currency] for h in mine.values() if h.get(currency)}
+        yours = {h[currency] for h in theirs.values() if h.get(currency)}
+        if ours and yours:
+            return (f"SAME ({currency})" if ours & yours
+                    else f"DIFFERENT ({currency})")
+    return "UNKNOWN — no content hash returned in either currency"
+
+
 def vae_crosscheck(rows, token, get=_get) -> dict:
     """Is the vae beside the upsampler the vae ONIQ bakes?"""
     out: dict = {"baked": f"{BAKED_REPO}@{BAKED_REVISION}"}
-    try:
-        info = get(INFO_API.format(repo=BAKED_REPO).replace(
-            f"{BAKED_REPO}?", f"{BAKED_REPO}/revision/{BAKED_REVISION}?"), token)
-    except Exception as exc:
-        out["error"] = _why(exc)
+    baked = _vae_tree(BAKED_REPO, BAKED_REVISION, token, get)
+    out["baked_vae"] = baked
+    if baked["error"]:
+        out["error"] = baked["error"]
         return out
-    out["baked_vae"] = {
-        (s.get("rfilename") or ""): ((s.get("lfs") or {}).get("oid"))
-        for s in info.get("siblings") or []
-        if (s.get("rfilename") or "").startswith("vae/")
-        and (s.get("rfilename") or "").endswith(".safetensors")
-        and (s.get("lfs") or {})
-    }
-    out["candidate_vae"] = {
-        r["repo"]: {k: v for k, v in (r.get("blob_hashes") or {}).items()
-                    if k.startswith("vae/")}
-        for r in rows if any(k.startswith("vae/")
-                             for k in (r.get("blob_hashes") or {}))
-    }
-    # UNKNOWN IS NOT FALSE. The first run of this cross-check reported
-    # SAME LATENTS: False for a repository whose hash simply had not come back
-    # — HuggingFace returned no lfs.oid for the baked vae, and comparing a set
-    # containing None against real hashes answers False. That is the third
-    # false negative this module has produced by treating absent data as
-    # negative data, so the verdict is now three-valued.
-    baked = {h for h in out["baked_vae"].values() if h}
+
+    out["candidate_vae"] = {}
+    for row in rows:
+        if not row.get("revision"):
+            continue
+        if not any(k.startswith(VAE_PREFIX + "/")
+                   for k in (row.get("blob_hashes") or {})):
+            continue  # a bare component repo ships no vae to compare
+        out["candidate_vae"][row["repo"]] = _vae_tree(
+            row["repo"], row["revision"], token, get)
+
     out["matches"] = {}
-    for repo, hashes in out["candidate_vae"].items():
-        theirs = {h for h in hashes.values() if h}
-        if not baked or not theirs:
-            out["matches"][repo] = "UNKNOWN — no content hash returned"
-        else:
-            out["matches"][repo] = "SAME" if baked & theirs else "DIFFERENT"
-    if not baked:
+    for repo, theirs in out["candidate_vae"].items():
+        out["matches"][repo] = (
+            f"UNREADABLE — {theirs['error']}" if theirs["error"]
+            else _same_content(baked["files"], theirs["files"]))
+
+    if any(v.startswith("UNKNOWN") for v in out["matches"].values()) or (
+            not baked["files"]):
         out["note"] = (
-            "the baked checkpoint returned no lfs.oid for its vae, so this "
-            "question is UNRESOLVED rather than answered — most likely the "
-            "blob is Xet-backed rather than classic LFS"
+            "no content hash came back in either currency, so this question "
+            "is UNRESOLVED rather than answered — never DIFFERENT. The raw "
+            "registry metadata for each file is printed above; read it rather "
+            "than guessing a cause, which is what the last note in the pin did"
         )
     return out
+
+
+def _print_vae(label: str, block: dict, indent: str = "    ") -> None:
+    """One component folder's hashes, in BOTH currencies, plus the raw entry.
+
+    The raw line only appears when neither hash came back — that is the case
+    that has misled this module before, and it is the one where the next
+    reader needs the registry's own words rather than a summary of them.
+    """
+    if block.get("error"):
+        print(f"{indent}{label:<14} UNREADABLE — {block['error']}")
+        return
+    if not block.get("files"):
+        print(f"{indent}{label:<14} no .safetensors returned for this folder")
+        return
+    for name, h in sorted(block["files"].items()):
+        print(f"{indent}{label:<14} {name}")
+        print(f"{indent}  sha256       {h.get('sha256')}")
+        print(f"{indent}  xet          {h.get('xet')}")
+        if not h.get("sha256") and not h.get("xet"):
+            print(f"{indent}  RAW          {h.get('raw')}")
 
 
 def report(token, get=_get, get_text=_get_text) -> tuple:
@@ -303,12 +404,10 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
     if cross.get("error"):
         print(f"    UNREADABLE     {cross['error']}")
     else:
-        for name, digest in sorted((cross.get("baked_vae") or {}).items()):
-            print(f"    baked vae      {digest}  {name}")
-        for repo, hashes in (cross.get("candidate_vae") or {}).items():
-            for name, digest in sorted(hashes.items()):
-                print(f"    {repo}")
-                print(f"      vae          {digest}  {name}")
+        _print_vae("baked vae", cross.get("baked_vae") or {})
+        for repo, block in (cross.get("candidate_vae") or {}).items():
+            print(f"    {repo}")
+            _print_vae("vae", block, indent="      ")
         print(f"    SAME LATENTS   {cross.get('matches')}")
         if cross.get("note"):
             print(f"    NOTE           {cross['note']}")
