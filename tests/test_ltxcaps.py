@@ -690,23 +690,36 @@ def test_the_upscaler_bake_stays_off_when_no_revision_is_pinned():
     """A revision is the licence. No sha, no bake — and unset must remain a
     no-op, so removing the pin can never break a build.
 
-    The shipped pin now NAMES one (Lightricks/ltxv-spatial-upscaler-0.9.7 at
-    c96c168c…, resolved from the registry 2026-08-31 and accepted by the owner
-    under the LTX 0.X community licence). So this asserts the shape of the
-    declaration and that the skip path still exists, rather than that the file
-    is empty."""
+    The shipped pin RESOLVED one (Lightricks/ltxv-spatial-upscaler-0.9.7 at
+    c96c168c…, read from the registry 2026-08-31 and accepted by the owner
+    under the LTX 0.X community licence) and then COMMENTED it, because the
+    vae this image bakes is a different network from the one that upsampler
+    was trained beside — measured, run 33426496040. So the no-op path is live
+    again, and this asserts both halves: nothing is declared, and the line
+    that would be declared still has the right shape, so re-enabling is one
+    uncomment rather than a re-derivation."""
     import re
 
     docker = open("Dockerfile", encoding="utf-8").read()
     pin = open("ltx-upscaler.pin", encoding="utf-8").read()
     declared = [l.split("#", 1)[0].strip() for l in pin.splitlines()
                 if l.split("#", 1)[0].strip()]
-    assert len(declared) == 1, declared
-    repo, revision = declared[0].split()
+    assert declared == [], declared
+    # The prose names the repository in several places; the WRITTEN-OUT line is
+    # the one that is a whole declaration — repo plus a 40-hex revision.
+    written_out = [
+        l.lstrip("# ").strip() for l in pin.splitlines()
+        if re.fullmatch(r"#\s*Lightricks/\S+\s+[0-9a-f]{40}\s*", l)
+    ]
+    assert len(written_out) == 1, written_out
+    repo, revision = written_out[0].split()
     assert repo.count("/") == 1
     assert re.fullmatch(r"[0-9a-f]{40}", revision), revision
-    # The acceptance is recorded next to the code it governs, with its date.
+    # The acceptance is recorded next to the code it governs, with its date —
+    # it survives the pin being disabled, because the owner did accept it.
     assert "OWNER LICENCE ACCEPTANCE" in pin
+    # And the reason it is off is recorded next to it, not only in a commit.
+    assert "LATENT-SPACE MISMATCH" in pin.upper()
     assert "COPY ltx-upscaler.pin" in docker
     # UNSET IS STILL A NO-OP. The skip path is what makes the pin reversible:
     # blank the file and the image is the single-scale one again.

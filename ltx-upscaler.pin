@@ -138,18 +138,18 @@
 # the same way the 2026-08-13 movie-on/classic-off flip does.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# WHAT REMAINS UNMEASURED
+# SETTLED — the upsampler itself
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# SETTLED since this pin was first written. The two candidates are the SAME
-# FILE: sha256 e1d5e5cc4bdda2ff8ece07ab86e746890e1e515848797d2dd1c9e0179f442fdc
-# for both Lightricks' latent_upsampler/diffusion_pytorch_model.safetensors and
-# the third party's diffusion_pytorch_model.safetensors. There is no separate
-# 0.9.8 upsampler; it is this component re-uploaded without its licence. So the
-# "0.9.7 against a 2B checkpoint" worry was about a version label that does not
+# The two candidates are the SAME FILE: sha256
+# e1d5e5cc4bdda2ff8ece07ab86e746890e1e515848797d2dd1c9e0179f442fdc for both
+# Lightricks' latent_upsampler/diffusion_pytorch_model.safetensors and the
+# third party's diffusion_pytorch_model.safetensors. There is no separate 0.9.8
+# upsampler; it is this component re-uploaded without its licence. The "0.9.7
+# against a 2B checkpoint" worry was about a version label that does not
 # correspond to different weights.
 #
-# ALSO SETTLED, from the diffusers source rather than from inference:
+# From the diffusers source rather than from inference:
 #   - LTXLatentUpsamplerModel's defaults ARE in_channels=128, mid_channels=512,
 #     num_blocks_per_stage=4, dims=3, spatial_upsample=True,
 #     temporal_upsample=False. Lightricks' terse config constructs to exactly
@@ -157,41 +157,77 @@
 #   - The class upsamples VAE LATENTS ("Model to spatially upsample VAE
 #     latents"), never transformer output, so the transformer's size — 2B or
 #     13B — is not a compatibility question at all.
-#   - AutoencoderKLLTXVideo.latent_channels defaults to 128, matching
-#     in_channels, and LTXLatentUpsamplePipeline takes exactly (vae,
-#     latent_upsampler) and normalises with self.vae.latents_mean/latents_std
-#     — ONIQ's OWN baked vae, not Lightricks'.
+#   - LTXLatentUpsamplePipeline takes exactly (vae, latent_upsampler) and
+#     normalises with self.vae.latents_mean/latents_std — ONIQ's OWN baked vae.
 #
-# STILL UNRESOLVED. Whether the vae ONIQ bakes is byte-identical to the one the
-# upsampler shipped beside is UNKNOWN, not disproven. The upscaler repo's vae
-# hashes to 3419989c7059923ee4134b858e0511d0b294a7c88b7745169763b37ebc4db7f0;
-# the baked checkpoint's vae came back from model-info with an lfs entry that
-# had no oid inside it, printed as "baked vae None" in run 33424489532, so
-# there was nothing to compare it against.
+# That last point is the one that turned out to matter.
 #
-# THE CAUSE IS NOT ESTABLISHED, and the earlier note here guessed one. It said
-# the blob was "most likely Xet-backed rather than classic LFS". The owner has
-# since confirmed the storage IS Xet-backed — that part is now a fact rather
-# than a conjecture — but it does not explain the absence, and the note was
-# wrong to treat it as an explanation. huggingface_hub's own HfApi.copy_files
-# reads BOTH off a single file (`if not src_file.lfs: continue`, then `if not
-# src_file.xet_hash: raise`), which means a Xet-backed blob still keeps its
-# git-LFS sha256. Xet storage and a missing oid are two separate facts.
+# ─────────────────────────────────────────────────────────────────────────────
+# THE PIN IS NOT ENABLED — MEASURED LATENT-SPACE MISMATCH, 2026-08-31
+# ─────────────────────────────────────────────────────────────────────────────
 #
-# WHAT CHANGED, so the next $0 run answers this instead of guessing again. The
-# cross-check now reads the TREE endpoint rather than model-info's siblings
-# list — per huggingface_hub's parsers, RepoFile carries lfs.oid AND xetHash
-# while RepoSibling carries neither reliably — compares like with like in
-# either currency, and prints the registry's raw entry for any file that
-# returns no hash at all. Re-running `gpu-validation.yml` mode
-# `upscaler-discover` costs nothing and either settles this or records exactly
-# what the registry withheld.
+# The line below is written out and COMMENTED. Everything about the upsampler
+# is verified: the revision resolves, the licence ships, the component is the
+# right size and constructs to the right shape, and the owner has accepted the
+# terms. What is NOT verified is the pairing, and run 33426496040 measured why.
 #
-# Meanwhile: upstream uses this same upsampler with both the 0.9.7 and 0.9.8
-# pipelines, each passing its own vae, which is evidence the latent space is
-# stable across those checkpoints — evidence, not proof.
+# The vae ONIQ bakes and the vae this upsampler was trained beside are
+# different networks. Not different bytes of one network — different networks:
 #
-# AND STILL NOT MEASURED. Whether multi-scale actually improves ONIQ's output
-# is unknown until a real generation is run and looked at.
+#   field                    baked LTX-Video@8984fa25   upscaler 0.9.7
+#   block_out_channels       [128, 256, 512, 512]       [128, 256, 512, 1024, …5]
+#   layers_per_block         [4, 3, 3, 3, …5]           [4, 6, 6, 2, …5]
+#   spatio_temporal_scaling  [T, T, T, F]               [T, T, T, T]
+#   down_block_types         absent                     LTXVideo095DownBlock3D ×4
+#   downsample_type          absent                     spatial/temporal/×2 spatiotemporal
+#   timestep_conditioning    absent                     True
+#   decoder_* (4 fields)     absent                     present
+#   spatial/temporal ratio   derived                    32 / 8
+#
+#   sha256  baked 265ca87cb5dff5e37f924286e957324e282fe7710a952a7dafc0df43883e2010
+#           0.9.7 3419989c7059923ee4134b858e0511d0b294a7c88b7745169763b37ebc4db7f0
+#
+# WHAT AGREES, and why it is not enough. latents_mean, latents_std and
+# latent_channels are identical, so the NORMALISATION LTXLatentUpsamplePipeline
+# applies is the same on both sides. But matching per-channel statistics is not
+# a shared latent space: the network producing those 128 channels is a
+# four-stage encoder here and a five-stage one with a timestep-conditioned
+# decoder there. ONIQ bakes the 0.9.0/2B-era vae; the upsampler was trained on
+# the 0.9.5+/0.9.7 one.
+#
+# The failure this would cause is SILENT. The upsampler loads, constructs,
+# passes every existing check, and then refines latents it was never trained
+# on — visible only by watching the output, on a rented card, after the spend.
+# So the build now refuses the pairing rather than baking it: see
+# "LATENT SPACE MISMATCH" in the Dockerfile's upscaler stage, which compares
+# the upstream vae/config.json against /app/models/ltx/vae/config.json and
+# fails closed when there is nothing to compare. `upscaler-discover` mirrors
+# the same field list and withholds the paste line for a pairing the build
+# would refuse, so a $0 read reaches the build's verdict.
+#
+# TWO WAYS FORWARD, both the owner's call, neither of them "relax the check":
+#
+#   A. PAIR THE VAE WITH THE UPSAMPLER — bake the checkpoint whose vae matches,
+#      i.e. move the LTX pin off 8984fa25 to a 0.9.7 revision. That changes
+#      which weights every production clip is generated by, so it is not an
+#      engineering detail; it needs measuring against the current output before
+#      anything ships.
+#   B. LEAVE MULTI-SCALE OFF. The single-scale path is unchanged and is what
+#      every clip generated so far used. ltxcaps reports
+#      latent_upsampler_baked=false, videogen records
+#      upscaler_absent_reason=latent-upsampler-not-baked, and assembly keeps
+#      resampling 704 up to 1080 as it does today.
+#
+# Option A is the only one that buys the detail described under WHAT ENABLING
+# BUYS above. Option B is where this file sits until someone chooses.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# STILL NOT MEASURED
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Whether multi-scale actually improves ONIQ's output. Unknown until a real
+# generation is run and looked at — and under option A that generation would
+# also be the first on different transformer weights, so the two changes have
+# to be measured apart, not together.
 
-Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f
+# Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f

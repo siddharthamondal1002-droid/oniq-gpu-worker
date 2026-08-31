@@ -428,3 +428,78 @@ class TestWhatADifferenceMeans:
         assert printed.endswith("128 values]") and len(printed) < 80
         assert ud._brief([1, 2]) == "[1, 2]"
         assert ud._brief(128) == "128"
+
+
+class TestTheReadReachesTheBuildsVerdict:
+    """A PINNABLE verdict that ignored the latent-space gate would print a line
+    into ltx-upscaler.pin that the build then refuses — 25 minutes and a
+    downloaded checkpoint to learn what a $0 read already knew."""
+
+    def test_the_gated_fields_are_exactly_the_dockerfiles(self):
+        docker = open("Dockerfile", encoding="utf-8").read()
+        block = docker.split("LATENT_SPACE = (", 1)[1].split(")", 1)[0]
+        assert sorted(
+            f.strip().strip('",') for f in block.split() if f.strip(' ,"')
+        ) == sorted(ud.LATENT_SPACE)
+
+    def test_the_build_refuses_a_mismatch_rather_than_baking_it(self):
+        docker = open("Dockerfile", encoding="utf-8").read()
+        assert "LATENT SPACE MISMATCH" in docker
+        assert "/app/models/ltx/vae/config.json" in docker
+        # Fail closed: no upstream vae to compare against is UNVERIFIED, and
+        # unverified is not a pass.
+        assert "ships no vae/config.json" in docker
+        assert '"vae/config.json",' in docker
+
+    def test_a_mismatched_pairing_is_not_offered_as_a_line_to_paste(self, capsys):
+        cfg = {"_class_name": "AutoencoderKLLTXVideo", "latent_channels": 128,
+               "block_out_channels": [128, 256, 512, 512]}
+        theirs = dict(cfg, block_out_channels=[128, 256, 512, 1024, 2048])
+
+        def get(url, token, timeout=60):
+            if "/tree/" in url:
+                sha = "a" * 64 if ud.BAKED_REPO in url else "b" * 64
+                return [{"type": "file", "path": "vae/x.safetensors", "size": 9,
+                         "oid": "g" * 40,
+                         "lfs": {"oid": sha, "size": 9, "pointerSize": 134}}]
+            return dict(GOOD_INFO, siblings=GOOD_INFO["siblings"] + [
+                {"rfilename": "vae/x.safetensors", "size": 9,
+                 "lfs": {"oid": "b" * 64, "size": 9, "pointerSize": 134}}])
+
+        def get_text(url, token, timeout=60):
+            if url.endswith("vae/config.json"):
+                return json.dumps(cfg if ud.BAKED_REPO in url else theirs)
+            return GOOD_CONFIG
+
+        code, rows = ud.report(SECRET, get, get_text)
+        out = capsys.readouterr().out
+        assert "LATENT SPACE" in out and "MISMATCH" in out
+        assert "Fix the PAIRING, never the check" in out
+        # The revision must NOT appear as a bare paste line under the closing
+        # instruction, and the exit code must not report success.
+        assert f"    {OFFICIAL} {GOOD_INFO['sha']}" not in out
+        assert code == 1
+
+    def test_a_matching_pairing_is_still_offered(self, capsys):
+        cfg = {"_class_name": "AutoencoderKLLTXVideo", "latent_channels": 128}
+
+        def get(url, token, timeout=60):
+            if "/tree/" in url:
+                sha = "a" * 64 if ud.BAKED_REPO in url else "b" * 64
+                return [{"type": "file", "path": "vae/x.safetensors", "size": 9,
+                         "oid": "g" * 40,
+                         "lfs": {"oid": sha, "size": 9, "pointerSize": 134}}]
+            return dict(GOOD_INFO, siblings=GOOD_INFO["siblings"] + [
+                {"rfilename": "vae/x.safetensors", "size": 9,
+                 "lfs": {"oid": "b" * 64, "size": 9, "pointerSize": 134}}])
+
+        def get_text(url, token, timeout=60):
+            # Same vae config on both sides: the weights differ in bytes, the
+            # latent space does not.
+            return json.dumps(cfg) if url.endswith("vae/config.json") else GOOD_CONFIG
+
+        code, _ = ud.report(SECRET, get, get_text)
+        out = capsys.readouterr().out
+        assert "MATCHES" in out
+        assert f"    {OFFICIAL} {GOOD_INFO['sha']}" in out
+        assert code == 0

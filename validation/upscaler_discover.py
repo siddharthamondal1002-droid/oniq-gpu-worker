@@ -320,6 +320,18 @@ def _vae_config(repo: str, revision: str, token, get_text) -> dict:
 # Metadata about WHERE a config came from, never about what it configures.
 _PROVENANCE = {"_diffusers_version", "_name_or_path", "_class_name"}
 
+# EXACTLY the Dockerfile's LATENT_SPACE tuple. The build refuses a bake whose
+# vae disagrees on any of these, so a PINNABLE verdict that ignored them would
+# promise a build that then refuses — the one thing this module must never do.
+# Encoder shape and latent normalisation decide what the upsampler receives;
+# decoder_* fields do not, because this image decodes with its own vae either
+# way, and the compression ratios are derived from the fields listed.
+LATENT_SPACE = (
+    "latent_channels", "latents_mean", "latents_std", "in_channels",
+    "block_out_channels", "layers_per_block", "spatio_temporal_scaling",
+    "down_block_types", "patch_size", "patch_size_t",
+)
+
 
 def _config_delta(mine: dict, theirs: dict) -> dict:
     """Every configured value the two vaes disagree on.
@@ -379,6 +391,10 @@ def vae_crosscheck(rows, token, get=_get, get_text=_get_text) -> dict:
     # difference to interpret.
     baked_cfg = None
     out["config_delta"] = {}
+    # Absent here means "the bytes matched, so there is nothing to interpret",
+    # which is why identical hashes leave this empty rather than saying MATCHES
+    # off a comparison nobody made.
+    out["latent_space"] = {}
     for repo, verdict in out["matches"].items():
         if not verdict.startswith("DIFFERENT"):
             continue
@@ -388,10 +404,16 @@ def vae_crosscheck(rows, token, get=_get, get_text=_get_text) -> dict:
             repo, dict((r["repo"], r.get("revision")) for r in rows)[repo],
             token, get_text)
         if "_error" in baked_cfg or "_error" in theirs:
-            out["config_delta"][repo] = {
-                "_error": baked_cfg.get("_error") or theirs.get("_error")}
+            detail = baked_cfg.get("_error") or theirs.get("_error")
+            out["config_delta"][repo] = {"_error": detail}
+            out["latent_space"][repo] = f"UNVERIFIED — {detail}"
         else:
-            out["config_delta"][repo] = _config_delta(baked_cfg, theirs)
+            delta = _config_delta(baked_cfg, theirs)
+            out["config_delta"][repo] = delta
+            gated = sorted(k for k in delta if k in LATENT_SPACE)
+            out["latent_space"][repo] = (
+                "MATCHES" if not gated
+                else f"MISMATCH on {gated} — the build REFUSES this pairing")
 
     if any(v.startswith("UNKNOWN") for v in out["matches"].values()) or (
             not baked["files"]):
@@ -483,12 +505,13 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
                       "the latents_mean/latents_std this pipeline normalises "
                       "with. A packaging difference, not a latent-space one.")
             else:
-                print(f"    vae config     DIFFERS on {len(delta)} field(s) — "
-                      "the two checkpoints do NOT share a latent space:")
+                print(f"    vae config     DIFFERS on {len(delta)} field(s):")
                 for key, (ours, theirs_) in delta.items():
                     print(f"      {key}")
                     print(f"        baked {_brief(ours)}")
                     print(f"        {repo.split('/')[-1]} {_brief(theirs_)}")
+        for repo, verdict in (cross.get("latent_space") or {}).items():
+            print(f"    LATENT SPACE   {repo}: {verdict}")
         if cross.get("note"):
             print(f"    NOTE           {cross['note']}")
 
@@ -500,11 +523,23 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
           "owner's judgement, and reading the licence text is part of making "
           "it. To enable, put one line in ltx-upscaler.pin:")
     print("")
+    # A PINNABLE verdict that ignored the latent-space gate would print a line
+    # the build then refuses. The gates here match the build's, or this module
+    # is worse than useless.
+    pinnable = [r for r in rows if r.get("verdict") == "PINNABLE"
+                and (cross.get("latent_space") or {}).get(r["repo"], "MATCHES")
+                == "MATCHES"]
+    for row in pinnable:
+        print(f"    {row['repo']} {row['revision']}")
     for row in rows:
-        if row.get("verdict") == "PINNABLE":
-            print(f"    {row['repo']} {row['revision']}")
+        if row.get("verdict") == "PINNABLE" and row not in pinnable:
+            print(f"    NOT {row['repo']} — "
+                  f"{(cross.get('latent_space') or {})[row['repo']]}.")
+            print("    Fix the PAIRING, never the check: bake the checkpoint "
+                  "whose vae matches this upsampler, or pin an upsampler "
+                  "trained for the vae this image bakes.")
     print("")
-    return (0 if any(r.get("verdict") == "PINNABLE" for r in rows) else 1), rows
+    return (0 if pinnable else 1), rows
 
 
 def main(argv) -> int:

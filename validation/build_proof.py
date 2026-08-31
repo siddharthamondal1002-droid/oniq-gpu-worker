@@ -117,6 +117,30 @@ def run() -> Proof:
             '"temporal_upsample": False' in docker and '"spatial_upsample": True' in docker)
     p.check("upscaler licence gate", "without their terms" in docker)
     p.check("upscaler size guard", "SIZE_GUARD_BYTES" in docker)
+    # THE LATENT-SPACE GATE. Added 2026-08-31 after run 33426496040 measured
+    # that the vae this image bakes and the vae the pinned upsampler was
+    # trained beside are different networks. Everything else about the
+    # upsampler checks out, so nothing upstream of this would have caught it —
+    # the model loads, constructs, and then refines latents it never saw in
+    # training. Silent, on a rented card, visible only in the output.
+    p.check("upscaler latent-space gate present",
+            "LATENT SPACE MISMATCH" in docker
+            and "/app/models/ltx/vae/config.json" in docker)
+    p.check("the gate compares the upstream vae config it fetched",
+            '"vae/config.json",' in docker and "upstream_vae" in docker)
+    # FAIL CLOSED. Nothing to compare against is UNVERIFIED, and unverified is
+    # not a pass — that is the whole lesson of this module's three earlier
+    # false negatives, applied in the safe direction.
+    p.check("the gate refuses rather than assuming when it cannot compare",
+            "ships no vae/config.json" in docker
+            and "refusing rather than" in docker)
+    # THE $0 READ MUST REACH THE BUILD'S VERDICT, or a PINNABLE line gets
+    # pasted into this pin and the build refuses it 25 minutes later.
+    from validation import upscaler_discover as _ud
+    _gated = docker.split("LATENT_SPACE = (", 1)[1].split(")", 1)[0]
+    p.check("the discovery read gates on the same fields the build does",
+            sorted(f.strip().strip('",') for f in _gated.split()
+                   if f.strip(' ,"')) == sorted(_ud.LATENT_SPACE))
 
     print("5. the upscaler pin")
     pin_text = _read("ltx-upscaler.pin")

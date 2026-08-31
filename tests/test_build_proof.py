@@ -57,13 +57,15 @@ def test_it_catches_a_second_unverified_revision_declared_in_the_pin(tmp_path, m
     """A fabricated sha is a licence problem, not a bug — the owner accepted
     terms at specific bytes, and nobody else can do that for them.
 
-    The pin now carries ONE verified declaration, so the way this goes wrong
-    has changed shape: somebody appends a second repository the owner never
+    The way this goes wrong is somebody appending repositories the owner never
     accepted. The build would bake whichever it read first, which is exactly
-    the ambiguity a pin exists to remove."""
+    the ambiguity a pin exists to remove — so more than one declaration must
+    fail however many there are, and the pin shipping ZERO today (the pairing
+    is refused, see the file) must not make the check unreachable."""
     root = _sandbox(tmp_path, monkeypatch)
     with open(root / "ltx-upscaler.pin", "a", encoding="utf-8") as fh:
         fh.write("a-r-r-o-w/LTX-0.9.8-Latent-Upsampler " + "d" * 40 + "\n")
+        fh.write("someone/else " + "e" * 40 + "\n")
     failures = build_proof.run().failures
     assert any("at most one line" in f for f in failures), failures
 
@@ -73,14 +75,18 @@ def test_a_sha_quoted_in_the_pins_PROSE_is_not_a_declaration():
     revision. A raw-text scan would fail on the documentation rather than on
     the data, and a check that accuses the explanation is one people delete."""
     pin = build_proof._read("ltx-upscaler.pin")
-    assert "8984fa25007f376c1a299016d0957a37a2f797bb" in pin
     active = build_proof._active_lines(pin)
-    # The prose cites the LTX transformer's revision AND now records the two
-    # upsampler candidates measured on 2026-08-31. None of those are
-    # declarations; exactly one line is.
-    assert len(active) == 1, active
-    assert "8984fa25007f376c1a299016d0957a37a2f797bb" not in active[0]
-    assert "e0c981533db26531c47dec16a124586cea53f11f" not in active[0]
+    # The prose cites the LTX transformer's revision, both upsampler
+    # candidates' revisions, and two vae content hashes — and, since the
+    # latent-space mismatch was measured, the upsampler's own revision written
+    # out and commented. Every one of those is documentation. NONE is a
+    # declaration, and a raw-text scan would have called this file five
+    # different pins.
+    for quoted in ("8984fa25007f376c1a299016d0957a37a2f797bb",
+                   "c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f",
+                   "265ca87cb5dff5e37f924286e957324e282fe7710a952a7dafc0df43883e2010"):
+        assert quoted in pin
+    assert active == [], active
     assert build_proof.run().failures == []
 
 

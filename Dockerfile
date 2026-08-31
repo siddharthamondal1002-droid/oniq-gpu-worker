@@ -656,8 +656,21 @@ STAGE = DEST + "_src"
 snapshot_download(
     REPO, revision=REVISION, token=TOKEN, local_dir=STAGE,
     allow_patterns=[f"{PREFIX}*.json", f"{PREFIX}*.safetensors",
+                    # The vae CONFIG only — kilobytes, and the thing the
+                    # latent-space gate below compares against. Its weights
+                    # are deliberately not fetched: this image decodes with
+                    # its OWN vae, and a second one would be gigabytes.
+                    "vae/config.json",
                     "LICENSE*", "NOTICE*", "*icense*.txt", "*icence*.txt"],
 )
+
+# Read before the staging tree is removed; the flatten below only moves files
+# that sit at the root or in the component folder.
+upstream_vae_path = os.path.join(STAGE, "vae", "config.json")
+upstream_vae = None
+if os.path.isfile(upstream_vae_path):
+    with open(upstream_vae_path, encoding="utf-8") as fh:
+        upstream_vae = json.load(fh)
 
 # FLATTEN, so DEST *is* the component. ltxcaps finds the upsampler by scanning
 # UPSCALER_DIRS under the model root and videogen calls
@@ -739,6 +752,81 @@ if wrong:
         f"this pipeline needs (expected {EXPECTED})"
     )
 print(f"UPSCALER CONFIG resolved {resolved} from {config_rel}")
+
+# THE UPSAMPLER'S LATENT SPACE MUST BE THE ONE THIS IMAGE BAKES.
+#
+# MEASURED 2026-08-31, run 33426496040, and this gate exists because the
+# measurement came back wrong. LTXLatentUpsamplePipeline takes (vae,
+# latent_upsampler) and normalises with self.vae.latents_mean/latents_std —
+# ONIQ'S OWN baked vae, never the one the upsampler shipped beside. So an
+# upsampler trained in a DIFFERENT vae's latent space would load, construct,
+# pass every check above, and then refine latents it was never trained on:
+# a silent quality failure on a rented card, visible only by watching the
+# output.
+#
+# The two configs measured, side by side:
+#
+#   field                    baked LTX-Video@8984fa25   upscaler 0.9.7
+#   block_out_channels       [128, 256, 512, 512]       [128, 256, 512, 1024, …5]
+#   layers_per_block         [4, 3, 3, 3, …5]           [4, 6, 6, 2, …5]
+#   spatio_temporal_scaling  [T, T, T, F]               [T, T, T, T]
+#   down_block_types         absent                     LTXVideo095DownBlock3D ×4
+#   timestep_conditioning    absent                     True
+#   decoder_* (4 fields)     absent                     present
+#
+# Different encoders. latents_mean, latents_std and latent_channels DO agree,
+# so the normalisation constants match — but the network producing those 128
+# channels is not the same network, and matching per-channel statistics is not
+# a shared latent space.
+#
+# WHAT IS COMPARED, and what deliberately is not. Encoder shape and latent
+# normalisation decide what the upsampler receives. decoder_* fields do not:
+# this image decodes with its own vae whatever happens, so a decoder
+# difference changes the picture, not the compatibility. spatial/temporal
+# compression ratios are DERIVED from the fields below, so including them
+# would only add noise — newer configs write them out, older ones do not.
+LATENT_SPACE = (
+    "latent_channels", "latents_mean", "latents_std", "in_channels",
+    "block_out_channels", "layers_per_block", "spatio_temporal_scaling",
+    "down_block_types", "patch_size", "patch_size_t",
+)
+baked_vae_path = "/app/models/ltx/vae/config.json"
+if upstream_vae is None:
+    raise SystemExit(
+        f"{REPO} at {REVISION} ships no vae/config.json, so the latent space "
+        "the upsampler was trained in CANNOT be compared against the one this "
+        "image bakes. That is unverified, not verified — refusing rather than "
+        "enabling multi-scale on faith."
+    )
+with open(baked_vae_path, encoding="utf-8") as fh:
+    baked_vae = json.load(fh)
+# The identity the LTX bake recorded, read rather than re-declared: this RUN
+# is a separate Python process and PINNED_REPO/PINNED_REVISION are not in it.
+with open("/app/models/LTX_REPO", encoding="utf-8") as fh:
+    baked_repo = fh.read().strip()
+with open("/app/models/LTX_REVISION", encoding="utf-8") as fh:
+    baked_revision = fh.read().strip()
+latent_delta = {
+    k: (baked_vae.get(k), upstream_vae.get(k))
+    for k in LATENT_SPACE if baked_vae.get(k) != upstream_vae.get(k)
+}
+if latent_delta:
+    lines = "\n".join(
+        f"    {k}\n      baked    {b!r:.120}\n      upscaler {u!r:.120}"
+        for k, (b, u) in sorted(latent_delta.items())
+    )
+    raise SystemExit(
+        f"LATENT SPACE MISMATCH — refusing to bake {REPO} at {REVISION}.\n"
+        f"The upsampler was trained beside a vae that differs from the one "
+        f"this image bakes ({baked_repo} at {baked_revision}) on "
+        f"{len(latent_delta)} field(s):\n{lines}\n"
+        "  Fix the PAIRING, never this check: bake the checkpoint whose vae "
+        "matches the upsampler, or pin an upsampler trained for this vae. "
+        "Clearing ltx-upscaler.pin disables multi-scale and leaves the "
+        "single-scale path running unchanged."
+    )
+print(f"LATENT SPACE VERIFIED — the baked vae and {REPO}'s agree on "
+      f"all of {list(LATENT_SPACE)}")
 
 on_disk = sum(
     os.path.getsize(os.path.join(r, n))
