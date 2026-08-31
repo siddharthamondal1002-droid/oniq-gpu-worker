@@ -9,6 +9,16 @@
 !preprocess.py
 !storage.py
 !handler.py
+# The spatial-upscaler revision pin (data, not code) — the media stage's
+# bake reads it. Empty by default; an absent file would make the bake
+# skip for the wrong reason, so it ships either way.
+!ltx-upscaler.pin
+!cudaenv.py
+!modelroot.py
+!modelhydrate.py
+!preview.py
 !videogen.py
+!ltxcaps.py
+!modelprobe.py
 !storygen.py
 !audio.py

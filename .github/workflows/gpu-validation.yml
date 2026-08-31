@@ -35,10 +35,38 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
+        description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-setup = create ONE network volume and attach it to ONE endpoint (literal token required). Storage spend, measured at $0.07/GB-month from this account's own billing; reversible by detaching. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. endpoint-bounds = conform ONE endpoint to workersMin=0/workersMax=1, $0 - exactly the shape validation/admission requires, written as two literals in ONE patch so the worker restarts once rather than twice; a strict spend reduction. workers-min-zero = patch workersMin to 0 on ONE endpoint, $0 - a strict spend reduction, so the GPU is paid for only while a job is on it; the writer takes no value and cannot scale anything up. volume-detach = detach the network volume from ONE endpoint, $0 (type DETACH-VOLUME into volume_token) - the reversible diagnostic for an endpoint that reports a queued job and ZERO workers; detach is NOT delete, the volume and everything hydrated onto it survive. endpoint-template = point ONE endpoint at a template that ALREADY EXISTS, $0 (type POINT-AT-TEMPLATE into attach_token) - the repair for an endpoint whose templateId names a template the account does not have; refuses a target that is not on the account, so one dangling reference cannot become another. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. endpoint-gpus = widen ONE endpoint's gpuTypeIds to the cards the owner approved, $0 (type WIDEN-GPUS into attach_token) - the repair for an endpoint whose single named card is throttled and therefore unplaceable; every name is resolved against the LIVE catalogue first and an unresolvable one refuses the whole write, so a string the scheduler can never satisfy cannot reach the field. Widens WHERE a worker may be placed, never HOW MANY. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup, endpoint-template, workers-min-zero, volume-detach, endpoint-bounds, endpoint-gpus]
         default: discover
+      public_base:
+        description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
+        type: string
+        default: ""
+      frame_keys:
+        description: "frames-pull: comma-separated R2 object keys to fetch frames from, e.g. validation/out/ltx-001.mp4. Read-only, $0 — these are objects that ALREADY exist; no job is submitted."
+        type: string
+        default: ""
+      signed_urls:
+        description: "frames-pull, PRIVATE BUCKET path: presigned read-only GET URLs, one per clip, comma or newline separated. Use this instead of frame_keys when the bucket is private (owner directive 2026-08-29 — production R2 stays private). EACH URL IS A CREDENTIAL: use the SHORTEST workable expiry, because GitHub records dispatch inputs on the run. They are ::add-mask::ed before anything can print one, and never reach a log, report or artifact."
+        type: string
+        default: ""
+      stale_job_id:
+        description: "RunPod run id for queue-probe / stale-cancel."
+        type: string
+        default: ""
+      volume_token:
+        description: "Type CREATE-AND-ATTACH-VOLUME (exactly) for volume-setup, or DETACH-VOLUME (exactly) for volume-detach. One input carries both literals because workflow_dispatch is at GitHub's 25-input cap; mode selects the job, the literal authorizes it."
+        type: string
+        default: ""
+      timeout_token:
+        description: "Type SET-EXECUTION-TIMEOUT (exactly) to allow the endpoint ceiling change."
+        type: string
+        default: ""
+      cancel_token:
+        description: "Type CANCEL-STALE-RUN (exactly) to allow stale-cancel. Cancels ONE named run - never a queue purge."
+        type: string
+        default: ""
       spend:
         description: "Type SPEND (exactly) to allow the spend job."
         type: string
@@ -49,18 +77,64 @@ on:
         options: ["16", "17", "18", "19"]
         default: "16"
       op:
-        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only)."
+        description: "Workload for the spend job. video_generate = one LTX image-to-video. image_generate = ONE still from ONIQ's own image engine (text-only, no input_key). audio_mux = narration onto the EXISTING video named by test_input_key (one canary, phase 16 only). model_probe = ONE open-source video candidate named by probe_model, conditioned on the shared probe reference and measured on the A5000 (one candidate per dispatch, phase 16 only). model_hydrate = fetch ONE experimental checkpoint onto the persistent volume; no GPU inference, no artifact, and idempotent, so a model already READY downloads nothing."
         type: choice
-        options: [image_preprocess, image_generate, video_generate, audio_mux]
+        options: [image_preprocess, image_generate, video_generate, audio_mux, model_probe, model_hydrate]
         default: image_preprocess
       endpoint_id:
         description: "Endpoint id (optional; must match the single live endpoint)."
         type: string
         default: ""
-      test_input_key:
-        description: "R2 key of the test input image in the oniq-gpu bucket."
+      template_id:
+        description: "Template id to look for in template-probe. Defaults to the id the endpoint references."
         type: string
-        default: "validation/input.jpg"
+        default: "hhhdwtjw0y"
+      image_ref:
+        description: "Digest-pinned image for template-attach, e.g. ghcr.io/owner/repo@sha256:... A tag is refused."
+        type: string
+        default: ""
+      attach_token:
+        description: "Type ATTACH-TEMPLATE (exactly) for template-attach, which CREATES one template and repoints one endpoint. Type POINT-AT-TEMPLATE (exactly) for endpoint-template, which creates nothing and points the endpoint at the existing template named in template_id. Type WIDEN-GPUS (exactly) for endpoint-gpus, which changes no worker count and only widens the set of cards one worker may be placed on. One input carries all three literals because workflow_dispatch is capped at 25 inputs and this file is at the cap; mode selects the job, the literal authorizes it."
+        type: string
+        default: ""
+      replaces_template:
+        description: "template-attach: the id of the WORKING template being replaced. Must equal the one the endpoint currently references - a replace that cannot name what it replaces is refused. Leave blank unless the reference is dangling."
+        type: string
+        default: ""
+      replace_token:
+        description: "Type REPLACE-TEMPLATE (exactly) to allow replacing a template that RESOLVES (owner directive 2026-08-29, the 80 -> 200 GB disk). A separate token from attach_token on purpose: repairing a dangling reference and knowingly replacing a working configuration are different acts."
+        type: string
+        default: ""
+      disk_gb:
+        description: "template-retarget: container disk to request, in GB. Nominal only - the worker reports the disk it actually has before any download and refuses on that. Never smaller than the template already has."
+        type: string
+        default: "200"
+      retarget_token:
+        description: "Type RETARGET-TEMPLATE (exactly) to point the endpoint's EXISTING template at a new image and disk. Used instead of template-attach because RunPod refuses a second template with the same name (500, measured 2026-08-29) - and because updating in place keeps the env holding the R2 secret references, so the worker never loses its storage configuration on the way to a bigger disk."
+        type: string
+        default: ""
+      secret_names:
+        description: "template-env: the RunPod SECRET NAMES backing the three storage variables, comma-separated, in storage.REQUIRED_VARS order (endpoint, access key id, secret access key). Names only - never a value. Blank refuses, because a guessed name expands to nothing and looks like success. The variable names themselves are deliberately not spelled in this file: gate 6 forbids them here so they can never be wired to a GitHub secret."
+        type: string
+        default: ""
+      env_token:
+        description: "Type SET-TEMPLATE-ENV (exactly) to allow template-env. Writes the env field of ONE template, by reference."
+        type: string
+        default: ""
+      plate:
+        description: "image_generate only: WHICH conditioning plate to draw — a = Maya + girl + red balloon on the platform, b = black train at the platform (owner directive 2026-08-29, multi-reference conditioning; one dispatch draws one plate). ref = the model benchmark's controlled reference: ONE adult, plain background, no props, drawn once and shared by every candidate."
+        type: choice
+        options: [a, b, ref]
+        default: a
+      probe_model:
+        description: "model_probe: which benchmark ROW to measure. model_hydrate: which experimental MODEL ID to fetch onto the volume (the upper-case ids). ONE candidate per dispatch. ONE candidate per dispatch — there is deliberately no battery shape, so a single wrong assumption cannot spend five times over before anyone reads a result."
+        type: choice
+        options: ["", ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v, hunyuanvideo-1.5-i2v, hunyuanvideo-1.5-i2v-12step, HUNYUAN_15_I2V_480_STEP]
+        default: ""
+      test_input_key:
+        description: "R2 key of the test input image in the oniq-gpu bucket. The previous default, validation/input.jpg, was DELETED from the bucket at some point and nothing noticed until a paid canary refused on it (2026-08-29, 1232ms of billed execution). The worker lists what the bucket actually holds when an input is missing, so that failure is cheap and self-diagnosing - but a default that does not exist is still a trap, and this one is a still that demonstrably exists at the video canvas."
+        type: string
+        default: "validation/out/probe-reference.png"
       test_output_prefix:
         description: "R2 key prefix for test outputs."
         type: string
@@ -131,6 +205,15 @@ jobs:
           print("Job cap     : $", admission.JOB_CAP_USD, "-> ADMITTED")
           EOF
 
+      - name: "Live prices for every card in the benchmark's hardware matrix"
+        # Read-only, $0. The catalogue this reads is the one the financial gate
+        # above already pulls; this just prints the owner's candidate cards with
+        # their live quotes so the hardware matrix has a real COST column. It
+        # lives here rather than in model-bench because model-bench holds no
+        # RunPod credential at all, and that fence is worth more than the
+        # convenience of one combined table.
+        run: python -m validation.gpu_matrix
+
       - name: Keep the raw payloads
         if: always()
         uses: actions/upload-artifact@v4
@@ -138,6 +221,598 @@ jobs:
           name: discovery
           path: discovery.json
           if-no-files-found: ignore
+
+  frames_pull:
+    # THE FREE HALF OF THE PROOF, and it needs no generation at all.
+    #
+    # Objects earlier canaries already wrote are still in the bucket. This
+    # job pulls frames out of them over the PUBLIC read base, which
+    # exercises the entire chain a paid canary depends on — base
+    # validation, URL construction, download, artifact verification,
+    # ffmpeg extraction, artifact upload — against real LTX output, for
+    # nothing.
+    #
+    # IT CANNOT SPEND, BY CONSTRUCTION: no RUNPOD_API_KEY is in scope
+    # here, no gpu-spend environment, and frame_pull names no endpoint.
+    # There is nothing in this job that could submit a job even by
+    # mistake.
+    name: "frame pull - read-only, $0"
+    if: inputs.mode == 'frames-pull'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      # MASK FIRST, BEFORE ANYTHING CAN PRINT ONE.
+      #
+      # A presigned URL is a credential — the signature is in the query and
+      # whoever holds the string can read that object until it expires.
+      # ::add-mask:: makes GitHub redact it from every later line of this
+      # job, which is the same protection story-worker.yml gives the Story
+      # job token, and for the same reason: a printed credential is a
+      # printed credential even when it is short-lived.
+      - name: Mask the signed URLs before any step can echo one
+        if: inputs.signed_urls != ''
+        env:
+          SIGNED_URLS: ${{ inputs.signed_urls }}
+        run: |
+          python3 - <<'PY'
+          import os
+          raw = os.environ.get("SIGNED_URLS", "").replace(",", "\n")
+          for url in raw.splitlines():
+              url = url.strip()
+              if url:
+                  print(f"::add-mask::{url}")
+          PY
+
+      - name: "Frames from objects that already exist (public read)"
+        if: inputs.signed_urls == ''
+        # Both values travel as ENVIRONMENT, never interpolated into the
+        # shell: a dispatch input pasted straight into a `run:` script is
+        # a command injection, and the fact that only the owner can
+        # dispatch is not a reason to write it that way.
+        env:
+          R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
+          FRAME_KEYS: ${{ inputs.frame_keys }}
+        run: python -m validation.frame_pull keys
+
+      - name: "Frames through signed URLs (private bucket)"
+        if: inputs.signed_urls != ''
+        # No public base is passed at all on this path: the URL carries its
+        # own authority and there is nothing for a base to contribute.
+        env:
+          SIGNED_URLS: ${{ inputs.signed_urls }}
+        run: python -m validation.frame_pull signed
+      # THE FRAMES, IN THE LOG AS WELL AS THE ARTIFACT. The artifact zip
+      # lives on a blob store some review environments cannot reach; the
+      # log they can always read. Each PNG under frames/ is base64'd
+      # between marker lines, bounded per file and in total, so a remote
+      # reviewer can decode and LOOK at the actual frames. Images only —
+      # no URL, no credential, nothing but pixels this run produced.
+      - name: "Frames inline in the log, for remote inspection"
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os
+          root = "frames"
+          if not os.path.isdir(root):
+              print("no frames directory - nothing to inline")
+              raise SystemExit(0)
+          total = 0
+          # Contact sheets first: one sheet shows a whole clip, so a budget
+          # cut loses the least informative files, not the most.
+          ordered = sorted(
+              os.listdir(root),
+              key=lambda n: (0 if n.endswith("-sheet.png") else 1, n),
+          )
+          for name in ordered:
+              if not name.endswith(".png"):
+                  continue
+              path = os.path.join(root, name)
+              size = os.path.getsize(path)
+              if size > 2_000_000:
+                  print(f"=== FRAME SKIPPED {name} ({size} bytes over the 2MB cap) ===")
+                  continue
+              if total + size > 8_000_000:
+                  print("=== FRAME BUDGET EXHAUSTED - download the ltx-frames artifact for the rest ===")
+                  break
+              total += size
+              data = base64.b64encode(open(path, "rb").read()).decode()
+              print(f"=== FRAME b64 {name} {size} ===")
+              for i in range(0, len(data), 3800):
+                  print(data[i : i + 3800])
+              print(f"=== END {name} ===")
+          PYEOF
+
+      - name: "The frames, for inspection"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ltx-frames
+          path: frames/
+          if-no-files-found: warn
+          retention-days: 30
+
+  template_probe:
+    name: "template probe - read-only, $0"
+    if: inputs.mode == 'template-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "What templates exist, and is there an API to make one?"
+        run: python -m validation.template_probe "${{ inputs.template_id }}"
+
+  image_size:
+    name: "image size projection - read-only, $0"
+    if: inputs.mode == 'image-size'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: "The runner's real disk, not the planning number"
+        run: |
+          df -B1 --output=source,size,avail,target / /mnt || true
+
+      - name: "Build the base stage - the one addend no registry can answer"
+        run: docker build --target base -t oniq-gpu-worker:size .
+
+      - name: "Project the media image from the Dockerfile's own parameters"
+        run: |
+          BASE=$(docker image inspect oniq-gpu-worker:size --format '{{.Size}}')
+          echo "base stage measured at ${BASE} bytes"
+          python -m validation.image_size "${BASE}"
+
+  template_attach:
+    # Creates ONE template naming an already-published image, and points
+    # ONE endpoint at it. The second half of owner directive 2026-08-28.
+    # Refuses a tag (only a digest is an identity), an endpoint RunPod
+    # does not confirm, and an endpoint whose current template still
+    # RESOLVES — the warrant for writing is that the reference is
+    # dangling. Sends templateId and nothing else, so the endpoint's GPU
+    # and worker bounds cannot move. Costs nothing: workersMin stays 0,
+    # so no pod starts until a job arrives.
+    name: "template attach - ONE template, ONE endpoint, $0"
+    if: inputs.mode == 'template-attach' && inputs.attach_token == 'ATTACH-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Create the template, attach it, re-read the endpoint"
+        run: |
+          python -m validation.template_attach \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.image_ref }}" \
+            "${{ inputs.attach_token }}" \
+            "${{ inputs.replaces_template }}" \
+            "${{ inputs.replace_token }}"
+
+  volume_detach:
+    # The volume attach left this endpoint reporting one queued job and
+    # ZERO workers — not even initializing, not even throttled — for ninety
+    # minutes, with workersMin=1 set. A minimum of one means RunPod should
+    # hold a worker whether or not anything is queued.
+    #
+    # Two hypotheses fit every fact: the volume pins the endpoint to a
+    # datacenter it is not configured to run in, or that datacenter has no
+    # A5000 at all. Detaching separates them and nothing else available
+    # here does.
+    #
+    # REVERSIBLE AND NON-DESTRUCTIVE. Detach sends networkVolumeId="" and
+    # no datacenter, so the pin leaves with the volume; the volume itself
+    # keeps existing and keeps whatever was hydrated onto it, and
+    # re-attaching is the same call with the id back in.
+    name: "volume detach - ONE endpoint, reversible, $0"
+    if: inputs.mode == 'volume-detach' && inputs.volume_token == 'DETACH-VOLUME'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Detach, then read it back"
+        run: |
+          python -m validation.volume_detach \
+            "${{ inputs.endpoint_id }}" "${{ inputs.volume_token }}"
+
+  endpoint_bounds:
+    # admission.check_endpoint_config refuses any endpoint that is not
+    # min_workers=0/max_workers=1, and deliberately never repairs one:
+    # "CI verifies an endpoint's configuration; it never authors one."
+    # That refusal is the control. This is the separate, deliberate repair.
+    #
+    # UNGATED BY A TOKEN, like standby-zero and workers-min-zero, and for
+    # the same structural reason: set_worker_bounds_min0_max1 takes no
+    # values, so there is no argument by which it becomes a scale-up.
+    name: "worker bounds -> min 0 / max 1 (spend reduction, $0)"
+    if: inputs.mode == 'endpoint-bounds'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Conform the bounds, then read them back"
+        run: python -m validation.endpoint_bounds "${{ inputs.endpoint_id }}"
+
+  endpoint_gpus:
+    # Owner directive 2026-08-30: RTX A6000 and A40, and nothing else.
+    #
+    # GATED BY A TOKEN, unlike endpoint-bounds and workers-min-zero. Those
+    # are strict spend REDUCTIONS whose writers take no values at all. This
+    # one changes which card the product may run on, and cost per second
+    # follows from that — a decision CLAUDE.md puts with the owner. The
+    # approved set is still a module constant with no input feeding it;
+    # the literal is what makes firing it deliberate rather than incidental.
+    name: "endpoint GPUs -> the owner-approved set, $0"
+    if: inputs.mode == 'endpoint-gpus' && inputs.attach_token == 'WIDEN-GPUS'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Resolve the cards, widen the endpoint, read it back"
+        run: python -m validation.endpoint_gpus "${{ inputs.endpoint_id }}"
+
+  workers_min_zero:
+    # Owner decision 2026-08-30. The endpoint the owner created came up
+    # workersMin=1/workersMax=1 on an A5000 — the card held continuously
+    # whether or not a job runs, and refused outright by the admission
+    # gate, whose whole job is to verify an endpoint's shape rather than
+    # author one. Asked which way to unblock it, the owner chose to drop
+    # the floor to zero rather than relax the guard.
+    #
+    # UNGATED BY A TOKEN, like standby-zero and for the same reason: this
+    # can only ever REDUCE spend. runpod_client.set_workers_min_zero takes
+    # no value, so there is no argument by which it becomes a scale-up,
+    # and workersMin is the only field in the PATCH body.
+    name: "workersMin -> 0 (spend reduction, $0)"
+    if: inputs.mode == 'workers-min-zero'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Drop the floor, then read it back"
+        run: python -m validation.workers_min_zero "${{ inputs.endpoint_id }}"
+
+  endpoint_template:
+    # Owner directive 2026-08-30. The owner deleted the previous endpoints
+    # and created 9gh6qbou1in8yb in the console; it came up referencing
+    # templateId ei22bjog46, which is not among the fifteen templates the
+    # account reports. That is the hhhdwtjw0y failure again on a new id.
+    #
+    # This points the endpoint at a template that ALREADY EXISTS rather
+    # than creating one. aqa3wkdf8g carries the digest-pinned image, 201 GB
+    # of container disk and the R2 environment the owner set by hand; a
+    # freshly created template would carry the image and NO environment,
+    # and every job against it would fail closed with
+    # storage-not-configured.
+    #
+    # $0: templateId is the only field sent, workers are not started by a
+    # PATCH, and the module refuses a target it cannot prove exists.
+    name: "endpoint template - point at an EXISTING template, $0"
+    if: inputs.mode == 'endpoint-template' && inputs.attach_token == 'POINT-AT-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Prove the template exists, point at it, re-read the endpoint"
+        run: |
+          python -m validation.endpoint_template \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.template_id }}" \
+            "${{ inputs.attach_token }}"
+
+  template_retarget:
+    # Repoints the endpoint's EXISTING template at a new image and a bigger
+    # disk. Two fields, named: imageName and containerDiskInGb. The env is
+    # not sent, so the RunPod secret references for R2 survive the write —
+    # which is the reason this exists rather than a second template.
+    #
+    # Verified by RE-READING the template, never by the write's own echo,
+    # and it prints the outgoing image and disk so the previous
+    # configuration can be restored exactly. Costs nothing: no pod starts.
+    name: "template retarget - ONE template, in place, $0"
+    if: inputs.mode == 'template-retarget' && inputs.retarget_token == 'RETARGET-TEMPLATE'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Retarget the template, then re-read it"
+        run: |
+          python -m validation.template_retarget \
+            "${{ inputs.endpoint_id }}" \
+            "${{ inputs.template_id }}" \
+            "${{ inputs.image_ref }}" \
+            "${{ inputs.disk_gb }}" \
+            "${{ inputs.retarget_token }}"
+
+  template_env:
+    # Puts the three storage variables on the template BY REFERENCE, so
+    # the worker can write its output. Owner directive 2026-08-28: the
+    # values stay in RunPod's secret store; what is written here is
+    # `{{ RUNPOD_SECRET_<name> }}`, which carries no credential. No R2
+    # value enters this repository, a GitHub secret, or a log line.
+    #
+    # Sends the env field and nothing else, so the image the proofs ran
+    # against cannot move underneath the endpoint. Refuses foreign env
+    # rather than clobbering it, and verifies over BOTH the REST and
+    # GraphQL views. Costs nothing: no pod starts.
+    name: "template env - ONE template, by reference, $0"
+    if: inputs.mode == 'template-env' && inputs.env_token == 'SET-TEMPLATE-ENV'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Set the storage variables by reference, then re-read both views"
+        run: python -m validation.template_env "${{ inputs.template_id }}" "${{ inputs.secret_names }}" "${{ inputs.env_token }}"
+
+  ltx_discover:
+    # Which LTX checkpoints actually EXIST, measured with the credential.
+    # Run 7 proved the Dockerfile names one that does not: unauthenticated
+    # the registry answers 401 for gated and for absent alike, and with a
+    # working token the same path answers 404. Read-only, $0, and it
+    # deliberately CHOOSES nothing - which checkpoint ships is the owner's
+    # decision, and a name picked here to make a build succeed would be the
+    # substitution the directive forbids.
+    name: "LTX catalogue - read-only, $0"
+    if: inputs.mode == 'ltx-discover'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "List what the publisher actually offers, and measure each"
+        run: python -m validation.hf_discover
+
+  model_bench:
+    # The expanded benchmark's free half (owner brief 2026-08-29). It reads
+    # the registry and does arithmetic; it submits nothing, so it carries NO
+    # RunPod credential and cannot become a paid mode by mistake — the same
+    # fence frames-pull sits behind. HF_TOKEN is here because an anonymous
+    # 401 cannot tell a gated repository from an absent one, which is the
+    # confusion run 7 already paid for once.
+    name: "model bench - read-only, $0"
+    if: inputs.mode == 'model-bench'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      BENCH_JSON: bench.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Measure all nine candidates, project the VRAM matrix"
+        run: python -m validation.model_bench
+      - name: "What each candidate's PUBLISHER says to sample it with"
+        # $0 and read-only. A step count that is not in one of these
+        # citations does not get written into a probe row: an invented
+        # number would make the benchmark a measurement of the invention.
+        run: python -m validation.probe_settings
+      - name: "Keep the measured matrix"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-bench
+          path: bench.json
+          if-no-files-found: warn
+
+  queue_probe:
+    name: "queue probe - read-only, $0"
+    if: inputs.mode == 'queue-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Can this run still execute?"
+        run: python -m validation.queue_probe "${{ inputs.stale_job_id }}"
+
+  volume_probe:
+    # Owner directive 2026-08-30: move the baked weights onto a network
+    # volume so a worker change stops costing a 25 GiB cold pull. Before
+    # anything is created, this READS what the API offers — chiefly
+    # whether a datacenter that sells network volumes also has the A5000.
+    # A volume pins the endpoint to one datacenter; if the card is not
+    # there, the migration trades a slow pull for no GPU at all.
+    name: "network volume probe - read-only, $0"
+    if: inputs.mode == 'volume-probe'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "What the API offers, and whether the A5000 lives there"
+        run: python -m validation.volume_probe
+
+  endpoint_timeout:
+    # Owner authorization 2026-08-30. The Hunyuan probe downloads a 32.26
+    # GiB checkpoint inside the paid job, and the endpoint ceiling is 10
+    # minutes — a job killed against it is billed in full and produces
+    # nothing. This raises the ceiling and NOTHING else: the module sends
+    # one field, and refuses the run if the PATCH moved any worker bound,
+    # template or volume alongside it.
+    name: "endpoint execution ceiling - ONE endpoint, ONE field, $0"
+    if: inputs.mode == 'endpoint-timeout' && inputs.timeout_token == 'SET-EXECUTION-TIMEOUT'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Raise the ceiling, then read it back"
+        run: python -m validation.endpoint_timeout "${{ inputs.endpoint_id }}"
+
+  hunyuan_preflight:
+    # Owner directive 2026-08-30 section 12: every gate below is free, and
+    # ZERO GPU jobs may be submitted here. The frame count is DERIVED from
+    # the checkpoint's own VAE temporal compression ratio rather than taken
+    # from a README, per section 10.
+    name: "hunyuan free preflight - $0, zero GPU jobs"
+    if: inputs.mode == 'hunyuan-preflight'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # The reference the paid job will condition on. Checked by DECODING
+      # its first bytes, not by trusting a Content-Type: a 404 page served
+      # as image/png would otherwise produce a clip of nothing, paid for.
+      GPU_TEST_INPUT_REF: ${{ inputs.test_input_key || 'validation/out/probe-reference.png' }}
+      R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Every gate that costs nothing"
+        run: python -m validation.hunyuan_preflight "${{ inputs.endpoint_id }}"
+
+  volume_setup:
+    # Owner directive 2026-08-30 section 3. Creates ONE network volume and
+    # attaches it to ONE endpoint, behind a literal token. It sends
+    # networkVolumeId alone and refuses if the PATCH moved a worker bound,
+    # a template or the execution ceiling with it.
+    #
+    # Storage is SPEND, and it is measured rather than estimated: $0.07 per
+    # GB-month, derived from this account's own /billing/networkvolumes
+    # line. 50 GB is $3.50/month.
+    name: "network volume - create ONE, attach to ONE endpoint"
+    if: inputs.mode == 'volume-setup' && inputs.volume_token == 'CREATE-AND-ATTACH-VOLUME'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Create, attach, then read both back"
+        run: |
+          python -m validation.volume_setup "${{ inputs.endpoint_id }}"
+
+  stale_cancel:
+    # Cancels ONE run on ONE endpoint, both named on the dispatch, and
+    # only when the literal token is typed. NOT a queue purge: draining
+    # every queued job is broader than the authorization given, and
+    # validation/stale_run.py carries a gate asserting the queue-wide
+    # verb appears nowhere in it. Cancelling costs nothing; endpoint,
+    # template and worker bounds are untouched.
+    name: "stale run cancel - ONE job, $0"
+    if: inputs.mode == 'stale-cancel' && inputs.cancel_token == 'CANCEL-STALE-RUN'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Verify the owner endpoint, cancel the one run, re-verify"
+        run: python -m validation.stale_run "${{ inputs.stale_job_id }}" "${{ inputs.endpoint_id }}" "${{ inputs.cancel_token }}"
 
   advisory:
     # The STANDALONE free preflight (phases 9-10, $0): pods, endpoint
@@ -211,6 +886,18 @@ jobs:
       GPU_TEST_OUTPUT_PREFIX: ${{ inputs.test_output_prefix || vars.GPU_TEST_OUTPUT_PREFIX }}
       THROUGH_PHASE: ${{ inputs.through_phase }}
       OP: ${{ inputs.op }}
+      PLATE: ${{ inputs.plate }}
+      PROBE_MODEL: ${{ inputs.probe_model }}
+      # Owner directive 2026-08-30 section 10: the probe's frame count is
+      # DERIVED from the checkpoint's own VAE at dispatch time, so the
+      # driver reads vae/config.json at the pinned revision. Same token the
+      # free preflight uses, same reader, same bytes — a second source for
+      # the same question is how the two drift.
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      # The battery PROVES both conditioning plates exist over the public
+      # read base before its first paid submission (require_plates) — the
+      # run 72 lesson, times five.
+      R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
       # Owner directive 2026-08-25: required reviewers are not offered on
       # this private repository's GitHub plan (the protection-rules
       # section does not render), so the owner's authenticated SPEND
@@ -223,7 +910,128 @@ jobs:
         with:
           python-version: "3.11"
       - name: "Phases 12-19 (re-preflighted, re-quoted, fail-closed)"
-        run: python -m validation.spend_run run
+        # Tee'd, and PIPESTATUS'd so the pipe cannot swallow the failure.
+        # The refusal this driver prints is the whole diagnosis, and twice
+        # on 2026-08-30 it was pushed out of reach: the ffmpeg apt install
+        # that follows emits ~500 lines, and the log API only serves a
+        # tail. A reason that cannot be read is a reason that was not
+        # given, so it is captured to a file and re-printed at the end.
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          python -m validation.spend_run run 2>&1 | tee spend.log
+          code=${PIPESTATUS[0]}
+          echo "===== driver exit code: $code ====="
+          if [ "$code" -ne 0 ]; then
+            echo "----- last 40 lines, beside the failure -----"
+            tail -n 40 spend.log
+          fi
+          exit "$code"
+
+      # ----------------------------------------------------------------
+      # FRAMES, NOT METADATA (owner directive 2026-08-29).
+      #
+      #   LTX generation -> R2 -> frame extraction -> CI artifact -> eye
+      #
+      # Every LTX judgement before this was made from a COMPLETED status,
+      # a frame count and a byte count. None of those can tell you
+      # whether the character turned their head or whether the model
+      # smeared the plate for four seconds, and a route to the frames
+      # that needs a human to remember it is a route nobody takes.
+      #
+      # EVERY STEP HERE IS AFTER THE SPEND, AND if: always(). The GPU
+      # work is finished and paid for by the time any of this runs, so a
+      # missing ffmpeg, an unset variable or a 404 on the bucket can
+      # never fail a generation that already succeeded and was already
+      # verified. The artifacts stay in R2 either way; what is lost is
+      # only the seeing, and the log says so plainly.
+      #
+      # NOTHING HERE HOLDS A CREDENTIAL. R2_PUBLIC_BASE_URL is a
+      # repository VARIABLE, not a secret, because it is the same public
+      # read base the application already fetches artifacts from with no
+      # Authorization header — gate 6 still stands, and R2's write
+      # credentials remain in the RunPod endpoint's environment alone.
+      # frame_pull REFUSES a base carrying a query, fragment or userinfo,
+      # so a presigned URL pasted in by mistake is rejected as the
+      # credential it is rather than used as a base.
+      - name: ffmpeg (after the spend, so apt can never block a paid run)
+        if: always()
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: "Frames from the clips this run actually produced"
+        if: always()
+        env:
+          # The dispatch input wins over the variable, the same way
+          # endpoint_id and test_input_key already do — so a run is never
+          # blocked on a repository variable being wrong, and a value can
+          # be corrected without an owner visiting the settings page.
+          R2_PUBLIC_BASE_URL: ${{ inputs.public_base || vars.R2_PUBLIC_BASE_URL }}
+        run: python -m validation.frame_pull
+
+      # THE FRAMES, IN THE LOG AS WELL AS THE ARTIFACT. The artifact zip
+      # lives on a blob store some review environments cannot reach; the
+      # log they can always read. Each PNG under frames/ is base64'd
+      # between marker lines, bounded per file and in total, so a remote
+      # reviewer can decode and LOOK at the actual frames. Images only —
+      # no URL, no credential, nothing but pixels this run produced.
+      - name: "Frames inline in the log, for remote inspection"
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os
+          root = "frames"
+          if not os.path.isdir(root):
+              print("no frames directory - nothing to inline")
+              raise SystemExit(0)
+          total = 0
+          # Contact sheets first: one sheet shows a whole clip, so a budget
+          # cut loses the least informative files, not the most.
+          ordered = sorted(
+              os.listdir(root),
+              key=lambda n: (0 if n.endswith("-sheet.png") else 1, n),
+          )
+          for name in ordered:
+              if not name.endswith(".png"):
+                  continue
+              path = os.path.join(root, name)
+              size = os.path.getsize(path)
+              if size > 2_000_000:
+                  print(f"=== FRAME SKIPPED {name} ({size} bytes over the 2MB cap) ===")
+                  continue
+              if total + size > 8_000_000:
+                  print("=== FRAME BUDGET EXHAUSTED - download the ltx-frames artifact for the rest ===")
+                  break
+              total += size
+              data = base64.b64encode(open(path, "rb").read()).decode()
+              print(f"=== FRAME b64 {name} {size} ===")
+              for i in range(0, len(data), 3800):
+                  print(data[i : i + 3800])
+              print(f"=== END {name} ===")
+          PYEOF
+
+      - name: "The frames, for inspection"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ltx-frames
+          path: |
+            frames/
+            artifact-manifest.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: "The refusal, last, where a tail can always reach it"
+        if: always()
+        shell: bash
+        run: |
+          if [ -f spend.log ]; then
+            echo "===== spend_run, last 80 lines ====="
+            tail -n 80 spend.log
+            echo "===== end ====="
+          else
+            echo "no spend.log - the driver did not start"
+          fi
 
   standby_probe:
     # READ-ONLY twin of the standby job. Owner directive 2026-08-27: run
@@ -293,8 +1101,14 @@ jobs:
               print("STOP: cannot confirm zero orphans (sweep reports None, never 0)")
               raise SystemExit(1)
           print("pods:", result["pods"], "endpoint min workers:", result["endpoint_min_workers"])
+          # Owner-accepted always-on capacity is REPORTED on every run, never
+          # silently dropped: the owner asked to be told what it costs.
+          if result.get("accepted_min_workers"):
+              print("accepted always-on (owner decision, not an alarm):",
+                    result.get("accepted_endpoints"),
+                    "=", result["accepted_min_workers"], "min worker(s)")
           if result["pods"] != 0 or result["endpoint_min_workers"] != 0:
               print("ORPHAN ALARM: something can still bill")
               raise SystemExit(1)
-          print("orphan count = 0, confirmed")
+          print("orphan count = 0 outside owner-accepted capacity, confirmed")
           EOF

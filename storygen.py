@@ -25,10 +25,21 @@ import os
 import time
 
 import contract
+import modelroot
 from preprocess import GpuUnavailable
 
-MODEL_DIR = "/app/models/story"
-MODEL_ID_FILE = "/app/models/STORY_MODEL_ID"
+# Lazy for the same reason as videogen's: a warm worker can be hydrated
+# mid-life, and the next job must see it. Tests override the attribute.
+MODEL_DIR = None
+MODEL_ID_FILE = None
+
+
+def _model_dir() -> str:
+    return MODEL_DIR or modelroot.resolve_production("story")
+
+
+def _model_id_file() -> str:
+    return MODEL_ID_FILE or modelroot.resolve_production_file("STORY_MODEL_ID")
 
 # Server decisions, like the video sampler's: the caller chooses none of
 # them. A story is long-form structured JSON, so the budget is generous
@@ -45,13 +56,14 @@ class StoryModelUnavailable(Exception):
 
 def model_id() -> str:
     try:
-        with open(MODEL_ID_FILE, encoding="utf-8") as fh:
+        with open(_model_id_file(), encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return "missing"
 
 
-def weights_present(model_dir: str = MODEL_DIR) -> bool:
+def weights_present(model_dir: str | None = None) -> bool:
+    model_dir = model_dir or _model_dir()
     """A baked checkpoint is a config plus at least one weight shard."""
     if not os.path.isdir(model_dir):
         return False
@@ -71,7 +83,7 @@ def _load_real_model():
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(_model_dir(), local_files_only=True)
     kwargs = {"local_files_only": True, "torch_dtype": torch.bfloat16, "device_map": "cuda"}
 
     quantised = None
@@ -89,7 +101,7 @@ def _load_real_model():
     if quantised is not None:
         try:
             model = AutoModelForCausalLM.from_pretrained(
-                MODEL_DIR, quantization_config=quantised, **kwargs
+                _model_dir(), quantization_config=quantised, **kwargs
             )
             model.eval()
             return model, tokenizer, "4bit"
@@ -107,7 +119,7 @@ def _load_real_model():
                 f"({type(exc).__name__}: {exc}); falling back to bf16"
             )
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(_model_dir(), **kwargs)
     model.eval()
     return model, tokenizer, "bf16"
 
@@ -183,9 +195,9 @@ def run(job: dict, load_model=None) -> dict:
     started = time.monotonic()
 
     if load_model is None:
-        if not weights_present(MODEL_DIR):
+        if not weights_present():
             raise StoryModelUnavailable(
-                "no story model is baked at " + MODEL_DIR + "; story generation is "
+                "no story model is baked at " + _model_dir() + "; story generation is "
                 "unavailable and no provider substitutes for it"
             )
         try:

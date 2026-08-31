@@ -13,6 +13,17 @@ root-owned and merely readable by the uid-10001 runtime user.
 
 from __future__ import annotations
 
+# FIRST, and above every project module on purpose. cudaenv sets
+# PYTORCH_CUDA_ALLOC_CONF, which PyTorch reads exactly once when its CUDA
+# allocator initialises; a value set after that point is present in the
+# environment and ignored by the allocator, which is the worst kind of
+# configuration because every report says it is on. Importing it here,
+# before anything that could pull in torch, is what makes the setting
+# real — and cudaenv.evidence() records the ordering rather than asserting
+# it. Owner directive 2026-08-30: "Do not claim it is configured merely
+# because it appears in source."
+import cudaenv  # noqa: F401  (imported for its import-time effect)
+
 import shutil
 import tempfile
 import time
@@ -41,11 +52,20 @@ class Cleanup:
             return {"ok": False, "error": type(exc).__name__}
 
 
-def _check_deadline(started: float) -> None:
-    if time.monotonic() - started > contract.RUNTIME_CEILING_SECONDS:
+def _ceiling(op: str) -> int:
+    """model_probe downloads its checkpoint at job time; production never
+    does. One ceiling for the benchmark, production's untouched."""
+    if op == "model_probe":
+        return contract.PROBE_RUNTIME_CEILING_SECONDS
+    return contract.RUNTIME_CEILING_SECONDS
+
+
+def _check_deadline(started: float, op: str = "") -> None:
+    ceiling = _ceiling(op)
+    if time.monotonic() - started > ceiling:
         raise contract.ContractError(
             "runtime-exceeded",
-            f"job exceeded the {contract.RUNTIME_CEILING_SECONDS}s ceiling",
+            f"job exceeded the {ceiling}s ceiling",
         )
 
 
@@ -67,13 +87,24 @@ def handle(event) -> dict:
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"
+        if job["op"] == "model_hydrate":
+            # No GPU, no artifact, no upload. It puts a checkpoint on the
+            # persistent volume so that every later change to that model is
+            # a configuration edit rather than a 25 GiB image rebuild.
+            import modelhydrate
+
+            record = modelhydrate.hydrate(job["model"])
+            _check_deadline(started, job["op"])
+            return contract.filter_output({**record, "ok": True,
+                                           "cleanup_ok": True})
+
         if job["op"] == "story_generate":
             # Text in the response, no artifact: nothing to upload.
             metrics = storygen.run(job)
-            _check_deadline(started)
+            _check_deadline(started, job["op"])
             return contract.filter_output({**metrics, "cleanup_ok": True})
 
-        if job["op"] in ("video_generate", "audio_mux", "video_concat"):
+        if job["op"] in ("video_generate", "audio_mux", "video_concat", "model_probe"):
             output_path = f"{workdir}/output.mp4"
         elif job["op"] == "image_generate":
             output_path = f"{workdir}/output.{contract.IMAGE_GEN_FORMAT}"
@@ -89,26 +120,66 @@ def handle(event) -> dict:
                 seg_path = f"{workdir}/seg{index:03d}.mp4"
                 storage.download(key, seg_path, contract.MAX_INPUT_BYTES)
                 segment_paths.append(seg_path)
-                _check_deadline(started)
+                _check_deadline(started, job["op"])
             metrics = videogen.run_concat(job, segment_paths, output_path)
         elif job["op"] == "image_generate":
-            # Text-only: there is no source object to fetch. The engine
-            # draws from the prompt on this worker's own GPU.
-            metrics = videogen.run_image(job, output_path)
+            # Text-only, UNLESS the job named a canonical character
+            # reference. The engine draws from the prompt on this worker's
+            # own GPU either way; a reference makes the draw start partway
+            # from that person instead of from noise.
+            #
+            # THE KEY IS ALREADY PROVEN by the time it reaches here: the
+            # contract pins it to the server-owned story/ref/ prefix and a
+            # bounded id, so this download can only ever name a published
+            # canonical reference — not another user's still, not a clip, not
+            # anything else in the bucket. The bytes are then bounded by the
+            # same MAX_INPUT_BYTES every other input is, and decoded by the
+            # same magic-byte-and-pixel-bounded decoder.
+            reference_path = None
+            reference_key = job["params"].get("reference_key")
+            if reference_key:
+                reference_path = f"{workdir}/reference.img"
+                storage.download(reference_key, reference_path, contract.MAX_INPUT_BYTES)
+                _check_deadline(started, job["op"])
+            metrics = videogen.run_image(job, output_path, reference_path=reference_path)
         else:
             storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
-            _check_deadline(started)
+            _check_deadline(started, job["op"])
 
             if job["op"] == "video_generate":
                 metrics = videogen.run(job, input_path, output_path)
+            elif job["op"] == "model_probe":
+                # The benchmark path. It downloads a candidate checkpoint at
+                # job time, which production never does — and it times that
+                # download as its own phase, because on a 14B candidate the
+                # fetch is expected to cost more than the inference and
+                # folding it into "model load" would misreport every row.
+                import modelprobe
+
+                try:
+                    metrics = modelprobe.run(job, input_path, output_path)
+                except modelprobe.ProbeStop as stop:
+                    # A FAILED PROBE IS STILL A MEASUREMENT. The generic
+                    # handler below would answer "unexpected-exception:
+                    # ProbeStop" — the stage, the detail and every timing and
+                    # byte count taken before it broke, all discarded, on a
+                    # GPU that was rented and billed regardless. For a
+                    # benchmark that is the one thing that must not happen,
+                    # so the partial report comes back with the failure.
+                    return contract.filter_output({
+                        "ok": False,
+                        "code": stop.failure,
+                        "error": stop.detail,
+                        **stop.report,
+                    })
             elif job["op"] == "audio_mux":
                 metrics = audio.run(job, input_path, output_path)
             else:
                 metrics = preprocess.run(job, input_path, output_path)
-        _check_deadline(started)
+        _check_deadline(started, job["op"])
 
         storage.upload(output_path, job["output_key"])
-        _check_deadline(started)
+        _check_deadline(started, job["op"])
 
         return contract.filter_output(
             {

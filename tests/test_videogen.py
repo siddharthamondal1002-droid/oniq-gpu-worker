@@ -55,7 +55,7 @@ def paths(tmp_path):
     return input_path, str(tmp_path / "output.mp4")
 
 
-def test_run_writes_a_real_mp4_and_measures(paths):
+def test_run_writes_a_real_mp4_and_measures(paths, fake_checkpoint):
     input_path, output_path = paths
     pipe = FakePipe()
     metrics = videogen.run(
@@ -77,7 +77,7 @@ def test_run_writes_a_real_mp4_and_measures(paths):
         assert isinstance(metrics[measured], int)
 
 
-def test_pipe_receives_only_server_decided_settings(paths, tmp_path, monkeypatch):
+def test_pipe_receives_only_server_decided_settings(paths, tmp_path, monkeypatch, fake_checkpoint):
     monkeypatch.setattr(videogen, "MODEL_ID_FILE", str(tmp_path / "MODEL_ID"))
     input_path, output_path = paths
     pipe = FakePipe()
@@ -93,22 +93,45 @@ def test_pipe_receives_only_server_decided_settings(paths, tmp_path, monkeypatch
     assert kwargs["width"] == contract.VIDEO_WIDTH
     assert kwargs["height"] == contract.VIDEO_HEIGHT
     assert kwargs["num_frames"] == contract.VIDEO_NUM_FRAMES
-    # MODEL_ID absent on this rig -> not distilled -> the full step count.
-    assert kwargs["num_inference_steps"] == videogen.STEPS_FULL
+    # The fake checkpoint ships a stock scheduler and a non-distilled name,
+    # so the derived profile is the full one.
+    import ltxcaps
+
+    assert kwargs["num_inference_steps"] == ltxcaps.STEPS_FULL
+    # Guidance was never sent before this change; the pipeline's default
+    # applied silently and nothing recorded it.
+    assert kwargs["guidance_scale"] == 3.0
+    assert kwargs["guidance_rescale"] == 0.0
     assert kwargs["image"].size == (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
 
 
-def test_distilled_model_id_selects_the_distilled_steps(paths, tmp_path, monkeypatch):
+def test_a_distilled_checkpoint_selects_the_distilled_profile(
+    paths, tmp_path, monkeypatch
+):
+    """Distillation is read from the CHECKPOINT, not from the repo name.
+
+    The fake snapshot below ships a scheduler carrying its own short schedule
+    — what a timestep-distilled release actually contains — and a name that
+    agrees. Both signals point the same way, so the profile resolves.
+    """
+    import ltxcaps
+    from conftest import write_fake_checkpoint
+
+    root = write_fake_checkpoint(tmp_path / "ltx", distilled=True)
     marker = tmp_path / "MODEL_ID"
-    marker.write_text("Lightricks/LTX-Video-0.9.7-distilled#distilled\n")
+    marker.write_text("Lightricks/LTX-Video-0.9.7-distilled\n")
+    monkeypatch.setattr(videogen, "MODEL_DIR", root)
     monkeypatch.setattr(videogen, "MODEL_ID_FILE", str(marker))
+
     input_path, output_path = paths
     pipe = FakePipe()
     metrics = videogen.run(
         _video_job(), input_path, output_path, load_pipeline=lambda: pipe
     )
-    assert pipe.calls[0]["num_inference_steps"] == videogen.STEPS_DISTILLED
-    assert metrics["model"] == "Lightricks/LTX-Video-0.9.7-distilled#distilled"
+    assert pipe.calls[0]["num_inference_steps"] == ltxcaps.STEPS_DISTILLED
+    # A distilled checkpoint does not want classifier-free guidance.
+    assert pipe.calls[0]["guidance_scale"] == 1.0
+    assert metrics["distilled"] is True
 
 
 def test_model_id_reads_missing_without_the_baked_file(tmp_path, monkeypatch):
@@ -134,7 +157,7 @@ def test_fit_to_canvas_always_yields_the_video_canvas(size):
     assert fitted.size == (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
 
 
-def test_watermark_defaults_on_and_changes_the_frame(paths):
+def test_watermark_defaults_on_and_changes_the_frame(paths, fake_checkpoint):
     # The default job carries watermark=True; the corner pixels of the
     # encoded output must differ from an unmarked run of the SAME frames.
     input_path, output_path = paths
@@ -310,7 +333,7 @@ def _image_job():
     )
 
 
-def test_image_engine_draws_from_the_prompt_at_the_video_canvas(tmp_path):
+def test_image_engine_draws_from_the_prompt_at_the_video_canvas(tmp_path, fake_checkpoint):
     pipe = _FakeTextPipe()
     out = str(tmp_path / "still.png")
     metrics = videogen.run_image(_image_job(), out, load_pipeline=lambda: pipe)
@@ -326,7 +349,7 @@ def test_image_engine_draws_from_the_prompt_at_the_video_canvas(tmp_path):
     assert metrics["format"] == contract.IMAGE_GEN_FORMAT
 
 
-def test_image_engine_keeps_frame_zero(tmp_path):
+def test_image_engine_keeps_frame_zero(tmp_path, fake_checkpoint):
     pipe = _FakeTextPipe()
     out = str(tmp_path / "still.png")
     videogen.run_image(_image_job(), out, load_pipeline=lambda: pipe)
@@ -334,7 +357,7 @@ def test_image_engine_keeps_frame_zero(tmp_path):
     assert Image.open(out).convert("RGB").getpixel((0, 0)) == (0, 20, 30)
 
 
-def test_image_engine_writes_a_real_measured_artifact(tmp_path):
+def test_image_engine_writes_a_real_measured_artifact(tmp_path, fake_checkpoint):
     out = str(tmp_path / "still.png")
     metrics = videogen.run_image(
         _image_job(), out, load_pipeline=_FakeTextPipe
@@ -347,7 +370,7 @@ def test_image_engine_writes_a_real_measured_artifact(tmp_path):
     assert set(metrics) <= set(contract.OUTPUT_WHITELIST)
 
 
-def test_image_engine_never_marks_the_conditioning_frame(tmp_path):
+def test_image_engine_never_marks_the_conditioning_frame(tmp_path, fake_checkpoint):
     # A watermark here would be burned twice: once on the still and again
     # on the film that animates it.
     flat = _FakeTextPipe()
@@ -363,7 +386,7 @@ def test_image_engine_refuses_cpu_fallback(tmp_path):
         videogen.run_image(_image_job(), str(tmp_path / "x.png"))
 
 
-def test_image_engine_refuses_an_empty_generation(tmp_path):
+def test_image_engine_refuses_an_empty_generation(tmp_path, fake_checkpoint):
     with pytest.raises(contract.ContractError) as exc:
         videogen.run_image(
             _image_job(), str(tmp_path / "x.png"),

@@ -249,6 +249,103 @@ def set_workers_standby_zero(endpoint_id: str):
     )
 
 
+def set_workers_min_zero(endpoint_id: str):
+    """Set workersMin to the literal 0. A strict spend REDUCTION.
+
+    Owner decision 2026-08-30: the endpoint the owner created came up with
+    workersMin=1, holding an A5000 continuously whether or not any job ran
+    — the same shape that accrued $1.155 on ynysmj3dm92cwp without that
+    endpoint ever running one. The owner chose to drop it to zero, so the
+    GPU is paid for only while work is on it.
+
+    THERE IS DELIBERATELY NO VALUE PARAMETER. Like set_workers_standby_zero
+    above, this function cannot scale anything UP: 0 is a literal in the
+    body, so no caller, input or stale read can turn a spend reduction into
+    a spend increase. workersMin is the field, and it is the only field in
+    the body, so no worker ceiling, template, volume or GPU list can move
+    with it.
+
+    One transport, not two. workersStandby needed a GraphQL fallback
+    because the REST route answered 400 'not in input schema' (measured
+    2026-08-26); workersMin IS declared in PATCH /endpoints/{id}'s accepted
+    properties, read off the live OpenAPI document 2026-08-30. If REST ever
+    stops accepting it the status and body come back verbatim rather than
+    being papered over by a second attempt that hides which one worked.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"workersMin": 0},
+    )
+    return status, raw
+
+
+def set_worker_bounds_min0_max1(endpoint_id: str):
+    """workersMin=0 AND workersMax=1. Both literals. A spend REDUCTION.
+
+    This is the exact shape validation/admission.check_endpoint_config
+    demands, and the reason it demands it: min=0 means nothing bills while
+    no job is running, max=1 means one runaway job cannot become three.
+
+    ONE PATCH, TWO FIELDS, BECAUSE THEY ARE ONE DECISION. Sending them
+    separately would restart the worker twice, and on a 25 GiB image each
+    restart is a fresh pull. They are also only meaningful together: min=0
+    with max=3 still allows three concurrent rentals, and max=1 with min=1
+    still bills continuously.
+
+    NO VALUE PARAMETERS, deliberately — the same guarantee
+    set_workers_standby_zero and set_workers_min_zero carry. 0 and 1 are
+    literals in the body, so no caller, dispatch input or stale read can
+    turn this into a scale-up. If the endpoint is already inside these
+    bounds the caller skips it; this function has no opinion, it only ever
+    writes the floor and the ceiling CI requires.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"workersMin": 0, "workersMax": 1},
+    )
+    return status, raw
+
+
+def set_endpoint_gpu_types(endpoint_id: str, gpu_type_ids):
+    """PATCH gpuTypeIds ALONE, to a list the caller has already resolved.
+
+    WHY THIS ONE TAKES A VALUE, when set_worker_bounds_min0_max1 and
+    set_workers_min_zero deliberately do not. Those write literals because
+    any value at all could turn a reduction into a scale-up. A GPU list
+    cannot be a literal here — the canonical id RunPod wants ("NVIDIA RTX
+    A6000", not "A6000 48GB") is a fact about the provider's catalogue,
+    not about this repo, and writing a guess would repeat the US-MO-2
+    mistake exactly: a string RunPod accepts into a field and then has
+    nowhere legal to schedule.
+
+    So the guarantee moves one level up instead of disappearing.
+    validation/endpoint_gpus.py resolves every card against the LIVE
+    catalogue, refuses anything the catalogue does not list, and holds the
+    approved set as a module constant with no dispatch input feeding it —
+    tests/test_endpoint_gpus.py and tests/test_workflow_gates.py assert
+    both. This function is the transport for that decision, not the place
+    it is made.
+
+    Callers must re-read the endpoint afterwards — no write echo is
+    trusted. WIDENING this list adds places a worker may be placed; it
+    does not raise the worker count, which workersMax still bounds.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"gpuTypeIds": list(gpu_type_ids)},
+    )
+    return status, raw
+
+
 def template_env_names_graphql(template_id: str):
     """Env var NAMES on a template, via GraphQL (values are fetched by
     the API but only names ever leave this function). Returns a set, or
@@ -266,6 +363,134 @@ def template_env_names_graphql(template_id: str):
         return None
     except (RunPodApiError, json.JSONDecodeError):
         return None
+
+
+def list_templates_graphql():
+    """Every template on the account: id, name, image. NAMES ONLY.
+
+    Deliberately does NOT select `env`. The existing
+    template_env_names_graphql asks for env because it must report which
+    KEYS are set, and it strips the values on the way out — but a listing
+    has no reason to pull secret values across the wire at all, so it does
+    not ask for them. The narrower query is the safer one.
+
+    Returns a list, or None when the answer is unknown — never [] for
+    "could not look", which would read as "the account has no templates".
+    """
+    # containerDiskInGb / volumeInGb joined the selection 2026-08-29: a job
+    # cannot download a checkpoint larger than the disk it has, so these two
+    # numbers decide which candidate models are probeable on this endpoint at
+    # all. Still NAMES ONLY — no env, no secret values.
+    query = (
+        "query { myself { podTemplates { id name imageName "
+        "containerDiskInGb volumeInGb volumeMountPath } } }"
+    )
+    try:
+        status, raw = _request(GRAPHQL_URL, method="POST", body={"query": query})
+        if status != 200:
+            return None
+        doc = json.loads(raw)
+        templates = ((doc.get("data") or {}).get("myself") or {}).get("podTemplates")
+        if not isinstance(templates, list):
+            return None
+        return [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "imageName": t.get("imageName"),
+                "containerDiskInGb": t.get("containerDiskInGb"),
+                "volumeInGb": t.get("volumeInGb"),
+                "volumeMountPath": t.get("volumeMountPath"),
+            }
+            for t in templates
+            if isinstance(t, dict)
+        ]
+    except (RunPodApiError, json.JSONDecodeError):
+        return None
+
+
+def rest_template_surface():
+    """Does the REST API expose a way to CREATE a template and ATTACH it?
+
+    Read-only: this reads the public OpenAPI document and reports which
+    template paths and verbs exist. Asking the spec is cheaper and safer
+    than probing with a real POST, and it is the same technique
+    rest_schema_probe used to settle the standby question — where the
+    answer turned out to be that the field simply is not in the schema.
+    """
+    for url in (f"{REST_BASE}/openapi.json", "https://rest.runpod.io/openapi.json"):
+        try:
+            status, raw = _request(url, bearer=False)
+        except RunPodApiError:
+            continue
+        if status != 200 or not raw.lstrip().startswith("{"):
+            continue
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        paths = doc.get("paths") or {}
+        found = {}
+        for path, spec in paths.items():
+            if "template" in path.lower():
+                found[path] = sorted(
+                    v.upper() for v in spec if v.lower() in
+                    ("get", "post", "patch", "put", "delete")
+                )
+        endpoint_patch = sorted(
+            (paths.get("/endpoints/{endpointId}") or {}).keys()
+        )
+
+        # WHAT CREATE ACTUALLY ACCEPTS. A path existing is not the same as a
+        # path that can do the job: if the create body only takes an
+        # imageName, then a template cannot be built from a repository here
+        # and no amount of POSTing will produce one.
+        def _props(node):
+            try:
+                schema = node["requestBody"]["content"]["application/json"]["schema"]
+            except (KeyError, TypeError):
+                return None
+            ref = schema.get("$ref") if isinstance(schema, dict) else None
+            if ref:
+                name = str(ref).rsplit("/", 1)[-1]
+                schema = ((doc.get("components") or {}).get("schemas") or {}).get(name)
+            if not isinstance(schema, dict):
+                return None
+            return {
+                "required": schema.get("required"),
+                "properties": sorted((schema.get("properties") or {}).keys()),
+            }
+
+        create = _props((paths.get("/templates") or {}).get("post") or {})
+        patch_ep = _props((paths.get("/endpoints/{endpointId}") or {}).get("patch") or {})
+
+        # EVERY path, not just the ones named "template". A create body that
+        # only takes an imageName means a template cannot be built from a
+        # repository AT THAT PATH; it does not yet mean the API has no build
+        # route at all. Reporting "impossible" off a keyword-filtered scan
+        # would be enumerating failures rather than searching, so dump the
+        # whole surface and let the absence be measured.
+        every = {}
+        for path, spec in paths.items():
+            if not isinstance(spec, dict):
+                continue
+            every[path] = sorted(
+                v.upper() for v in spec
+                if v.lower() in ("get", "post", "patch", "put", "delete")
+            )
+        wanted = ("build", "github", "git", "repo", "registry", "source", "image")
+        build_like = sorted(
+            path for path in every if any(w in path.lower() for w in wanted)
+        )
+        return {
+            "template_paths": found,
+            "endpoint_verbs": endpoint_patch,
+            "template_create_body": create,
+            "endpoint_patch_body": patch_ep,
+            "all_paths": every,
+            "build_like_paths": build_like,
+        }
+    return None
 
 
 def standby_schema_probe():
@@ -352,6 +577,66 @@ def rest_schema_probe():
     return None
 
 
+# Worker fields, most-specific first. Introspection would be the honest
+# way to pick one, but RunPod's Apollo server answers
+# INTROSPECTION_DISABLED (measured 2026-08-30), so the schema is probed by
+# ASKING: each selection is tried in turn and a rejection names the field
+# it did not like. The last entry is the one every GraphQL server can
+# answer, so the walk always terminates on something real.
+# MEASURED 2026-08-30, runs 166-167: RunPod's public API does not expose
+# per-worker identity for a serverless endpoint, and there is no route to
+# it left to try.
+#
+#   myself.endpoints        -> Cannot query field "workers" on type "Endpoint"
+#   myself.serverlessEndpoints -> Cannot query field on type "User"
+#   myself.endpoints.machines  -> Cannot query field "machines" on type "Endpoint"
+#   myself.pods             -> 200, but a serverless endpoint is not a pod
+#   __type / __schema       -> INTROSPECTION_DISABLED (Apollo, in production)
+#   a deliberately invalid field -> GRAPHQL_VALIDATION_FAILED with NO
+#                                  "Did you mean" suggestions
+#
+# The last line is what closes it: with introspection off AND suggestions
+# off, the schema cannot be learned from the server, so any further
+# attempt would be a guess dressed as a probe. The counts
+# ({"initializing": 1}) therefore remain the only machine-readable signal,
+# and they cannot distinguish a worker downloading steadily from one being
+# recreated every few minutes. That distinction lives in the endpoint's
+# System log in the RunPod console, which is an OWNER read.
+#
+# Kept as one call rather than four: it costs one GET, it records the
+# refusal in the report where the next person will look, and if RunPod
+# ever adds the field it starts answering without anyone rediscovering
+# this list.
+_WORKER_QUERY = "{ myself { endpoints { id workers { id status } } } }"
+
+WORKER_DETAIL_UNAVAILABLE = (
+    "RunPod exposes no per-worker identity for serverless endpoints; "
+    "introspection and field suggestions are both disabled. The System "
+    "log in the console is the only source (owner read)."
+)
+
+
+def worker_detail_graphql(endpoint_id: str):
+    """Per-worker rows for ONE endpoint, or (None, note). Read-only.
+
+    Would answer what the health counts cannot: whether a worker that has
+    reported "initializing" for an hour is downloading or restarting. See
+    the comment above for why it currently cannot.
+    """
+    status, raw = _request(GRAPHQL_URL, method="POST",
+                           body={"query": _WORKER_QUERY})
+    if status != 200:
+        return None, f"{WORKER_DETAIL_UNAVAILABLE} (HTTP {status})"
+    doc = json.loads(raw)
+    if doc.get("errors"):
+        return None, WORKER_DETAIL_UNAVAILABLE
+    endpoints = ((doc.get("data") or {}).get("myself") or {}).get("endpoints") or []
+    for ep in endpoints:
+        if ep.get("id") == endpoint_id:
+            return ep.get("workers") or [], "myself.endpoints.workers"
+    return None, f"endpoint {endpoint_id} not in myself.endpoints"
+
+
 def parse_endpoint(doc: dict) -> dict:
     return {
         "id": doc.get("id"),
@@ -366,12 +651,34 @@ def parse_endpoint(doc: dict) -> dict:
 # ---------------------------------------------------------------- serverless
 
 
-def submit_job(endpoint_id: str, job_input: dict):
-    """POST /run (async). Mutating — the spend path only."""
+def submit_job(endpoint_id: str, job_input: dict, policy: dict | None = None):
+    """POST /run (async). Mutating — the spend path only.
+
+    `policy` is a PER-JOB override and is sent only when a caller passes one.
+    The live endpoint carries executionTimeoutMs 600000 (read 2026-08-29),
+    which is right for production — a paid job whose checkpoint is already in
+    the image has no business running ten minutes — and far too short for a
+    benchmark that downloads a 44-118 GiB checkpoint before it starts.
+
+    Raising the ENDPOINT's timeout would change the spend bound of every
+    production job, which owner directive 2026-08-29 forbids. A per-job
+    policy changes one job. That is the whole reason it is here rather than a
+    PATCH, and it is the same fence `model` sits behind: only the probe path
+    ever passes one, and the contract admits it on no production op.
+
+    This field is NOT in rest.runpod.io's OpenAPI document, because /run
+    lives on the serverless host, which publishes none — so it is unverified
+    by schema and verified by outcome instead. That is safe here: an ignored
+    field leaves the 600s default in place, and a rejected body fails the
+    submit before a worker starts, which costs nothing.
+    """
+    body: dict = {"input": job_input}
+    if policy:
+        body["policy"] = policy
     status, raw = _request(
         f"{SERVERLESS_BASE}/{endpoint_id}/run",
         method="POST",
-        body={"input": job_input},
+        body=body,
     )
     if status != 200:
         raise RunPodApiError(f"submit_job -> {status}")
@@ -389,6 +696,151 @@ def cancel_job(endpoint_id: str, job_id: str):
     return status, raw
 
 
+def create_network_volume(name: str, size_gb: int, datacenter_id: str):
+    """POST /networkvolumes. Required fields read from the spec, not guessed.
+
+    Owner directive 2026-08-30: persistent model storage, "the smallest
+    volume that safely accommodates Hunyuan and future candidate
+    hydration", and "Do not assume storage is free". The rate is MEASURED
+    at $0.07/GB-month from this account's own /billing/networkvolumes line
+    (amount x 720h / diskSpaceBilledGb), so the caller can state a cost
+    rather than an estimate.
+    """
+    if not isinstance(size_gb, int) or size_gb <= 0:
+        raise RunPodApiError(f"refusing a non-positive volume size: {size_gb!r}")
+    status, raw = _request(
+        f"{REST_BASE}/networkvolumes",
+        method="POST",
+        body={"name": name, "size": size_gb, "dataCenterId": datacenter_id},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(
+            f"POST /networkvolumes -> {status} (body: {raw[:300]!r})"
+        )
+    return json.loads(raw)
+
+
+def attach_network_volume(endpoint_id: str, volume_id: str,
+                          datacenter_id: str | None = None):
+    """PATCH the endpoint's networkVolumeId AND the datacenter it lives in.
+
+    TWO FIELDS, BECAUSE AN ATTACHMENT IS TWO FIELDS. This sent
+    networkVolumeId alone until 2026-08-30, on a one-field-per-PATCH
+    principle that is right for most endpoint writes and wrong for this
+    one. A network volume is datacenter-scoped: an endpoint holding a
+    volume in US-MO-2 can only run in US-MO-2. Sending the volume without
+    the datacenter left this endpoint with `networkVolumeId` set and no
+    `dataCenterIds` key at all — a state RunPod's scheduler answered by
+    placing nothing.
+
+    MEASURED, not deduced. After the one-field attach the endpoint sat
+    with jobs {inQueue: 1} and workers {idle 0, initializing 0, ready 0,
+    running 0, throttled 0, unhealthy 0} for fifty minutes. The same
+    endpoint had shown initializing=2 before the attach. Nothing was
+    billed — no worker, no charge — and nothing could ever run.
+
+    Detaching is still the same call with an empty volume id, which sends
+    no datacenter and so removes the pin along with the volume.
+
+    Read-before and read-after, for the reason the template retarget
+    taught the same day: a PATCH that sends one field and silently drops
+    another leaves an endpoint nothing printed will show is broken.
+    """
+    _, before = get_endpoint(endpoint_id)
+    body: dict = {"networkVolumeId": volume_id}
+    if volume_id and datacenter_id:
+        # The caller reads this off the VOLUME document, never off a
+        # dispatch input: the only correct value is where the volume
+        # actually is, and a typed one could pin the endpoint somewhere
+        # its storage is not.
+        body["dataCenterIds"] = [datacenter_id]
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body=body,
+    )
+    if status not in (200, 201, 202):
+        # THE BODY IS THE DIAGNOSIS, so it is not clipped to 300 characters
+        # here. RunPod's schema refusals name the offending constraint after
+        # a long preamble about which path and which operation, and the
+        # 2026-08-30 refusal was cut off exactly where it was about to say
+        # why. The body carries no credential — the key travels in a header.
+        #
+        # WHAT THAT 400 ACTUALLY WAS, once the schema was resolved and read:
+        # `dataCenterIds` is an ENUM of 28 values, and US-MO-2 — where the
+        # volume had been created — is not among them. The two fields were
+        # never the problem; the VALUE was illegal. This comment recorded the
+        # opposite for a few hours, which is worse than recording nothing:
+        # "those fields cannot be combined" would send the next reader to
+        # rewrite a call that was already correct.
+        #
+        # THE TRAP GENERALISES. RunPod will create a network volume in a
+        # datacenter its serverless scheduler cannot place a worker in, and
+        # nothing warns you at creation time. A volume there can never be
+        # attached, because no legal dataCenterIds value pins an endpoint to
+        # it. Read the enum out of the PATCH schema BEFORE creating a volume
+        # — patch_schema() in validation/volume_probe.py resolves it — rather
+        # than after ninety minutes of an endpoint with zero workers.
+        raise RunPodApiError(
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:2000]!r})"
+        )
+    _, after = get_endpoint(endpoint_id)
+    return before, after
+
+
+def endpoint_billing():
+    """What every endpoint on the account has actually accrued. Read-only.
+
+    Owner directive 2026-08-30: an always-on endpoint is billing whether or
+    not it runs a job, and the owner asked to be TOLD the cost rather than
+    have it changed. So the cost is READ here, never estimated from a
+    per-hour rate times a guess at how long the endpoint has been up — an
+    invented number has no place in a spend report. The endpoint carrying
+    that configuration today is named in ACCEPTED_ALWAYS_ON; two earlier
+    ones were deleted by the owner on 2026-08-30, and their accrued
+    charges still appear in this document, which is why it is read whole
+    rather than filtered to the live id.
+    """
+    try:
+        raw, doc = _get_json(f"{REST_BASE}/billing/endpoints")
+    except RunPodApiError as exc:
+        return None, str(exc)
+    return doc, None
+
+
+def set_execution_timeout(endpoint_id: str, timeout_ms: int):
+    """PATCH executionTimeoutMs on ONE endpoint. Nothing else is sent.
+
+    Owner authorization 2026-08-30: raise the ceiling to 45 minutes so the
+    Hunyuan probe's 32.26 GiB checkpoint download can finish inside the
+    job. The worst case is one job holding the card for 45 minutes; at the
+    LIVE secure rate the discovery step reads, that stays inside the
+    job cap. The rate is not written here — a price copied into a
+    comment is a price that goes stale silently, which is why the
+    admission gate refuses one.
+
+    Read-before and read-after are not ceremony. The 2026-08-30 template
+    retarget sent a field it meant to change and silently dropped
+    containerRegistryAuthId, which the endpoint then could not pull with;
+    that cost hours and was invisible in everything the template printed.
+    So this returns both documents and the caller compares them.
+    """
+    if not isinstance(timeout_ms, int) or timeout_ms <= 0:
+        raise RunPodApiError(f"refusing a non-positive timeout: {timeout_ms!r}")
+    _, before = get_endpoint(endpoint_id)
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"executionTimeoutMs": timeout_ms},
+    )
+    if status not in (200, 201, 202):
+        raise RunPodApiError(
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:300]!r})"
+        )
+    _, after = get_endpoint(endpoint_id)
+    return before, after
+
+
 def endpoint_health(endpoint_id: str):
     return _get_json(f"{SERVERLESS_BASE}/{endpoint_id}/health")
 
@@ -403,11 +855,47 @@ def purge_queue(endpoint_id: str):
 # ---------------------------------------------------------------- sweep
 
 
+# Endpoints the OWNER has accepted as always-on. Their minimum workers are
+# still counted and still reported — they are simply not an alarm.
+#
+# Owner directive 2026-08-30: the owner deleted p3zmlv8ek10dzt and
+# ynysmj3dm92cwp and created 9gh6qbou1in8yb in their place, configured by
+# hand with workersMin=1, workersMax=1, workersStandby=1 on an A5000.
+# Nothing in this repository can create an endpoint or set those bounds,
+# so this is the owner's own configuration and its idle cost is the
+# owner's to weigh — this file records it and the reports print what it
+# accrues rather than deciding for them.
+#
+# THE ENTRY IS KEYED ON THE ID FOR A REASON. Every dispatch between 12:00
+# and 12:56 on 2026-08-30 went to p3zmlv8ek10dzt, which had already been
+# deleted; the jobs vanished and the endpoint's absence was only found by
+# printing the list. An id that stops existing must therefore stop being
+# named here too, or this list becomes a record of endpoints that are gone
+# while the live one trips the alarm on every run.
+#
+# WHY IT IS RECORDED HERE RATHER THAN TOLERATED. Once workersMin never
+# returns to zero, this sweep fires on every run forever. A guard that is
+# permanently red is a guard people learn to scroll past, and the day a
+# REAL orphan appears it would be one more red line among many. Naming the
+# exception keeps the alarm meaningful: anything not on this list still
+# takes the run down.
+ACCEPTED_ALWAYS_ON = {
+    "9gh6qbou1in8yb": (
+        "owner-created 2026-08-30; workersMin=1/workersMax=1/workersStandby=1 "
+        "on NVIDIA RTX A5000, set by the owner in the console"
+    ),
+}
+
+
 def sweep_orphans():
     """Count anything that could still be billing: pods + endpoint workers.
 
     Returns a dict of counts, or None when the API cannot be reached —
     None is 'cannot confirm', which must never be converted to 0.
+
+    `endpoint_min_workers` counts only endpoints that are NOT owner-accepted;
+    `accepted_min_workers` carries the rest, so the accepted capacity is
+    visible in every report rather than silently dropped.
     """
     try:
         _, pods = get_pods()
@@ -419,12 +907,25 @@ def sweep_orphans():
         endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     )
     workers = 0
+    accepted = 0
+    accepted_seen = {}
     for ep in ep_list:
         parsed = parse_endpoint(ep)
         min_w = parsed["min_workers"]
-        if isinstance(min_w, int):
-            workers += min_w
-    return {"pods": len(pod_list), "endpoint_min_workers": workers}
+        if not isinstance(min_w, int):
+            continue
+        if parsed["id"] in ACCEPTED_ALWAYS_ON:
+            accepted += min_w
+            if min_w:
+                accepted_seen[parsed["id"]] = min_w
+            continue
+        workers += min_w
+    return {
+        "pods": len(pod_list),
+        "endpoint_min_workers": workers,
+        "accepted_min_workers": accepted,
+        "accepted_endpoints": accepted_seen,
+    }
 
 
 # ---------------------------------------------------------------- discover
@@ -469,6 +970,112 @@ def discover(out_path=None) -> dict:
         with open(out_path, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=1)
     return report
+
+
+def create_template(name: str, image_name: str, container_disk_gb: int):
+    """Create a serverless template naming an EXISTING image.
+
+    Deliberately minimal. POST /templates accepts fourteen properties
+    (measured 2026-08-28) and this sends five: anything unsent keeps
+    RunPod's default, and every field named here is a field that could be
+    got wrong. In particular it sends NO `env`: the worker's three R2
+    variables live in the RunPod environment and nowhere else — storage.py
+    states that as the contract — so this function has no parameter that
+    could carry a credential, and cannot leak one it never receives.
+    """
+    body = {
+        "name": name,
+        "imageName": image_name,
+        "isServerless": True,
+        "isPublic": False,
+        "containerDiskInGb": container_disk_gb,
+    }
+    status, raw = _request(f"{REST_BASE}/templates", method="POST", body=body)
+    if status not in (200, 201):
+        raise RunPodApiError(f"POST /templates -> {status}: {raw[:200]}")
+    return raw, json.loads(raw)
+
+
+def attach_template(endpoint_id: str, template_id: str):
+    """Point an endpoint at a template. templateId is the ONLY field sent.
+
+    PATCH /endpoints/{id} also accepts workersMax, workersMin, gpuTypeIds,
+    idleTimeout and executionTimeoutMs. Sending any of them — even at what
+    is believed to be the current value — would let a stale read silently
+    rewrite the endpoint's spend bounds. One field goes in the body, so
+    nothing else can change. Callers must re-read; no write echo is
+    trusted.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"templateId": template_id},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /endpoints/{endpoint_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
+
+
+def retarget_template(template_id: str, image_name: str, container_disk_gb: int,
+                      container_registry_auth_id: str | None = None):
+    """Point an EXISTING template at a new image and disk. Two fields, named.
+
+    The one-field rule that governs set_template_env and attach_template is
+    about a stale read silently rewriting something nobody meant to touch.
+    Here the image and the disk are exactly what is meant to change — owner
+    directive 2026-08-29, 80 GB to 200 GB — and nothing else is sent, so
+    `name`, `env` and `dockerStartCmd` cannot move.
+
+    This exists because creating a second template is not possible: RunPod
+    answers 500 "Template name must be unique", measured on 2026-08-29. It is
+    also the better shape. Updating in place keeps the template id the
+    endpoint already points at, and keeps the env holding the R2 secret
+    REFERENCES — so the worker does not lose its storage configuration on the
+    way to a bigger disk, and there is no window in which the endpoint runs a
+    template that cannot write its output.
+    """
+    # THE REGISTRY CREDENTIAL RIDES ALONG, when the caller read one off the
+    # template first. A narrow PATCH should leave unnamed fields alone, and
+    # this one names only what it means to change — but "should" is the word
+    # that cost 2026-08-30: after a retarget, workers went back to pulling
+    # ghcr.io anonymously and hitting toomanyrequests, which is what an
+    # absent credential looks like from the outside. Sending the id back
+    # explicitly makes preservation something the request states rather than
+    # something the provider is trusted to infer, and template_retarget then
+    # re-reads it to confirm.
+    body = {"imageName": image_name, "containerDiskInGb": container_disk_gb}
+    if container_registry_auth_id:
+        body["containerRegistryAuthId"] = container_registry_auth_id
+    status, raw = _request(
+        f"{REST_BASE}/templates/{template_id}",
+        method="PATCH",
+        body=body,
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /templates/{template_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
+
+
+def set_template_env(template_id: str, env: dict):
+    """Set a template's env. `env` is the ONLY field sent.
+
+    The same discipline as attach_template: PATCH /templates/{id} also
+    accepts imageName, containerDiskInGb, name and dockerStartCmd, and
+    sending any of them - even at what is believed to be the current
+    value - would let a stale read silently rewrite the image this
+    endpoint runs. One field goes in the body. Callers must re-read.
+
+    Values here are RunPod secret REFERENCES, not credentials, and are
+    never logged by this function or its callers.
+    """
+    status, raw = _request(
+        f"{REST_BASE}/templates/{template_id}",
+        method="PATCH",
+        body={"env": env},
+    )
+    if status not in (200, 201):
+        raise RunPodApiError(f"PATCH /templates/{template_id} -> {status}: {raw[:200]}")
+    return raw, json.loads(raw) if raw.strip().startswith("{") else {}
 
 
 def main(argv) -> int:

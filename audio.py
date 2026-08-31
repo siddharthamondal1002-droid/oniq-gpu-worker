@@ -40,8 +40,15 @@ import time
 import numpy as np
 
 import contract
+import modelroot
 
-VOICE_DIR = "/app/models/piper"
+# Lazy, like videogen/storygen: resolved per call so a hydration that
+# lands mid-life is seen. None means "ask modelroot".
+VOICE_DIR = None
+
+
+def _voice_dir() -> str:
+    return VOICE_DIR or modelroot.resolve_production("piper")
 VOICE_MODEL = "en-us-ryan-high.onnx"
 
 # The documented loudness strategy (RMS target with a true-peak-ish
@@ -58,12 +65,14 @@ AAC_BITRATE = 96_000
 _ENCODE_CHUNK = 1024  # aac frame size; one frame per encode call
 
 
-def voice_paths(voice_dir: str = VOICE_DIR):
+def voice_paths(voice_dir: str | None = None):
+    voice_dir = voice_dir or _voice_dir()
     model = os.path.join(voice_dir, VOICE_MODEL)
     return model, model + ".json"
 
 
-def load_voice(voice_dir: str = VOICE_DIR):
+def load_voice(voice_dir: str | None = None):
+    voice_dir = voice_dir or _voice_dir()
     """Load the baked piper voice. Never touches the network."""
     model, config = voice_paths(voice_dir)
     if not (os.path.exists(model) and os.path.exists(config)):
@@ -77,7 +86,8 @@ def load_voice(voice_dir: str = VOICE_DIR):
     return PiperVoice.load(model, config_path=config)
 
 
-def synthesize(text: str, voice_dir: str = VOICE_DIR):
+def synthesize(text: str, voice_dir: str | None = None):
+    voice_dir = voice_dir or _voice_dir()
     """Speak one narration in-process. Returns (int16 mono pcm, rate)."""
     voice = load_voice(voice_dir)
     chunks = b"".join(voice.synthesize_stream_raw(text))

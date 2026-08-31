@@ -45,13 +45,29 @@ RUNTIME_CEILING_SECONDS = 900
 # verify_gpu_success pins TARGET_GPU itself. Its earlier hardcoded
 # "3090" outlived that card's retirement and stopped a canary whose
 # generation had actually succeeded on the A5000 — one target, one name.
-TARGET_GPU = "NVIDIA RTX A5000"
+#
+# SUPERSEDED 2026-08-30, and the reason is worth keeping. The A5000 was
+# retired when the owner moved to a 48 GB card; the endpoint then sat with
+# gpuTypeIds ["NVIDIA RTX A6000"] and workers {throttled 1} — RunPod
+# wanting to place a worker and unable to get that one card — while this
+# constant still named the A5000, so every spend refused
+# endpoint-not-target before reaching the GPU at all.
+#
+# ONE CARD NAMED IS A SINGLE POINT OF FAILURE. Owner directive 2026-08-30:
+# RTX A6000 and A40, and nothing else. Both are 48 GB, so a model that fits
+# one fits the other and the fallback changes where a job lands and roughly
+# how long it takes — never whether it can run. A 24 or 32 GB card would
+# turn "a bit slower" into "out of memory", which is why the set is these
+# two and why it stays an allow-list rather than becoming "any card".
+APPROVED_GPUS = ("NVIDIA RTX A6000", "NVIDIA A40")
+
+# The preferred card, for the places that need ONE name — a message, a
+# default, a quote. Membership, not equality, is what the gates test.
+TARGET_GPU = APPROVED_GPUS[0]
 
 # Server-side allow-list: which card ONIQ rents is an owner decision, and
 # the allow-list is why "give me 8x H100" cannot be typed at all.
-ALLOWED_GPUS = {
-    TARGET_GPU: {"min_vram_gb": 24},
-}
+ALLOWED_GPUS = {name: {"min_vram_gb": 48} for name in APPROVED_GPUS}
 
 WORKLOAD_MIN_VRAM_GB = 24
 
@@ -118,10 +134,21 @@ def admit(
     runtime_seconds: int,
     price_per_hour,
     min_vram_gb: int = WORKLOAD_MIN_VRAM_GB,
+    ceiling_seconds: int = RUNTIME_CEILING_SECONDS,
 ) -> Reservation:
     """The caller cannot choose what it costs. Refuses in a fixed order,
     VRAM before price; a runtime above the ceiling is refused, not
-    clamped."""
+    clamped.
+
+    `ceiling_seconds` DEFAULTS to production's and is passed explicitly by
+    exactly one caller: the model_probe path, whose jobs download a
+    checkpoint before they start and so run in a wider window (see
+    contract.PROBE_RUNTIME_CEILING_SECONDS). Reserving 900s for an
+    1800s-capable job is not conservative — it is wrong in the expensive
+    direction, because the reservation check fires AFTER the job has run and
+    would refuse a measurement already paid for. The cap is untouched: a
+    wider window still has to clear JOB_CAP_USD, and it does.
+    """
     if gpu_name not in ALLOWED_GPUS:
         raise AdmissionRefused(
             "gpu-type-not-allowed",
@@ -132,15 +159,15 @@ def admit(
             "insufficient-vram",
             f"workload needs >= {min_vram_gb}GB",
         )
-    if runtime_seconds > RUNTIME_CEILING_SECONDS:
+    if runtime_seconds > ceiling_seconds:
         raise AdmissionRefused(
             "runtime-exceeds-ceiling",
             f"runtime {runtime_seconds}s exceeds the "
-            f"{RUNTIME_CEILING_SECONDS}s ceiling (refused, not clamped)",
+            f"{ceiling_seconds}s ceiling (refused, not clamped)",
         )
     # The reservation is a TIME budget: charge the full ceiling window,
     # never the caller's expectation of how long the job should take.
-    reserved = reserve_usd(price_per_hour, RUNTIME_CEILING_SECONDS)
+    reserved = reserve_usd(price_per_hour, ceiling_seconds)
     if reserved > JOB_CAP_USD:
         raise AdmissionRefused(
             "over-job-cap",
@@ -148,7 +175,7 @@ def admit(
         )
     return Reservation(
         gpu=gpu_name,
-        runtime_seconds=RUNTIME_CEILING_SECONDS,
+        runtime_seconds=ceiling_seconds,
         price_per_hour_usd=Decimal(str(price_per_hour)),
         reserved_usd=reserved,
     )

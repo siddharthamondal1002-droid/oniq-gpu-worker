@@ -1,0 +1,304 @@
+"""What templates exist, and can one be created without the console?
+
+The endpoint p3zmlv8ek10dzt reports templateId hhhdwtjw0y; a REST GET for
+that id answers 404 and the owner cannot find it in the console list. This
+reports what the account ACTUALLY holds and whether the API offers a path
+to create a template and attach it — because the last time an endpoint
+mutation was assumed to exist (workersStandby) it turned out not to be in
+the schema at all, and three cycles went into finding that out the hard way.
+
+Read-only. Nothing here creates, patches or deletes.
+"""
+
+from __future__ import annotations
+
+import json
+
+import storage
+
+
+def _render(names):
+    if names is None:
+        return "unreadable (UNKNOWN)"
+    return f"{len(names)} set - " + (", ".join(sorted(names)) or "(none)")
+
+
+def _rest_env_names(client, template_id: str):
+    """The same question asked of the REST template, NAMES ONLY.
+
+    RunPod's REST template carries env as either a mapping or a list of
+    {key, value} pairs depending on the shape of the day; both are read,
+    and the values are dropped on the floor here rather than travelling
+    any further.
+    """
+    try:
+        _, doc = client.get_template(template_id)
+    except Exception:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    env = doc.get("env")
+    if isinstance(env, dict):
+        return set(env.keys())
+    if isinstance(env, list):
+        return {
+            e.get("key") for e in env
+            if isinstance(e, dict) and e.get("key")
+        }
+    if env is None:
+        # A template with no env at all answers with nothing, and that is
+        # a real "none set" rather than a failure to look.
+        return set()
+    return None
+
+
+def rest_detail(client, template_id: str) -> dict:
+    """What a template ACTUALLY declares, read over REST by id.
+
+    THE LISTING IS NOT THE ACCOUNT. list_templates_graphql returns the
+    templates the console shows under "My Templates"; one created inline
+    while creating an endpoint does not appear there. Twice now an
+    endpoint has referenced an id absent from that listing — ei22bjog46
+    and xfmaf7n83n — and the second was demonstrably working, with three
+    workers initializing against it.
+
+    So "absent from the listing" was being printed as if it meant
+    "dangling", and the REST read that could have settled it only ran when
+    the listing already said the template was there. It runs
+    unconditionally now.
+
+    The image name is the whole question this answers: whether an endpoint
+    runs ONIQ's worker, which speaks contract.py's job schema, or
+    something else entirely.
+
+    ENV NAMES ONLY, never values — the same discipline _rest_env_names
+    keeps. dockerStartCmd is reported as set/unset and never printed: it
+    is a place a credential can end up, and this output goes to a log.
+    """
+    try:
+        _, doc = client.get_template(template_id)
+    except Exception as exc:
+        return {"readable": False, "error": f"{type(exc).__name__}: {exc}"}
+    if not isinstance(doc, dict):
+        return {"readable": False, "error": f"unexpected shape: {type(doc).__name__}"}
+
+    env = doc.get("env")
+    if isinstance(env, dict):
+        names = sorted(env)
+    elif isinstance(env, list):
+        names = sorted(e.get("key") for e in env
+                       if isinstance(e, dict) and e.get("key"))
+    else:
+        names = [] if env is None else None
+
+    return {
+        "readable": True,
+        "id": doc.get("id"),
+        "name": doc.get("name"),
+        "imageName": doc.get("imageName"),
+        "containerDiskInGb": doc.get("containerDiskInGb"),
+        "volumeInGb": doc.get("volumeInGb"),
+        "volumeMountPath": doc.get("volumeMountPath"),
+        "isServerless": doc.get("isServerless"),
+        "registry_auth_set": bool(doc.get("containerRegistryAuthId")),
+        "docker_start_cmd_set": bool(doc.get("dockerStartCmd")),
+        "docker_entrypoint_set": bool(doc.get("dockerEntrypoint")),
+        "env_names": names,
+    }
+
+
+def _report_storage(client, template_id: str):
+    """Which storage variables are set on the template. NAMES ONLY.
+
+    A RunPod serverless worker reads its environment from its TEMPLATE, so
+    "the secrets are added" is a claim about this object and nowhere else -
+    not about the endpoint, and certainly not about a GitHub secret. Checked
+    here because a job that cannot write its output should never have been
+    started, and because the owner is entitled to see the claim verified
+    rather than assumed.
+
+    Unreadable is UNKNOWN, never "ready". Returns (state, verdict line),
+    where state is True, False or None.
+    """
+    # TWO PATHS, because one path is an opinion. The GraphQL view and the
+    # REST view of a template are different endpoints on different hosts,
+    # and the owner has now said three times that these variables are set
+    # while one of them said otherwise. If they disagree, the disagreement
+    # IS the finding - reporting either number alone would be a guess
+    # wearing a measurement's clothes.
+    graph = client.template_env_names_graphql(template_id)
+    rest = _rest_env_names(client, template_id)
+    print(f"ENV via GraphQL: {_render(graph)}")
+    print(f"ENV via REST   : {_render(rest)}")
+
+    if graph is not None and rest is not None and graph != rest:
+        only_rest = sorted(rest - graph)
+        only_graph = sorted(graph - rest)
+        verdict = (
+            "ENV DISAGREEMENT: the two APIs do not describe the same template - "
+            f"REST-only {only_rest}, GraphQL-only {only_graph}. Trust neither "
+            "until this is explained."
+        )
+        print(verdict)
+        return None, verdict
+
+    names = rest if rest is not None else graph
+    if names is None:
+        verdict = "ENV: unreadable - the answer is UNKNOWN, not 'nothing is set'"
+        print(verdict)
+        return None, verdict
+    print(
+        f"ENV ON {template_id}: {len(names)} set - "
+        f"{', '.join(sorted(names)) or '(none)'}  (names only, never values)"
+    )
+    absent = [name for name in storage.REQUIRED_VARS if name not in names]
+    if absent:
+        verdict = (
+            f"STORAGE NOT READY: {', '.join(absent)} not set - every job would "
+            "fail closed with storage-not-configured"
+        )
+        print(verdict)
+        return False, verdict
+    verdict = "STORAGE READY: every variable storage.py requires is set on the template"
+    print(verdict)
+    return True, verdict
+
+
+def report(client, expected_template_id: str) -> tuple:
+    # A blank id would make the membership test trivially true and print
+    # "MISSING" for a question nobody asked - run 49 did exactly that, because
+    # the workflow handed this the endpoint id input, which was empty. An
+    # assertion that cannot fail is worse than no assertion: it reads like
+    # evidence. Refuse instead.
+    expected_template_id = (expected_template_id or "").strip()
+    if not expected_template_id:
+        print("NO TEMPLATE ID GIVEN: nothing to look for, so nothing is proven")
+        return 2, {"templates": None, "surface": None}
+
+    # THE REST READ FIRST, and unconditionally. Whether a template is in
+    # the account listing is a different question from what it declares,
+    # and only the second one decides whether an endpoint can run ONIQ's
+    # worker.
+    detail = rest_detail(client, expected_template_id)
+    print(f"=== REST GET /templates/{expected_template_id} ===")
+    if not detail.get("readable"):
+        print(f"  UNREADABLE: {detail.get('error')}")
+    else:
+        print(f"  name       {detail['name']!r}")
+        print(f"  image      {detail['imageName']!r}")
+        print(f"  disk       containerDiskInGb={detail['containerDiskInGb']!r} "
+              f"volumeInGb={detail['volumeInGb']!r} "
+              f"mount={detail['volumeMountPath']!r}")
+        print(f"  serverless {detail['isServerless']!r}  "
+              f"registryAuth={'set' if detail['registry_auth_set'] else 'unset'}  "
+              f"startCmd={'set' if detail['docker_start_cmd_set'] else 'unset'}  "
+              f"entrypoint={'set' if detail['docker_entrypoint_set'] else 'unset'}")
+        names = detail["env_names"]
+        if names is None:
+            print("  env        UNREADABLE shape")
+        else:
+            print(f"  env        {len(names)} set - "
+                  f"{', '.join(names) or '(none)'}  (names only, never values)")
+            missing = [v for v in storage.REQUIRED_VARS if v not in names]
+            if missing:
+                print(f"  STORAGE    NOT READY: {', '.join(missing)} absent — "
+                      "every job against this template fails closed with "
+                      "storage-not-configured")
+            else:
+                print("  STORAGE    READY: every variable storage.py requires "
+                      "is set")
+
+    storage_state = "unchecked"
+    storage_line = None
+    present = False
+    templates = client.list_templates_graphql()
+    if templates is None:
+        print("TEMPLATES: unreadable — the answer is UNKNOWN, not 'none exist'")
+    else:
+        print(f"TEMPLATES: {len(templates)} on the account")
+        for t in templates:
+            # containerDiskInGb decides whether a job can download a
+            # checkpoint at all, and it is the number that settles whether a
+            # candidate model is probeable on this endpoint or needs storage
+            # it does not have. Printed because "the model did not fit on
+            # disk" and "the model does not work" are different findings and
+            # only one of them is about the model.
+            print(f"  id={t.get('id')!r} name={t.get('name')!r} image={t.get('imageName')!r}"
+                  f" containerDiskInGb={t.get('containerDiskInGb')!r}"
+                  f" volumeInGb={t.get('volumeInGb')!r}"
+                  f" volumeMountPath={t.get('volumeMountPath')!r}")
+        ids = {t.get("id") for t in templates}
+        if expected_template_id in ids:
+            print(f"FOUND: {expected_template_id} exists after all")
+            present = True
+            storage_state, storage_line = _report_storage(client, expected_template_id)
+        else:
+            print(
+                f"NOT LISTED: {expected_template_id} is not among them. That "
+                "is NOT the same as dangling — a template created inline "
+                "with an endpoint never appears in this listing. The REST "
+                "read above is what settles whether it resolves."
+            )
+
+    surface = client.rest_template_surface()
+    print("=== REST surface (from the public OpenAPI document) ===")
+    print(json.dumps(surface, indent=1, sort_keys=True))
+
+    # A template can only point at an image that already exists. If the create
+    # body takes an imageName and the API exposes no route that turns a
+    # repository into an image, then creating a template here would produce a
+    # SECOND dangling reference - the same broken state under a new id - and
+    # the console's build integration is the only way to get an image at all.
+    if surface:
+        create = surface.get("template_create_body") or {}
+        props = create.get("properties") or []
+        required = create.get("required") or []
+        print(f"CREATE REQUIRES: {required}")
+        print(f"CREATE ACCEPTS: {props}")
+        source_fields = [
+            k for k in props
+            if any(w in k.lower() for w in ("repo", "github", "git", "build", "source"))
+        ]
+        if source_fields:
+            print(f"BUILD FIELD PRESENT: {source_fields}")
+        else:
+            print(
+                "NO BUILD FIELD: the create body names an image, never a "
+                "repository - a template cannot build one"
+            )
+        build_like = surface.get("build_like_paths")
+        print(f"BUILD-LIKE PATHS ANYWHERE IN THE API: {build_like}")
+    # THE VERDICT GOES LAST. Twice now the one line this job exists to
+    # print has landed ABOVE a two-hundred-line schema dump, out of reach
+    # of anyone reading the tail of a log.
+    print("=== SUMMARY ===")
+    print(f"TEMPLATE {expected_template_id}: {'present' if present else 'absent'}")
+    if storage_line:
+        print(storage_line)
+
+    facts = {"templates": templates, "surface": surface,
+             "storage": storage_state, "rest_detail": detail}
+    if not surface or not surface.get("template_paths"):
+        print(
+            "NO TEMPLATE API: the spec exposes no template path, so creating one "
+            "is a console action. Saying so beats probing with a real POST."
+        )
+        return 1, facts
+    if storage_state in (False, None):
+        print("NOT LAUNCH READY: the storage variables above are not confirmed set")
+        return 1, facts
+    return 0, facts
+
+
+def main(argv) -> int:
+    import runpod_client
+
+    expected = argv[1] if len(argv) > 1 else "hhhdwtjw0y"
+    code, _ = report(runpod_client, expected)
+    return code
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main(sys.argv))

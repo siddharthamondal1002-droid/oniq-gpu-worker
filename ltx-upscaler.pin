@@ -1,0 +1,92 @@
+# THE SPATIAL LATENT UPSCALER PIN.
+#
+# ONE LINE, "<huggingface-repo> <revision-sha>", turns multi-scale generation
+# on. Blank and the media image is built exactly as it is today: ltxcaps
+# reports latent_upsampler_baked=false, videogen records
+# upscaler_absent_reason=latent-upsampler-not-baked on every clip, and the
+# single-scale path runs unchanged.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT IS ALREADY VERIFIED — fetched 2026-08-31, not recalled
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# REPOSITORY   a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+#              Named by the official diffusers LTX documentation
+#              (huggingface/diffusers @ main,
+#              docs/source/en/api/pipelines/ltx_video.md, line 342) as the
+#              0.9.8 latent upsampler, loaded via
+#              LTXLatentUpsamplerModel.from_pretrained and paired with
+#              LTXLatentUpsamplePipeline(vae=pipeline.vae, latent_upsampler=…).
+#              That is exactly how videogen._load_real_upsampler builds it.
+#
+#              Upstream's own comment on that line reads
+#              "TODO: Update the checkpoint here once updated in LTX org",
+#              so this is a staging location the docs point at rather than a
+#              Lightricks-org repository. That is a reason to pin a revision,
+#              not a reason to avoid the model — but it is why the revision
+#              matters more here than usual, and it belongs in the record.
+#
+# MODEL CLASS  LTXLatentUpsamplerModel, dims=3, in_channels=128,
+#              mid_channels=512, num_blocks_per_stage=4,
+#              spatial_upsample=true, temporal_upsample=false.
+#              The Dockerfile asserts every one of those fields and refuses a
+#              config that differs — a temporal or 2-D variant would construct
+#              happily and then hand the refine pass latents it cannot use.
+#
+# SIZE         126.25 M parameters, computed from the architecture in
+#              diffusers 0.38.0 (pipelines/ltx/modeling_latent_upsampler.py).
+#              At fp32 that is 505.0 MB — matching the published artifact size
+#              to the megabyte, which independently confirms dims=3.
+#              About 1.2% of the ~40 GiB media image. Disk is not the blocker.
+#
+# COMPATIBILITY  LTXLatentUpsamplePipeline takes exactly two modules, `vae` and
+#              `latent_upsampler`, so it reuses the VAE already baked and adds
+#              no other weights. Verified by reading the installed
+#              diffusers==0.38.0 source, not the documentation.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHAT IS NOT VERIFIED, AND CANNOT BE FROM THE BUILD CONTAINER
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE REVISION SHA and THE LICENCE TEXT.
+#
+# huggingface.co is refused by this environment's egress proxy (403 to
+# CONNECT, confirmed again 2026-08-31 for huggingface.co, hf.co and
+# cdn-lfs.huggingface.co). A revision sha and a repository's licence file are
+# registry metadata and exist nowhere else, so neither can be read from here.
+#
+# Writing a plausible-looking sha would be a fabrication wearing the costume
+# of a fact, and a revision IS the licence: the LTX transformer above is
+# pinned to 8984fa25007f376c1a299016d0957a37a2f797bb because the owner
+# accepted the LTX Open Weights terms as they stood at those exact bytes. An
+# agent cannot accept a licence on anyone's behalf.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# TO ENABLE — one line, after reading the licence
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#   1. Open https://huggingface.co/a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+#   2. Read the licence and satisfy yourself it permits redistribution inside
+#      ONIQ's private image, commercially.
+#   3. Take the full commit sha from the repository's history (NOT the branch
+#      name — `main` moves, and a moving pin is not a pin).
+#   4. Add it below, uncommented:
+#
+#         a-r-r-o-w/LTX-0.9.8-Latent-Upsampler <full-40-char-sha>
+#
+# The build then verifies and REFUSES if any of it fails to hold: the
+# revision must resolve to that exact sha, a LICENSE or NOTICE file must ship
+# beside the weights, config.json must match every expected field above, the
+# config must load under the installed diffusers, and the weights must be
+# inside the size guard. Nothing is trusted; everything is checked where it
+# can be checked.
+#
+# WHAT ENABLING BUYS. Measured arithmetic: the generation canvas is 704 wide
+# and the delivered film is 1080, so assembly resamples every frame UP by
+# 1.534x today, and a pixel resampler cannot invent detail that was never
+# sampled. With the upscaler present the clip is generated at 704x1248,
+# upsampled 2x IN LATENT SPACE, partially re-denoised at 1408x2496 so the
+# transformer actually synthesises the detail, and only then decoded — and the
+# film's 1080 becomes a DOWNSCALE of real detail. GPU time is unmeasured; the
+# refine pass is real additional inference at 4x the pixels and no cost claim
+# should be made about it before a real generation.

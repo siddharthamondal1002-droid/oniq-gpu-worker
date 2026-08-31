@@ -147,7 +147,14 @@ def test_sweep_reports_none_when_api_unreachable(monkeypatch):
 def test_sweep_zero_when_account_is_empty(monkeypatch):
     monkeypatch.setattr(rp, "get_pods", lambda: ("[]", []))
     monkeypatch.setattr(rp, "get_endpoints", lambda: ("[]", []))
-    assert rp.sweep_orphans() == {"pods": 0, "endpoint_min_workers": 0}
+    assert rp.sweep_orphans() == {
+        "pods": 0,
+        "endpoint_min_workers": 0,
+        # Owner-accepted always-on capacity is reported alongside the
+        # alarm count (2026-08-30), never folded into it.
+        "accepted_min_workers": 0,
+        "accepted_endpoints": {},
+    }
 
 
 def test_sweep_counts_pods_and_min_workers(monkeypatch):
@@ -155,7 +162,12 @@ def test_sweep_counts_pods_and_min_workers(monkeypatch):
     eps = [{"id": "e1", "workersMin": 1, "workersMax": 1}]
     monkeypatch.setattr(rp, "get_pods", lambda: (json.dumps(pods), pods))
     monkeypatch.setattr(rp, "get_endpoints", lambda: (json.dumps(eps), eps))
-    assert rp.sweep_orphans() == {"pods": 1, "endpoint_min_workers": 1}
+    assert rp.sweep_orphans() == {
+        "pods": 1,
+        "endpoint_min_workers": 1,
+        "accepted_min_workers": 0,
+        "accepted_endpoints": {},
+    }
 
 
 def test_discover_is_read_only_and_never_prints_the_key(monkeypatch, capsys, tmp_path):
@@ -364,3 +376,59 @@ def test_the_redactor_still_hides_real_secrets():
     assert redact({"R2_SECRET_ACCESS_KEY": "x"})["R2_SECRET_ACCESS_KEY"] == "<redacted>"
     pair = redact({"key": "RUNPOD_API_KEY", "value": "live"})
     assert pair["value"] == "<redacted>"
+
+
+# ------------------------------------------- owner-accepted always-on
+
+
+def _sweep_with(monkeypatch, endpoints, pods=()):
+    import runpod_client as rp
+
+    monkeypatch.setattr(rp, "get_pods", lambda: ("[]", list(pods)))
+    monkeypatch.setattr(rp, "get_endpoints", lambda: ("[]", list(endpoints)))
+    return rp.sweep_orphans()
+
+
+def test_an_accepted_endpoint_is_reported_but_does_not_alarm(monkeypatch):
+    """Owner directive 2026-08-30: the owner's own always-on endpoint stays
+    running, and the owner is told what it costs.
+
+    Before this, workersMin=1 on that endpoint made the sweep fire on every
+    single run. A guard that is permanently red is a guard people learn to
+    scroll past, and the day a real orphan appears it would be one more red
+    line among many.
+    """
+    result = _sweep_with(monkeypatch, [
+        {"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2},
+    ])
+    assert result["endpoint_min_workers"] == 0, "accepted capacity must not alarm"
+    assert result["accepted_min_workers"] == 1, "but it must still be reported"
+    assert result["accepted_endpoints"] == {"9gh6qbou1in8yb": 1}
+
+
+def test_any_OTHER_endpoint_still_takes_the_run_down(monkeypatch):
+    # The whole point of naming the exception: everything else still alarms.
+    result = _sweep_with(monkeypatch, [
+        {"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2},
+        {"id": "some-new-endpoint", "workersMin": 1, "workersMax": 1},
+    ])
+    assert result["endpoint_min_workers"] == 1
+
+
+def test_a_pod_still_alarms_even_with_only_accepted_endpoints(monkeypatch):
+    result = _sweep_with(
+        monkeypatch,
+        [{"id": "9gh6qbou1in8yb", "workersMin": 1, "workersMax": 2}],
+        pods=[{"id": "pod-1"}],
+    )
+    assert result["pods"] == 1
+
+
+def test_the_accepted_list_carries_a_reason_for_every_entry():
+    import runpod_client as rp
+
+    assert rp.ACCEPTED_ALWAYS_ON, "an empty list would be a silent blanket pass"
+    for endpoint_id, reason in rp.ACCEPTED_ALWAYS_ON.items():
+        assert endpoint_id and isinstance(reason, str) and len(reason) > 20, (
+            f"{endpoint_id} is accepted with no recorded reason"
+        )

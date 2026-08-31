@@ -1,0 +1,90 @@
+# READ-ONLY diagnostics that can run WHILE a paid job holds the main
+# workflow's lock.
+#
+# WHY THIS FILE EXISTS. gpu-validation.yml carries `concurrency: group:
+# gpu-validation`, which is right — two paid runs must never overlap. But
+# it also means that while a spend run is in flight, every $0 read is
+# queued behind it, and GitHub serves no logs for a job still running. So
+# for the whole length of a paid job there is no way to answer "is a
+# worker actually doing anything?".
+#
+# That blindness is not hypothetical. On 2026-08-30 four dispatches went
+# to an endpoint that had been deleted, and the only reason it was found
+# was a queue probe that had to wait for a spend run to be CANCELLED
+# first. Before that, sixteen hours went into an image pull that was
+# restarting from zero and looked identical, from here, to one making
+# progress.
+#
+# This file holds a DIFFERENT concurrency group, so it runs alongside.
+# Everything it can reach is a GET: tests/test_workflow_gates.py asserts
+# that no module named here contains a mutating verb, so it cannot become
+# a paid path by editing one line.
+name: gpu-readonly
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "model-bench = measure every benchmark candidate from the HuggingFace registry and project its VRAM against the card matrix, $0 and no GPU — run ALONE here so its A5000/minimum-GPU summary is the tail of the log rather than being clipped by a step that follows it. queue-probe = queue counts, worker states and per-worker detail across every endpoint (the 'is anything actually happening' read). template-probe = what templates exist and whether one carries the storage env. volume-probe = endpoints, their templates, network volumes and the measured storage rate."
+        type: choice
+        options: [queue-probe, template-probe, volume-probe, model-bench]
+        default: queue-probe
+      job_id:
+        description: "queue-probe: a RunPod run id to ask after. Endpoint health is printed either way, so a placeholder is fine when the id is not known — an unknown id answers 404 and the worker states still come back."
+        type: string
+        default: "unknown"
+      template_id:
+        description: "template-probe: which template to look for."
+        type: string
+        default: "aqa3wkdf8g"
+
+concurrency:
+  group: gpu-readonly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  read:
+    name: "read-only account diagnostics, $0"
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Queue, workers, and one job's status"
+        if: inputs.mode == 'queue-probe'
+        # This module's exit code is 1 when work IS live — it exists to
+        # answer a different question there (may a stale run still
+        # execute). Here a live worker is exactly what we are hoping to
+        # see, so the code is printed and not treated as failure.
+        run: |
+          set +e
+          python -m validation.queue_probe "${{ inputs.job_id }}"
+          echo "queue_probe exit: $? (1 means work is LIVE, which is not an error here)"
+      - name: "What templates exist, and is the storage env on one"
+        if: inputs.mode == 'template-probe'
+        run: |
+          set +e
+          python -m validation.template_probe "${{ inputs.template_id }}"
+          echo "template_probe exit: $?"
+      - name: "Endpoints, their templates, volumes, and the storage rate"
+        if: inputs.mode == 'volume-probe'
+        run: python -m validation.volume_probe
+      # LAST STEP, DELIBERATELY. model_bench ends with the summary that
+      # answers "which card does this model actually need" — and in
+      # gpu-validation.yml that summary is followed by the publisher-
+      # settings step, whose output pushes it out of reach of a log tail.
+      # The verdict goes last, or it may as well not be printed.
+      - name: "Measure every candidate, project the card matrix"
+        if: inputs.mode == 'model-bench'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m validation.model_bench

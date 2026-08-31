@@ -26,6 +26,7 @@ Discipline carried over from the ledger and the superloop, encoded:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import statistics
@@ -33,7 +34,7 @@ import time
 import urllib.request
 from decimal import ROUND_UP, Decimal
 
-from validation import admission
+from validation import admission, frame_pull
 
 R2_ENV_REQUIRED = ("R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
 _REDACT_MARKERS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTHORIZATION")
@@ -78,6 +79,13 @@ def redact(obj):
             upper = str(key).upper()
             if any(marker in upper for marker in _REDACT_MARKERS):
                 out[key] = "<redacted>"
+            elif key == "b64":
+                # NOT a secret — a thumbnail of a picture this run made. It
+                # is elided because the status payload is dumped twice and
+                # nearly a megabyte of base64 through it would bury every
+                # measurement beside it. save_previews prints the same bytes
+                # once, between markers, which is where they are read from.
+                out[key] = f"<{len(str(value))} base64 chars, printed once below>"
             else:
                 out[key] = redact(value)
         return out
@@ -289,15 +297,56 @@ def preflight(
     advisory preflight, which reads the configuration back.
 
     Returns the facts later stages must re-verify (never merely reuse).
+
+    OWNER DIRECTIVE 2026-08-30: REMOVE PREFLIGHT. Nothing here refuses a
+    dispatch any more.
+
+    WHY IT WENT. Every check below started as a real lesson, and by today
+    they had stopped protecting anything and become the outage themselves.
+    Production was down, the endpoint had been recreated three times, and
+    the constant naming the card still said A5000 — so a run that would
+    have drawn a still refused at endpoint-not-target without ever
+    reaching a GPU. That is a gate failing on its OWN staleness rather
+    than on the thing it was watching for, and two more behind it (the
+    exclusive-card rule, the null-price rule) would each have refused the
+    endpoint the owner had just approved.
+
+    THE CHECKS REMAIN AS REPORTING. Deleting them outright would throw
+    away the diagnostics that found today's faults — the GPU mismatch
+    printed here is precisely what identified the stale constant. So each
+    one still looks, still prints, and can no longer stop anything. A
+    WARNING in a log is worth keeping; a veto is not.
+
+    WHAT STILL BOUNDS THE SPEND, none of it in this function: the
+    endpoint's own gpuTypeIds and workersMax, enforced by RunPod rather
+    than by us; the per-job execution timeout; and the post-hoc success
+    verification, which reports what actually ran and what it cost.
     """
-    # 1. Authentication + nothing quietly running.
+    def warn(code: str, detail: str) -> None:
+        print(f"WARNING [{code}]: {detail}")
+
+    def card(name: str):
+        """One catalogue row by its canonical id, or None.
+
+        Matched on `id`, which is the field gpuTypeIds carries — the
+        display name is the marketing one and the two differ ("NVIDIA RTX
+        A6000" vs "A6000 48GB").
+        """
+        for row in catalogue_rows:
+            if isinstance(row, dict) and row.get("id") == name:
+                return row
+        return None
+
+    # 1. Authentication + anything already running (reported, not refused).
     raw_pods, pods = client.get_pods()
     pod_list = pods if isinstance(pods, list) else pods.get("pods", [])
     _show("pods (raw, redacted)", json.loads(raw_pods))
     if len(pod_list) != 0:
-        raise SpendStop("unexpected-pods", f"{len(pod_list)} pod(s) exist; expected 0")
+        warn("unexpected-pods", f"{len(pod_list)} pod(s) exist; expected 0")
 
-    # 2. Exactly one endpoint (or the one explicitly named).
+    # 2. Which endpoint to use. NOT a gate: with no endpoint there is
+    # nothing to submit to, so this is the one thing that still stops the
+    # run — and it stops for ABSENCE, never for disapproval.
     raw_eps, endpoints = client.get_endpoints()
     ep_list = endpoints if isinstance(endpoints, list) else endpoints.get("endpoints", [])
     _show("endpoints (raw, redacted)", json.loads(raw_eps))
@@ -305,39 +354,36 @@ def preflight(
         matches = [e for e in ep_list if e.get("id") == endpoint_id]
     else:
         matches = ep_list
-    if len(matches) != 1:
+    if not matches:
         raise SpendStop(
-            "endpoint-not-singular",
-            f"{len(matches)} candidate endpoint(s); need exactly one "
-            "(create it min_workers=0/max_workers=1 — an owner action)",
+            "endpoint-none",
+            f"no endpoint to submit to (asked for {endpoint_id!r} of "
+            f"{[e.get('id') for e in ep_list]}) — there is nothing to run "
+            "against, which is absence, not a refusal",
         )
+    if len(matches) > 1:
+        warn("endpoint-not-singular",
+             f"{len(matches)} candidates; using the first, {matches[0].get('id')!r}")
     endpoint = matches[0]
     parsed = client.parse_endpoint(endpoint)
     if parsed["min_workers"] is None or parsed["max_workers"] is None:
-        raise SpendStop(
-            "endpoint-fields-unparsed",
-            "worker bounds did not parse from the endpoint payload — parser "
-            "vs raw mismatch; correct parse_endpoint against the raw above",
-        )
-    admission.check_endpoint_config(parsed["min_workers"], parsed["max_workers"])
+        warn("endpoint-fields-unparsed",
+             "worker bounds did not parse from the endpoint payload")
+    else:
+        try:
+            admission.check_endpoint_config(parsed["min_workers"], parsed["max_workers"])
+        except Exception as exc:
+            warn("endpoint-config", f"{type(exc).__name__}: {exc}")
 
-    # 3. The endpoint is the target card, by id.
+    # 3. Which cards the endpoint may allocate. Printed so the log says
+    # what the job could land on; the endpoint itself is the control.
     gpu_ids = parsed.get("gpu_type_ids") or []
-    if admission.TARGET_GPU not in gpu_ids:
-        raise SpendStop(
-            "endpoint-not-target",
-            f"endpoint gpuTypeIds {gpu_ids} does not include the target "
-            f"{admission.TARGET_GPU}",
-        )
-    extras = [g for g in gpu_ids if g != admission.TARGET_GPU]
-    if extras:
-        raise SpendStop(
-            "endpoint-gpu-list-not-exclusive",
-            f"endpoint can also allocate {extras} — the scheduler may hand "
-            f"the job a non-target card, which fails the success gate AFTER "
-            f"paying for the boot; restrict the endpoint to "
-            f"{admission.TARGET_GPU} only",
-        )
+    print(f"endpoint gpuTypeIds: {gpu_ids}")
+    unapproved = [g for g in gpu_ids if g not in admission.APPROVED_GPUS]
+    if unapproved:
+        warn("endpoint-card-unapproved",
+             f"{unapproved} is outside the owner-approved set "
+             f"{list(admission.APPROVED_GPUS)}")
 
     # 4. R2 env NAMES present on the endpoint OR its template (values
     # never printed) — RunPod may store env on either object.
@@ -374,52 +420,78 @@ def preflight(
                 env_names |= graphql_names
     missing = [name for name in R2_ENV_REQUIRED if name not in env_names]
     if missing:
-        # Distinguish a POSITIVE miss (an env set is visible and lacks the
-        # names) from an UNREADABLE env (no API view exposes serverless
-        # env at all — measured 2026-08-25: list and single GET carry no
-        # env field, REST /templates 404s, GraphQL template read unknown).
-        # Blocking forever on an unreadable signal is as wrong as passing
-        # blind: when unreadable, proceed LOUDLY — the worker itself fails
-        # closed at job time with storage-not-configured naming the
-        # missing variables, bounded by the one-job reservation.
-        if env_names:
-            raise SpendStop(
-                "r2-env-missing",
-                "endpoint environment lacks: " + ", ".join(missing),
-            )
-        print(
-            "WARNING [r2-env-unverifiable]: no API view exposes the "
-            "endpoint's env; could not verify "
+        # Reported either way now. The distinction that used to decide
+        # between refusing and warning — a visible env set that LACKS the
+        # names, versus no readable env at all — is still worth printing,
+        # because the worker fails closed at job time with
+        # storage-not-configured and names them itself.
+        warn(
+            "r2-env" if env_names else "r2-env-unverifiable",
+            ("endpoint environment lacks: " if env_names
+             else "no API view exposes the endpoint's env; could not verify ")
             + ", ".join(missing)
-            + ". The worker fails closed with storage-not-configured at "
-            "job time if they are absent."
+            + " — the worker fails closed with storage-not-configured at "
+              "job time if they are absent",
         )
 
-    # 5. Test references exist (object keys, not credentials).
-    if not input_ref or not output_prefix:
-        raise SpendStop(
-            "test-refs-missing",
-            "GPU_TEST_INPUT_REF and GPU_TEST_OUTPUT_PREFIX must be set",
-        )
+    # 5. Test references (object keys, not credentials).
+    if not input_ref:
+        warn("input-ref-missing",
+             "GPU_TEST_INPUT_REF is unset — text-only ops such as "
+             "image_generate do not need one")
+    if not output_prefix:
+        warn("output-prefix-missing", "GPU_TEST_OUTPUT_PREFIX is unset")
 
-    # 6. Live price, quoted now — never the previous run's number.
+    # 6. Live price, quoted now — never the previous run's number. The
+    # FIRST approved card the catalogue actually prices wins: a null price
+    # still means NO CAPACITY, but it now moves to the next approved card
+    # instead of stopping the run.
     _, catalogue = client.gpu_catalogue()
-    target = admission.require_available(catalogue)
-    reservation = admission.admit(
-        gpu_name=target["id"],
-        vram_gb=target["memory_gb"],
-        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
-        price_per_hour=target["secure_price"],
-    )
+    catalogue_rows = catalogue or []
+    target = None
+    for name in admission.APPROVED_GPUS:
+        row = card(name)
+        if row and row.get("secure_price") is not None:
+            target = row
+            break
+    if target is None:
+        for name in admission.APPROVED_GPUS:
+            row = card(name)
+            if row:
+                target = row
+                warn("card-unpriced",
+                     f"{name} carries no secure price — quoted as unknown")
+                break
+    if target is None:
+        target = {"id": admission.TARGET_GPU, "memory_gb": None,
+                  "secure_price": None}
+        warn("card-absent",
+             f"the catalogue lists none of {list(admission.APPROVED_GPUS)}")
+    print(f"quoted card: {target.get('id')!r} at {target.get('secure_price')!r}/h")
 
-    # 7. The approval gate is real, not auto-created-and-empty. On the
-    # run path this means evidence THIS run paused and was approved; on
-    # the advisory path it means the reviewer rule reads back present.
-    if approval_evidence:
-        approved_by = check_run_approval(env_fetch)
-        reviewer_rules = f"approved:{approved_by}"
-    else:
-        reviewer_rules = check_environment_protection(env_fetch)
+    reserved_usd = None
+    headroom_usd = None
+    try:
+        reservation = admission.admit(
+            gpu_name=target["id"],
+            vram_gb=target["memory_gb"],
+            runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+            price_per_hour=target["secure_price"],
+        )
+        reserved_usd = str(reservation.reserved_usd)
+        headroom_usd = str(admission.JOB_CAP_USD - reservation.reserved_usd)
+    except Exception as exc:
+        warn("admission", f"{type(exc).__name__}: {exc}")
+
+    # 7. The approval gate, reported rather than required.
+    reviewer_rules = "unchecked"
+    try:
+        if approval_evidence:
+            reviewer_rules = f"approved:{check_run_approval(env_fetch)}"
+        else:
+            reviewer_rules = check_environment_protection(env_fetch)
+    except Exception as exc:
+        warn("approval", f"{type(exc).__name__}: {exc}")
 
     facts = {
         "endpoint_id": parsed["id"],
@@ -427,8 +499,8 @@ def preflight(
         "vram_gb": target["memory_gb"],
         "live_price_per_hour": str(target["secure_price"]),
         "runtime_ceiling_s": admission.RUNTIME_CEILING_SECONDS,
-        "reservation_usd": str(reservation.reserved_usd),
-        "headroom_usd": str(admission.JOB_CAP_USD - reservation.reserved_usd),
+        "reservation_usd": reserved_usd,
+        "headroom_usd": headroom_usd,
         "reviewer_rules": reviewer_rules,
         "input_ref": input_ref,
         "output_prefix": output_prefix,
@@ -440,15 +512,26 @@ def preflight(
 # ------------------------------------------------------------ one real job
 
 
-def requote(client) -> dict:
-    """Phase 12: immediately before provisioning, quote again."""
+def requote(client, *, ceiling_seconds: int | None = None) -> dict:
+    """Phase 12: immediately before provisioning, quote again.
+
+    `ceiling_seconds` is the window this job may occupy, and the reservation
+    is that window at the live rate. It defaults to production's; only the
+    probe passes a wider one, because a probe downloads its checkpoint before
+    it starts. Reserving 900s for a job allowed 1800 is not caution — the
+    reservation is checked AFTER the run, so it would refuse a measurement
+    that had already been paid for. The job cap is unchanged and still has to
+    clear.
+    """
+    ceiling = ceiling_seconds or admission.RUNTIME_CEILING_SECONDS
     _, catalogue = client.gpu_catalogue()
     target = admission.require_available(catalogue)
     reservation = admission.admit(
         gpu_name=target["id"],
         vram_gb=target["memory_gb"],
-        runtime_seconds=admission.RUNTIME_CEILING_SECONDS,
+        runtime_seconds=ceiling,
         price_per_hour=target["secure_price"],
+        ceiling_seconds=ceiling,
     )
     return {"price": Decimal(str(target["secure_price"])), "reservation": reservation.reserved_usd}
 
@@ -460,10 +543,11 @@ def submit_and_wait(
     *,
     poll_s: int = 5,
     watch_s: int | None = None,
+    policy: dict | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
-    _, submitted = client.submit_job(endpoint_id, job_input)
+    _, submitted = client.submit_job(endpoint_id, job_input, policy=policy)
     job_id = submitted.get("id")
     if not job_id:
         raise SpendStop("submit-unparsed", "job id missing from submit response")
@@ -475,14 +559,69 @@ def submit_and_wait(
     if watch_s is None:
         watch_s = admission.RUNTIME_CEILING_SECONDS
     deadline = clock() + watch_s
+    last_seen = "never polled"
     while clock() < deadline:
         _, status = client.job_status(endpoint_id, job_id)
         if status.get("status") in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"):
             status["_job_id"] = job_id
             return status
+        last_seen = status.get("status") or "unknown"
         sleep(poll_s)
     client.cancel_job(endpoint_id, job_id)
-    raise SpendStop("job-deadline", f"job {job_id} exceeded the ceiling; cancelled")
+    # THE WATCH EXPIRED — that is not the job exceeding any billed ceiling,
+    # and saying so cost a diagnosis once: a canary cancelled mid-pull read
+    # as a job failure. The last polled state says whether money was moving
+    # (IN_PROGRESS) or the worker was still fetching bytes (IN_QUEUE).
+    raise SpendStop(
+        "watch-deadline",
+        f"job {job_id} outlived the {watch_s}s watch (last status "
+        f"{last_seen}); cancelled — execution stays bounded by the "
+        "endpoint's executionTimeout, so an IN_QUEUE cancel billed nothing",
+    )
+
+
+# WALL-CLOCK SLACK FOR A COLD IMAGE PULL, on top of an op's execution
+# ceiling. Measured, twice, on the first job after a template retarget:
+# 1,059,077 ms of delayTime on 2026-08-29 (the 200 GB disk image), and
+# MORE THAN 1,800 s later the same day (the diffusers 0.38 rebuild),
+# where the previous +900 s allowance cancelled a healthy canary at
+# exactly its 30-minute watch — the job was still pulling, nothing had
+# billed, and the stop wore the costume of a job failure. Delay time is
+# not billed; the money bound stays the endpoint's executionTimeout and
+# the contract ceiling, so patience here risks minutes, not dollars.
+# MEASURED, twice, on 2026-08-30: a cold worker pulling this 25.38 GiB
+# image took 1h51m (08:28 -> 10:19). 2700s was set when the pull was
+# believed to be ~30 minutes and it is simply wrong against the evidence —
+# a watch that expires mid-pull cancels a job whose worker is still
+# downloading, and the next attempt starts the clock again.
+#
+# 7800s covers the measured pull with margin. It is a WATCH window, not a
+# spend ceiling: the job's own executionTimeoutMs bounds what can be
+# billed, and a worker that is pulling is not yet billing GPU time.
+# EVERY op this driver may dispatch, in ONE place.
+#
+# model_hydrate needed registering in four separate lists before it could
+# run: the contract's ALLOWED_OPS, the workflow's choice input, the
+# driver's phase-16 branch, and this gate — which was an inline tuple, so
+# the first three passing told me nothing about the fourth. The dispatch
+# was rejected after the workflow had already spun up.
+#
+# Naming the set once is the fix. A future op is added here and the gate
+# and the test read the same list, so "registered" stops being a property
+# that can be three-quarters true.
+DISPATCHABLE_OPS = (
+    "image_preprocess",
+    "image_generate",
+    "video_generate",
+    "audio_mux",
+    "model_probe",
+    # Runs no inference and writes no artifact: it puts a checkpoint on the
+    # persistent volume so a later model change is a config edit, not a
+    # 25 GiB rebuild.
+    "model_hydrate",
+)
+
+COLD_PULL_ALLOWANCE_S = 7800
 
 
 # The one motion prompt of the first media experiment — a server
@@ -500,46 +639,166 @@ VIDEO_PROMPT = (
 # 4.04s video so the canary measures the happy path, not the gate.
 AUDIO_NARRATION = "The character turns to face the light."
 
-# The five-scene battery — owner directive 2026-08-26 (Phase 6 of the
-# five-video superloop), verbatim and server-side like VIDEO_PROMPT:
-# the dispatch chooses only through_phase=18, never the text. Order and
-# wording are frozen; prompts are NOT optimized after seeing results,
-# because the purpose is measurement.
-VIDEO_BATTERY = (
-    (
-        "intro",
-        "A cinematic medium shot. The character slowly turns toward the "
-        "camera, blinks naturally and gives a subtle confident smile. "
-        "Gentle camera push forward, realistic movement, stable identity, "
-        "natural lighting.",
-    ),
-    (
-        "walk",
-        "The character slowly walks forward through the scene while the "
-        "camera tracks backward smoothly. Natural body movement, realistic "
-        "footsteps, stable appearance, cinematic lighting.",
-    ),
-    (
-        "react",
-        "The character looks toward something off camera, pauses, and "
-        "gradually shows surprise and concern. Subtle facial movement, "
-        "natural blinking, stable identity, cinematic close-up.",
-    ),
-    (
-        "environment",
-        "The character stands still while the surrounding environment "
-        "moves naturally: subtle wind, moving background elements and "
-        "changing light. The camera slowly pans sideways. Cinematic "
-        "realism.",
-    ),
-    (
-        "hero",
-        "The character looks directly toward the camera and slowly moves "
-        "forward. The camera gently pushes in while the character "
-        "maintains consistent appearance and natural expression. Cinematic "
-        "final-shot composition.",
-    ),
+# The five-shot ACTION BATTERY — owner directive 2026-08-29, replacing
+# the 2026-08-26 five-scene battery outright. Each shot is an ACTION
+# CONTRACT: a structured statement of who moves, from what state to what
+# state, what the camera does and what the environment does. The
+# contract is the SOURCE OF TRUTH and stays separate from the LTX
+# prompt — the prompt is DERIVED by compile_motion_prompt() and never
+# hand-edited per shot, so a quality verdict on a clip always traces
+# back to a named field rather than to prompt wording nobody recorded.
+# Server-side like VIDEO_PROMPT: the dispatch chooses only
+# through_phase=18, never the text. Every output name is unique per
+# shot, and none is a calibration fixture basename (measured 2026-08-29
+# — see the rename notes at the canary output keys in main()).
+ACTION_BATTERY = (
+    # Owner directive 2026-08-29 (multi-reference conditioning): each
+    # shot names the REFERENCE it actually needs ("plate": a reference
+    # id, mapped to a server-derived key — never a path) and carries the
+    # owner's shot prompt VERBATIM. The action contract stays separate
+    # from the prompt: the contract is what the footage is judged
+    # against, the prompt is what the model is asked.
+    {
+        "slug": "maya-turns",
+        "output": "shot-001-maya-turns.mp4",
+        "plate": "a",
+        "prompt": (
+            "Maya stands on the abandoned railway platform beside the "
+            "small girl holding a red balloon. Maya slowly turns her "
+            "head and upper body toward the distant railway while the "
+            "girl remains beside her. Their faces, clothing, body "
+            "proportions, red balloon, and surrounding platform remain "
+            "visually consistent throughout the shot. Gentle cinematic "
+            "push-in."
+        ),
+        "contract": {
+            "subject": "Maya",
+            "start_state": "standing on the platform beside the girl",
+            "action": "slowly turns her head and upper body toward the "
+                      "distant railway",
+            "end_state": "facing toward the railway",
+            "camera_action": "gentle push-in (secondary to the turn)",
+            "environment_action": "the girl remains beside her",
+            "required_motion": "head_and_body_rotation",
+        },
+    },
+    {
+        "slug": "maya-walks",
+        "output": "shot-002-maya-walks.mp4",
+        "plate": "a",
+        "prompt": (
+            "Maya slowly walks along the abandoned railway platform "
+            "while the small girl holding the red balloon remains "
+            "nearby. Maya takes visible, natural steps forward. Her "
+            "face, hair, clothing, body proportions and the girl's "
+            "appearance remain consistent throughout the shot. The red "
+            "balloon moves naturally with the girl. Gentle cinematic "
+            "tracking shot."
+        ),
+        "contract": {
+            "subject": "Maya",
+            "start_state": "standing on the platform near the girl",
+            "action": "walks along the platform with visible, natural "
+                      "steps",
+            "end_state": "several steps further along the platform",
+            "camera_action": "gentle tracking shot",
+            "environment_action": "the balloon moves naturally with the "
+                                  "girl",
+            "required_motion": "walking_legs_and_body",
+        },
+    },
+    {
+        "slug": "train-approaches",
+        "output": "shot-003-train-approaches.mp4",
+        "plate": "b",
+        "prompt": (
+            "A black train slowly approaches the abandoned railway "
+            "platform from the distance. The train visibly changes "
+            "position and becomes progressively closer. Its body, "
+            "windows, headlights and structure remain consistent "
+            "throughout the shot. The railway environment remains "
+            "stable. Cinematic slow forward movement."
+        ),
+        "contract": {
+            "subject": "the black train",
+            "start_state": "distant on the railway line",
+            "action": "visibly changes position and becomes "
+                      "progressively closer to the platform",
+            "end_state": "noticeably closer and larger in frame",
+            "camera_action": "static; camera movement must not be the "
+                             "only source of apparent motion",
+            "environment_action": "the railway environment remains "
+                                  "stable",
+            "required_motion": "train_translation",
+        },
+    },
+    {
+        "slug": "train-door-opens",
+        "output": "shot-004-train-door-opens.mp4",
+        "plate": "b",
+        "prompt": (
+            "The black train is stopped at the abandoned railway "
+            "platform. A clearly visible train door begins closed and "
+            "then physically opens. The same train, doorway, windows "
+            "and surrounding platform remain consistent throughout the "
+            "shot. The door movement is continuous and clearly visible."
+        ),
+        "contract": {
+            "subject": "the train door",
+            "start_state": "closed, on the train stopped at the "
+                           "platform",
+            "action": "physically opens in one continuous visible "
+                      "movement",
+            "end_state": "open",
+            "camera_action": "static",
+            "environment_action": "train and platform remain "
+                                  "consistent",
+            "required_motion": "door_slide",
+        },
+    },
+    {
+        "slug": "maya-interacts",
+        "output": "shot-005-maya-interacts.mp4",
+        "plate": "a",
+        "prompt": (
+            "The small girl holding the red balloon stands beside Maya "
+            "on the abandoned railway platform. The girl slowly raises "
+            "one hand and points toward the darkness behind Maya. Maya "
+            "notices the gesture and turns slightly toward the girl. "
+            "Both characters remain visually consistent throughout the "
+            "shot. The red balloon remains visible and attached to the "
+            "girl's hand."
+        ),
+        "contract": {
+            "subject": "the girl and Maya",
+            "start_state": "standing near each other on the platform",
+            "action": "the girl raises one hand and points; Maya "
+                      "notices and turns slightly toward her",
+            "end_state": "girl's hand raised, Maya turned toward her",
+            "camera_action": "static to gentle push-in",
+            "environment_action": "the balloon stays attached to the "
+                                  "girl's hand",
+            "required_motion": "arm_raise_and_reaction",
+        },
+    },
 )
+
+
+def compile_motion_prompt(shot_contract: dict) -> str:
+    """One LTX motion prompt, DERIVED from an action contract.
+
+    Pure text assembly — no I/O, no state, no defaults. The contract
+    stays the source of truth: change a field and the prompt, the log
+    line and the recorded row all change together, which is the whole
+    reason the prompt is compiled rather than written five times by
+    hand and drifted five separate ways."""
+    return (
+        f"{shot_contract['subject']}, {shot_contract['start_state']}, "
+        f"{shot_contract['action']}; ends {shot_contract['end_state']}. "
+        f"Camera: {shot_contract['camera_action']}. "
+        f"Environment: {shot_contract['environment_action']}. "
+        "Stable identity, consistent scene, realistic motion."
+    )
 
 
 # ONIQ's own image engine (fully in-house directive, 2026-08-27). Same
@@ -547,6 +806,132 @@ VIDEO_BATTERY = (
 IMAGE_PROMPT = (
     "A quiet street at night after rain, a single lamp overhead, wet "
     "asphalt reflecting the light. Cinematic, photographic, no text."
+)
+
+# THE MULTI-REFERENCE CONDITIONING PLATES — owner directive 2026-08-29.
+#
+# Two generated plates, plate-001 and plate-002, PROVED that this model
+# cannot hold Maya + girl + balloon + train in one text-to-image frame:
+# the first kept early clauses and dropped the rest (plus an invented
+# man), the second kept one subject and the weather and dropped both the
+# girl and the train — and put the lone figure ON the tracks despite an
+# explicit "no figures on the tracks", which is negation-blindness
+# measured twice. Both PLATE_INVALID, $0.02 of measured evidence.
+#
+# So the architecture changed instead of the wish: STOP asking one image
+# to describe the whole movie. Each shot names the reference it actually
+# needs — PLATE_A carries the characters, PLATE_B carries the train —
+# and each plate prompt stays inside the two-to-three-element adherence
+# budget the failures measured. POSITIVE DESCRIPTIONS ONLY: exclusions
+# demonstrably backfire on this model, so there are none.
+# PLATE A, MEASURED 2026-08-29 — GATE FAILED, prompt left as the owner
+# specified it. Job b1971009-4b48-46b2-b7b1-5e3905d56d7e-u1, A5000,
+# 489,326 bytes at validation/out/plate-a.png, $0.01. Retrieved and
+# looked at; the byte count matches output_bytes exactly, so these are
+# the pixels LTX produced.
+#
+#   Maya clearly identifiable ........ PASS
+#   girl clearly identifiable ........ FAIL  no face, no legs; the lower
+#                                            body is translucent and
+#                                            dissolves into the sleepers
+#   girl properly positioned ......... FAIL  beside Maya, but both stand
+#                                            in the track bed, not on the
+#                                            platform, and she has no
+#                                            ground contact
+#   red balloon unmistakable ......... FAIL  no balloon exists anywhere
+#   no significant deformation ....... FAIL  (the girl, above)
+#   no unwanted character ............ PASS  exactly two figures
+#
+# The balloon did not come out faint, it came out as something else.
+# Saturated red totals 42 px in a 34x9 box (0.01% of frame); loosening
+# the threshold grows it to a 66x10 streak ~10 px thick, aspect 6.6. A
+# balloon is a compact blob with aspect near 1; every threshold measures
+# a CORD. The model kept the hand-holds-string relation, dropped the
+# object on the end of it, and resolved the leftover woman + cord +
+# small figure into the likeliest scene that fits: walking a dog. The
+# second figure even wears a harness.
+#
+# So the split into two plates did not go far enough. This prompt still
+# carries two characters plus a prop plus staging plus weather, which is
+# past the ~2-3 element adherence ceiling measured on plate-001 and
+# plate-002. Splitting the MOVIE across plates fixed the plate count; it
+# did not reduce what any one plate is asked to hold. Fixing that is a
+# spec change and belongs to the owner, not to this file.
+PLATE_A_PROMPT = (
+    "Maya, a young adult woman in a dark coat, stands on an abandoned "
+    "railway station platform in the rain. A small girl stands a few "
+    "steps beside her on the platform, holding a bright red balloon on "
+    "a string. Both characters are fully visible head to toe, with the "
+    "empty platform and misty air around them. Rainy, eerie, cinematic, "
+    "photographic realism."
+)
+
+PLATE_B_PROMPT = (
+    "A black passenger train stands on the tracks beside an abandoned "
+    "railway station platform in the rain. The train is large and "
+    "clearly visible, its dark body, windows and closed doors facing "
+    "the platform, the track stretching away behind it. Mist, wet "
+    "surfaces, eerie cinematic atmosphere, photographic realism."
+)
+
+# Where each plate lives, relative to the run's output prefix. The
+# battery derives every input_key from THESE — a reference ID in the
+# shot maps to a server-derived key, and no caller-supplied path exists
+# anywhere on this route (the same fence inHouseMotion holds).
+PLATE_KEYS = {"a": "plate-a.png", "b": "plate-b.png"}
+
+# THE BENCHMARK'S CONTROLLED REFERENCE — owner directive 2026-08-29.
+#
+# Deliberately the opposite of every plate that came before it. plate-001,
+# plate-002 and plate-a each failed because they asked one image model to
+# stage a whole scene — two characters, a prop, a train, weather, staging —
+# and the measured adherence ceiling is two or three elements. Those failures
+# are not this benchmark's problem to re-run: they are the reason this
+# reference has ONE subject and nothing else.
+#
+# The purpose here is NOT to test image adherence. It is to give five video
+# models the same starting frame so their MOTION and IDENTITY can be
+# compared. A reference the image engine can draw reliably is therefore a
+# design requirement, not a compromise — anything harder makes the reference
+# itself the variable.
+#
+# One adult, plain background, upper body, facing camera. No props, no second
+# person, no environment, no weather. Positive description only.
+PROBE_REFERENCE_PROMPT = (
+    "A photographic portrait of one adult woman standing against a plain "
+    "light grey studio background. She faces the camera. Her head, "
+    "shoulders and upper body are clearly visible and well lit. Sharp "
+    "focus, natural skin tones, simple and clean."
+)
+PROBE_REFERENCE_KEY = "probe-reference.png"
+
+# THE COMMON TEST. Same conceptual action for every candidate, so what is
+# compared is temporal and identity capability rather than prompt complexity.
+# Camera movement alone does not count and the sentence says so: the required
+# motion is the SUBJECT's head and upper body, and the camera is pinned still
+# precisely to remove the cheapest way for a model to look alive.
+def probe_shape_line(row: dict) -> str:
+    """One row's shape, sayable for EVERY row shape the table allows.
+
+    A row without width/height is not missing them: HunyuanVideo-1.5 derives
+    its canvas from the reference image's aspect against its trained buckets,
+    and indexing row['width'] in the driver crashed for exactly that row
+    (found free, by reading, 2026-08-29). Tested over every row in the table
+    so the next canvas-less candidate cannot reintroduce it.
+    """
+    seconds = row["frames"] / row["fps"]
+    if row.get("width"):
+        return (f"{row['width']}x{row['height']}x{row['frames']} "
+                f"@ {row['fps']}fps  ({seconds:.2f}s)")
+    return (f"canvas derived from the reference image (trained buckets), "
+            f"{row['frames']} frames @ {row['fps']}fps  ({seconds:.2f}s)")
+
+
+PROBE_ACTION_PROMPT = (
+    "The woman slowly turns her head and upper body toward the camera. "
+    "Her face, hair, clothing and body proportions stay the same "
+    "throughout. The background stays plain and still. The camera does "
+    "not move."
 )
 
 
@@ -592,6 +977,19 @@ def contract_video_canvas() -> tuple:
     return (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
 
 
+def contract_probe_ceiling_ms() -> int:
+    """The benchmark's window, in the milliseconds RunPod's policy wants.
+
+    ONE source. If the worker's deadline and the provider's job policy came
+    from two numbers, whichever was smaller would kill the job and the other
+    would be a comment — and the measurement would be lost to a disagreement
+    nobody wrote down.
+    """
+    import contract
+
+    return contract.PROBE_RUNTIME_CEILING_SECONDS * 1000
+
+
 def verify_gpu_success(output) -> None:
     """Phase 14: HTTP 200 alone is insufficient, and so is each of these
     alone — all must hold."""
@@ -599,9 +997,16 @@ def verify_gpu_success(output) -> None:
         raise SpendStop("job-not-ok", f"worker did not report ok; code={None if not isinstance(output, dict) else output.get('code')}")
     if output.get("device") != "cuda":
         raise SpendStop("not-cuda", "device is not cuda — CPU fallback is not success")
-    if output.get("gpu_name") != admission.TARGET_GPU:
+    # MEMBERSHIP, NOT EQUALITY, since 2026-08-30. The endpoint may now
+    # allocate either owner-approved card, so pinning one name here would
+    # mark a perfectly good A40 render as a failure AFTER the boot was
+    # paid for — the precise trap the old exclusive-card preflight existed
+    # to avoid, reintroduced at the other end of the job.
+    if output.get("gpu_name") not in admission.APPROVED_GPUS:
         raise SpendStop(
-            "wrong-gpu", f"gpu_name is not the owner-settled card ({admission.TARGET_GPU})"
+            "wrong-gpu",
+            f"gpu_name {output.get('gpu_name')!r} is not one of the "
+            f"owner-approved cards {list(admission.APPROVED_GPUS)}",
         )
     if output.get("vram_peak_mb") is None:
         raise SpendStop("no-vram-peak", "peak VRAM was not measured")
@@ -769,6 +1174,120 @@ def actual_cost_usd(execution_ms, price_per_hour: Decimal) -> Decimal:
     return exact.quantize(Decimal("0.01"), rounding=ROUND_UP)
 
 
+PREVIEW_DIR = "frames"
+
+
+def save_previews(output, output_key: str, out_dir: str = PREVIEW_DIR) -> list:
+    """Write the thumbnails the worker sent back, and print them for reading.
+
+    They land in the SAME directory frame_pull writes to, so the workflow's
+    existing inline-and-upload steps carry them without knowing where they
+    came from — a preview and a pulled frame are both just a JPEG of
+    something the GPU made.
+
+    The base64 also goes to stdout between markers, because the artifact zip
+    lives on a blob store some review environments cannot reach while the log
+    is always readable. That is the whole point of the mechanism: the bucket
+    is private, so this is the only path by which anyone sees the pixels.
+
+    Never fatal. A run that generated a clip and failed to save its thumbnail
+    has still generated the clip, and the measurements are the deliverable.
+    """
+    frames = (output or {}).get("preview_frames") or []
+    if not isinstance(frames, list) or not frames:
+        return []
+    stem = os.path.basename(output_key).rsplit(".", 1)[0]
+    written = []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"preview: cannot write {out_dir} ({type(exc).__name__})")
+        return []
+    for entry in frames:
+        if not isinstance(entry, dict) or not entry.get("b64"):
+            continue
+        name = f"{stem}.preview-{int(entry.get('i', len(written))):04d}.jpg"
+        path = os.path.join(out_dir, name)
+        try:
+            data = base64.b64decode(entry["b64"], validate=True)
+            with open(path, "wb") as handle:
+                handle.write(data)
+        except Exception as exc:  # noqa: BLE001
+            print(f"preview: {name} could not be decoded ({type(exc).__name__})")
+            continue
+        written.append(path)
+        print(f"=== PREVIEW b64 {name} {len(data)} ===")
+        text = entry["b64"]
+        for start in range(0, len(text), 3800):
+            print(text[start : start + 3800])
+        print(f"=== END {name} ===")
+    print(f"preview: {len(written)} frame(s) returned by the worker for {stem}")
+    return written
+
+
+def probe_failure(output) -> str:
+    """The named stage a probe stopped at, or "" if this is not one.
+
+    Only the vocabulary modelprobe can emit counts. An arbitrary error code
+    is NOT a probe result — it is a broken run, and it must still stop the
+    harness rather than being written down as though the candidate had been
+    evaluated. QUALITY_FAIL is not in that vocabulary and never will be:
+    this path cannot see frames.
+    """
+    if not isinstance(output, dict) or output.get("ok") is not False:
+        return ""
+    import modelprobe
+
+    code = str(output.get("code") or "")
+    return code if code in modelprobe.FAILURES else ""
+
+
+def derived_probe_frames(row: dict, *, read=None) -> int:
+    """The frame count to dispatch for a row that derives one.
+
+    Owner directive 2026-08-30 section 10 requires the count be READ from
+    the checkpoint's legal frame-count rule and the shortest valid useful
+    one selected — not the previous 121, and not a 61 picked because it
+    sounds safer.
+
+    THIS DERIVES IT AT DISPATCH TIME rather than trusting the number the
+    free preflight printed. Both read the same pinned revision through the
+    same reader, so they agree; but a number copied out of an earlier run's
+    log is a recollection, and section 17 is explicit that a recollection
+    must never be presented as a measurement.
+
+    Fails closed. There is deliberately no fallback, because the only
+    available fallback is the row's own 121 — the exact configuration the
+    directive rules out.
+    """
+    from validation import hunyuan_preflight as _hp
+
+    reader = read or _hp.shortest_useful_frames
+    try:
+        chosen = reader(row["repo"], row["revision"], row["fps"])
+    except _hp.PreflightFailure as exc:
+        raise SpendStop(
+            "frames-underived",
+            f"the legal frame count could not be derived from "
+            f"{row['repo']}@{row['revision']}: {exc}. Dispatching the row's "
+            f"own {row.get('frames')!r} instead is the configuration the "
+            "owner directive rules out, so nothing is dispatched.",
+        ) from exc
+    frames = chosen.get("frames")
+    if not isinstance(frames, int) or frames < 1:
+        raise SpendStop(
+            "frames-underived",
+            f"the derivation returned {frames!r}, which is not a frame count",
+        )
+    print(
+        f"  frames DERIVED from the checkpoint's VAE (temporal ratio "
+        f"{chosen.get('ratio')!r}): {frames} @ {row['fps']}fps = "
+        f"{chosen.get('seconds')}s — the shortest legal useful count, not "
+        f"the row's published {row.get('frames')}"
+    )
+    return frames
+
+
 def one_job(
     client,
     facts: dict,
@@ -776,51 +1295,184 @@ def one_job(
     output_key: str,
     op: str = "image_preprocess",
     prompt: str | None = None,
+    input_key: str | None = None,
+    model: str | None = None,
+    preview: bool = False,
+    frames: int | None = None,
     sleep=time.sleep,
     clock=time.monotonic,
 ) -> dict:
     """Phases 12-16 for a single job. Fail-closed at every boundary.
 
-    `prompt` may only ever be one of this module's own constants
-    (VIDEO_PROMPT or a VIDEO_BATTERY scene) — no caller input reaches it,
-    because the workflow exposes no prompt field at all."""
-    quote = requote(client)
-    payload = {
-        "op": op,
-        "input_key": facts["input_ref"],
-        "output_key": output_key,
-    }
+    `prompt` may only ever come from this module's own constants
+    (VIDEO_PROMPT, PLATE_A_PROMPT/PLATE_B_PROMPT, or an ACTION_BATTERY
+    shot's stored prompt) — no caller input reaches it, because the
+    workflow exposes no prompt field at all."""
+    quote = requote(
+        client,
+        ceiling_seconds=(
+            contract_probe_ceiling_ms() // 1000 if op == "model_probe" else None
+        ),
+    )
+    if op == "model_hydrate":
+        # Hydration reads no object and writes none: it puts a checkpoint on
+        # the persistent volume. The contract admits op + model ONLY, so
+        # sending an input_key or output_key here would be refused — which
+        # is the point, since a hydrate that quietly accepted keys would
+        # look like a generation that produced nothing.
+        payload = {"op": op, "model": model}
+    else:
+        payload = {
+            "op": op,
+            # Per-shot conditioning (owner directive 2026-08-29): a shot that
+            # names its own reference passes it here; everything else keeps
+            # the run-wide test input. Both are server-derived — no caller
+            # path reaches this field.
+            "input_key": input_key or facts["input_ref"],
+            "output_key": output_key,
+        }
+    if model is not None:
+        # model_probe and model_hydrate carry this, and the worker's contract
+        # admits it on no other op — an id into the worker's own table,
+        # never a repository or a path. Re-setting it for hydrate (whose
+        # payload already holds it) is a deliberate no-op: the assignment
+        # stays a single unconditional line so the gate that greps for it
+        # keeps meaning what it says.
+        payload["model"] = model
+    if preview:
+        # The BENCHMARK asks; production never does. The bucket is private by
+        # owner directive, this harness holds no storage credential, and a
+        # reference nobody can look at cannot be approved — so the worker
+        # hands a thumbnail back beside the numbers. It changes nothing about
+        # what is generated, uploaded, or billed.
+        payload["preview"] = True
     watch_s = None
+    policy = None
+    if op == "model_hydrate":
+        # A hydrate on a cold worker waits for the SAME pull every other op
+        # waits for, and then downloads 32.26 GiB to the volume. Without an
+        # explicit window it inherits the default and is cancelled while the
+        # worker is still fetching the image.
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
+    if op == "model_probe":
+        # THE PIN IS CHECKED HERE FOR FREE, before RunPod hears anything. The
+        # worker's spec() refuses an unpinned revision too, but its refusal
+        # arrives on a rented card; this one costs nothing. A row still
+        # wearing PENDING-REGISTRY-PIN is waiting on the $0 registry read
+        # (mode model-bench) and must not be dispatched at all.
+        import re as _re
+
+        import modelprobe as _modelprobe
+
+        _row = _modelprobe.PROBE_MODELS.get(model or "")
+        if _row and not _re.match(r"^[0-9a-f]{40}$", _row.get("revision") or ""):
+            raise SystemExit(
+                f"REFUSED: probe row {model!r} revision "
+                f"{_row.get('revision')!r} is not a pinned commit sha — run "
+                "the $0 model-bench read and pin it before dispatching"
+            )
+        # PER-JOB, probe only. The endpoint's own executionTimeoutMs is 600000
+        # and stays there: raising it would change the spend bound of every
+        # production job. This raises it for THIS job, to the probe ceiling the
+        # contract sets — the same window the worker's own deadline uses, so
+        # the two agree instead of one killing the other mid-measurement.
+        policy = {"executionTimeout": contract_probe_ceiling_ms()}
+        # THE WATCH MUST OUTLAST THE WINDOW IT AUTHORISED, PLUS THE PULL.
+        #
+        # watch_s is wall clock and covers queue + cold boot as well as
+        # execution. The first job after a new image was attached measured a
+        # delayTime of 1,059,077 ms — 17.6 minutes, pulling ~40 GiB onto the
+        # worker before execution began. Against the old +900s allowance a
+        # probe that legitimately used its full 1800s window would have been
+        # CANCELLED at 45 minutes, after the rental was already spent, and
+        # the cancellation would have looked like a model failure.
+        #
+        # A full probe ceiling of slack instead: 30 minutes of delay against
+        # a measured 17.6, so a slower pull still lands inside it.
+        watch_s = 2 * (contract_probe_ceiling_ms() // 1000)
+        # THE PROMPT HAS TO BE IN THE PAYLOAD, not merely in a parameter.
+        # `prompt` was accepted by this function and never written into the
+        # body for this op, so the worker's contract refused the job with
+        # "params.prompt must be a non-empty string" — 67ms of billed
+        # execution, and a probe that never got as far as naming a model.
+        # Every op that carries a prompt now sets it in the SAME place.
+        payload["params"] = {"prompt": prompt or PROBE_ACTION_PROMPT}
+        if frames is not None:
+            # DERIVED, never tabled — owner directive section 10. The row's
+            # own 121 is legal for this VAE, so nothing downstream would
+            # refuse it; it would simply cost two and a half times the
+            # runtime the benchmark needs. See derived_probe_frames.
+            payload["params"]["frames"] = frames
     if op == "image_generate":
         # Text-only by contract: sending an input_key is refused by the
         # worker, so the harness must not send one either.
         payload.pop("input_key")
         payload["params"] = {"prompt": prompt or IMAGE_PROMPT}
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     if op == "video_generate":
         payload["params"] = {"prompt": prompt or VIDEO_PROMPT}
         # queue + first pull of the model-baked image can be many minutes
-        # of delayTime before bounded execution even starts.
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        # of delayTime before bounded execution even starts — and after a
+        # retarget it measured over thirty (see COLD_PULL_ALLOWANCE_S).
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     if op == "audio_mux":
         # The canary narration is a module constant, same discipline as
         # VIDEO_PROMPT: the dispatch never chooses the text. The input is
         # an EXISTING video artifact — nothing is generated to test audio.
         payload["params"] = {"narration": AUDIO_NARRATION}
-        watch_s = admission.RUNTIME_CEILING_SECONDS + 900
+        watch_s = admission.RUNTIME_CEILING_SECONDS + COLD_PULL_ALLOWANCE_S
     status = submit_and_wait(
         client,
         facts["endpoint_id"],
         payload,
         watch_s=watch_s,
+        policy=policy,
         sleep=sleep,
         clock=clock,
     )
     _show("job status (raw, redacted)", status)
     if status.get("status") != "COMPLETED":
         raise SpendStop("job-failed", f"terminal status {status.get('status')}")
-    if op == "audio_mux":
+    if op == "model_hydrate":
+        # NOTHING WAS GENERATED, so verify_gpu_success cannot apply: it
+        # requires a CUDA device, a peak VRAM figure and an output artifact,
+        # and a hydration produces none of the three by design. What it must
+        # prove instead is that the checkpoint is on the volume and
+        # verifiable, which is exactly what the marker records.
+        out = status.get("output") or {}
+        if out.get("state") != "READY":
+            raise SpendStop(
+                "hydrate-not-ready",
+                f"hydration reported state {out.get('state')!r}; the model is "
+                "not usable and a probe against it would spend to find that "
+                "out on a rented card",
+            )
+        if not out.get("already_present") and not out.get("manifest_sha256"):
+            raise SpendStop(
+                "hydrate-unverified",
+                "a fresh hydration reported READY with no manifest digest; "
+                "READY without a manifest is a word, not a proof",
+            )
+        print(f"hydrate {out.get('model_id')} -> {out.get('state')} "
+              f"({out.get('bytes')} bytes, {out.get('file_count')} files, "
+              f"already_present={out.get('already_present')})")
+    elif op == "audio_mux":
         verify_audio_success(status.get("output"))
+    elif op == "model_probe" and probe_failure(status.get("output")):
+        # A NAMED PROBE FAILURE IS A RESULT, NOT A BROKEN RUN. Owner
+        # directive 2026-08-29: "if a candidate OOMs, record the OOM, stop
+        # that candidate." verify_gpu_success would raise job-not-ok here and
+        # take the row down with it — the GPU was rented, the failure was
+        # measured, and refusing to write it down would leave the benchmark
+        # with a gap where an answer belongs.
+        #
+        # The guard it replaces is not weakened: the row still carries the
+        # stage that broke, so a failed candidate can never read as SUCCESS,
+        # and an UNNAMED failure still raises below.
+        print(
+            f"probe FAILED at {status['output'].get('code')} — recorded as a "
+            "result for this candidate, not retried and not escalated"
+        )
     else:
         verify_gpu_success(status.get("output"))
     if op == "video_generate":
@@ -872,6 +1524,50 @@ def one_job(
                 ),
             }
         )
+    if op == "model_probe":
+        # EVERY column the benchmark compares on, surfaced in the run log
+        # rather than left inside a raw payload nobody reads. Cost stays out:
+        # the worker does not know the live rate, and it is attached below
+        # from this run's own quote, labelled as an estimate from measured
+        # runtime unless the provider states billing itself.
+        out = status["output"]
+        row.update(
+            {
+                "label": out.get("label"),
+                "repo": out.get("repo"),
+                "revision": out.get("revision"),
+                "licence": out.get("licence"),
+                "dtype": out.get("dtype"),
+                "offload": out.get("offload"),
+                "failure": out.get("failure"),
+                "resolution": f"{out.get('width')}x{out.get('height')}",
+                "frames": out.get("frames"),
+                "fps": out.get("fps"),
+                "download_ms": out.get("download_ms"),
+                "model_load_ms": out.get("model_load_ms"),
+                "conditioning_load_ms": out.get("conditioning_load_ms"),
+                "inference_ms": out.get("inference_ms"),
+                "encode_ms": out.get("encode_ms"),
+                "total_wall_ms": out.get("total_wall_ms"),
+                "vram_total_bytes": out.get("vram_total_bytes"),
+                "peak_allocated_bytes": out.get("peak_allocated_bytes"),
+                "peak_reserved_bytes": out.get("peak_reserved_bytes"),
+                "disk_total_bytes": out.get("disk_total_bytes"),
+                "disk_free_bytes": out.get("disk_free_bytes"),
+                "download_bytes": out.get("download_bytes"),
+                "output_bytes": out.get("output_bytes"),
+                # WHICH sampling this row actually ran at, and where that
+                # came from. Candidates compared at different step counts is
+                # a legitimate benchmark only if every row says so.
+                "steps": out.get("steps"),
+                "guidance": out.get("guidance"),
+                "sampling_source": out.get("sampling_source"),
+                # The rate is this run's LIVE quote; the product of it and a
+                # measured runtime is an estimate and says so.
+                "cost_basis": "ESTIMATED FROM MEASURED RUNTIME",
+                "live_rate_usd_per_hour": str(quote["price"]),
+            }
+        )
     if op == "audio_mux":
         out = status["output"]
         row.update(
@@ -887,6 +1583,7 @@ def one_job(
                 "output_bytes": out.get("output_bytes"),
             }
         )
+    save_previews(status.get("output"), output_key)
     _show("job row", row)
     if termination["status"] != TERMINATION_CONFIRMED:
         raise SpendStop(
@@ -896,7 +1593,7 @@ def one_job(
     return row
 
 
-# ----------------------------------------------------- five-scene battery
+# ----------------------------------------------- five-shot action battery
 
 
 def record_standby_state(client) -> None:
@@ -943,28 +1640,148 @@ def record_standby_state(client) -> None:
         )
 
 
-def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic) -> list:
-    """The owner's five-scene battery: exactly five video jobs, strictly
-    sequential, each with its own requote/admission, verification,
-    billing reconciliation and termination confirmation — one_job raises
-    on ANY failure or UNKNOWN termination, which stops the battery cold
-    with no retry and no next submission (Phase 7)."""
+def require_reference(facts: dict, key: str, *, fetch=None) -> None:
+    """The probe's conditioning image must EXIST before a GPU is rented.
+
+    Run 72 paid for a job whose input had already been deleted from the
+    bucket, and the failure looked identical to a model problem. A probe is
+    worse: the worker would download tens of gigabytes of weights, load them,
+    and only then discover there is nothing to condition on — the entire
+    watchdog window spent to learn something a free HTTP read knew.
+
+    Same check require_plates makes, for the one image the benchmark shares.
+
+    WITHOUT A PUBLIC READ BASE this check cannot run, and that is not a
+    reason to refuse the probe — because the guarantee it protects is
+    already enforced somewhere better. handler downloads `input_key` BEFORE
+    it dispatches to modelprobe, so a reference that is missing fails the
+    job in the time one R2 GET takes, not after a 44-118 GiB weight fetch.
+    Run 72's own failure was 202ms of billed execution, which is the
+    measurement of that cost. test_handler asserts the ordering, so this is
+    a proven property rather than a reading of the code.
+
+    The owner's bucket is private by directive 2026-08-29, so this branch is
+    the normal one. Nothing here converts an unknown into a success: the
+    check is announced as not-run, and the probe row carries that fact.
+    """
+    # UNSET AND UNUSABLE ARE THE SAME SITUATION. The repository variable is
+    # literally the string "on" — someone set an on/off flag where a URL
+    # belongs — so `if not base` is False and the old code went on to build a
+    # URL out of it, failed, and reported the REFERENCE as missing. That is a
+    # false accusation against an image that exists: it cost a refused
+    # dispatch on 2026-08-29 and, worse, it blamed the artifact for a
+    # configuration fault. The base is validated first now, and a base that
+    # cannot make a URL means the check cannot run — not that the file is
+    # gone.
+    base = os.environ.get("R2_PUBLIC_BASE_URL", "")
+    usable = ""
+    if base:
+        try:
+            usable = frame_pull.normalise_base(base)
+        except frame_pull.FramePullError as exc:
+            print(f"reference PRE-CHECK UNAVAILABLE: {exc.code} — {exc.message}")
+    if not usable:
+        print(
+            f"reference NOT PRE-CHECKED: {key} — no usable public read base "
+            "is configured, and the production bucket is private by owner "
+            "directive. The worker downloads the reference before it fetches "
+            "any weights, so a missing one costs a sub-second failure rather "
+            "than a rented window (measured: 202ms, run 72)."
+        )
+        return
+    getter = fetch or frame_pull._fetch
+    try:
+        data = getter(frame_pull.public_url(usable, key))
+    except Exception as exc:  # noqa: BLE001
+        raise SpendStop(
+            "reference-missing",
+            f"{key} could not be read: {type(exc).__name__}: {exc}",
+        ) from exc
+    if not data or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SpendStop(
+            "reference-missing",
+            f"{key} is not a PNG — the reference must be drawn and "
+            "inspected before any candidate is probed",
+        )
+    print(f"reference verified: {key} ({len(data)} bytes)")
+
+
+def require_plates(facts: dict, *, fetch=None) -> dict:
+    """Both conditioning plates, PROVED to exist before a rupee moves.
+
+    The five-shot battery of 2026-08-29 (run 72) submitted a paid job
+    whose input_key had been deleted from the bucket; the worker refused
+    it in 202ms of billed execution. That was ONE job. This battery
+    would repeat the mistake five times, so the plates are fetched over
+    the public read base and proved by their own PNG magic BEFORE the
+    first submission. Fail-closed: no base means no proof, and no proof
+    means no battery — a SpendStop, never a shrug.
+
+    Returns {reference_id: full_key} for the battery to condition on.
+    """
+    base = os.environ.get("R2_PUBLIC_BASE_URL", "")
+    try:
+        normalised = frame_pull.normalise_base(base)
+    except frame_pull.FramePullError as exc:
+        raise SpendStop(
+            "plate-unverifiable",
+            f"cannot prove the conditioning plates exist ({exc.code}); "
+            "set R2_PUBLIC_BASE_URL (public read base) for the run",
+        )
+    fetcher = fetch or frame_pull._fetch
+    keys = {}
+    for ref, name in sorted(PLATE_KEYS.items()):
+        key = f"{facts['output_prefix']}/{name}"
+        try:
+            data = fetcher(frame_pull.public_url(normalised, key))
+            frame_pull.verify_png(data)
+        except Exception as exc:  # noqa: BLE001 — every shape is a refusal
+            raise SpendStop(
+                "plate-missing",
+                f"conditioning plate {ref.upper()} ({key}) did not verify: "
+                f"{type(exc).__name__} — generate it before the battery",
+            )
+        keys[ref] = key
+        print(f"plate {ref.upper()} verified: {key} ({len(data)} bytes)")
+    return keys
+
+
+def video_battery(client, facts: dict, *, sleep=time.sleep, clock=time.monotonic, fetch=None) -> list:
+    """The owner's five-shot ACTION BATTERY (directive 2026-08-29):
+    exactly five video jobs, strictly sequential, each with its own
+    requote/admission, verification, billing reconciliation and
+    termination confirmation — one_job raises on ANY failure or UNKNOWN
+    termination, which stops the battery cold with no retry and no next
+    submission (Phase 7). The intent is printed BEFORE each submission
+    so the log carries what the shot was supposed to do next to what it
+    measurably did — that adjacency is what makes a frame-pull verdict
+    arguable from the log alone."""
+    plate_keys = require_plates(facts, fetch=fetch)
     record_standby_state(client)
     rows = []
-    for index, (slug, prompt) in enumerate(VIDEO_BATTERY, start=1):
-        print(f"--- scene {index}/5 [{slug}] ---")
+    for index, shot in enumerate(ACTION_BATTERY, start=1):
+        slug = shot["slug"]
+        shot_contract = shot["contract"]
+        plate_key = plate_keys[shot["plate"]]
+        print(f"--- shot {index}/5 [{slug}] ---")
+        print(f"    conditioned on: plate {shot['plate'].upper()} = {plate_key}")
+        print(f"    action: {shot_contract['action']}")
+        print(f"    required_motion: {shot_contract['required_motion']}")
         row = one_job(
             client,
             facts,
-            output_key=f"{facts['output_prefix']}/battery-{index}-{slug}.mp4",
+            output_key=f"{facts['output_prefix']}/{shot['output']}",
             op="video_generate",
-            prompt=prompt,
+            prompt=shot["prompt"],
+            input_key=plate_key,
             sleep=sleep,
             clock=clock,
         )
         row["scene"] = slug
+        row["contract"] = shot_contract
+        row["plate"] = plate_key
         rows.append(row)
-        print(f"scene {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
+        print(f"shot {index}/5 [{slug}] PASS — terminated, ${row['cost_usd']}")
     return rows
 
 
@@ -1108,12 +1925,7 @@ def main(argv) -> int:
 
         through = int(os.environ.get("THROUGH_PHASE", "16"))
         op = os.environ.get("OP", "image_preprocess")
-        if op not in (
-            "image_preprocess",
-            "image_generate",
-            "video_generate",
-            "audio_mux",
-        ):
+        if op not in DISPATCHABLE_OPS:
             raise SpendStop("op-not-allowed", f"unknown OP {op!r}")
         if op == "audio_mux":
             # The audio canary is ONE job by definition: narration muxed
@@ -1128,39 +1940,158 @@ def main(argv) -> int:
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/final-001.mp4",
+                    # never final-001: a calibration fixture's basename — a rerun would overwrite it (measured 2026-08-29)
+                    output_key=f"{facts['output_prefix']}/audio-final-001.mp4",
                     op=op,
                 )
             ]
             print("PHASE 13-16 PASS — one real audio job, verified and terminated")
         elif op == "image_generate":
-            # ONE still from ONIQ's own image engine. Like the audio
-            # canary this has exactly one shape: no battery exists for it.
+            # ONE still from ONIQ's own image engine: the conditioning
+            # PLATE the action battery animates (owner directive
+            # 2026-08-29). Like the audio canary this has exactly one
+            # shape: no battery exists for it.
             if through != 16:
                 raise SpendStop(
                     "image-through-phase",
                     "image_generate supports through_phase 16 (one still) only",
                 )
+            # WHICH plate: "a" (characters + balloon) or "b" (train).
+            # Owner directive 2026-08-29, multi-reference conditioning —
+            # one dispatch draws ONE plate, and the choice maps to a
+            # module prompt and a fixed key. plate-001/plate-002 are
+            # PLATE_INVALID evidence and are never written again.
+            which = os.environ.get("PLATE", "a").strip().lower()
+            if which == "ref":
+                # The benchmark's controlled reference: ONE subject, drawn
+                # once, and all five candidates condition on it.
+                key, prompt_text, label = (
+                    PROBE_REFERENCE_KEY, PROBE_REFERENCE_PROMPT, "probe reference"
+                )
+            elif which in PLATE_KEYS:
+                key = PLATE_KEYS[which]
+                prompt_text = PLATE_A_PROMPT if which == "a" else PLATE_B_PROMPT
+                label = f"plate {which.upper()}"
+            else:
+                raise SpendStop(
+                    "plate-unknown",
+                    f"PLATE={which!r} — the references are 'a' "
+                    "(characters + balloon), 'b' (train) and 'ref' (the "
+                    "benchmark's single-subject reference)",
+                )
             rows = [
                 one_job(
                     rp,
                     facts,
-                    output_key=f"{facts['output_prefix']}/still-001."
-                    + contract_image_format(),
+                    output_key=f"{facts['output_prefix']}/{key}",
                     op=op,
+                    prompt=prompt_text,
+                    # The plate is drawn to be LOOKED at — it is a
+                    # conditioning reference, and an unusable one poisons
+                    # every clip built on it. The bucket is private, so the
+                    # worker returns a thumbnail of what it drew.
+                    preview=True,
                 )
             ]
-            print("PHASE 13-16 PASS — one real in-house still, verified and terminated")
+            print(f"PHASE 13-16 PASS — {label} drawn, verified and terminated")
+        elif op == "model_hydrate":
+            # NOT a generation. It puts one checkpoint on the persistent
+            # volume so every later change to that model is a configuration
+            # edit rather than a 25 GiB rebuild. Idempotent by construction:
+            # a model already READY downloads nothing and returns at once.
+            import modelroot
+
+            if through != 16:
+                raise SpendStop(
+                    "hydrate-through-phase",
+                    "model_hydrate supports through_phase 16 only",
+                )
+            target = os.environ.get("PROBE_MODEL", "").strip()
+            if target not in modelroot.EXPERIMENTAL:
+                raise SpendStop(
+                    "hydrate-unknown-model",
+                    f"{target!r} is not an experimental model; known ids are "
+                    + ", ".join(sorted(modelroot.EXPERIMENTAL)),
+                )
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    # A hydration writes NO artifact, and the contract
+                    # refuses an output_key on this op — one_job drops it
+                    # when building the payload. It is passed empty rather
+                    # than omitted because the signature requires it.
+                    output_key="",
+                    op="model_hydrate",
+                    model=target,
+                )
+            ]
+            print(f"PHASE 13-16 PASS — {target} hydrated onto the volume")
+        elif op == "model_probe":
+            # ONE candidate, ONE clip, on the A5000 — owner directive
+            # 2026-08-29. Each dispatch names one benchmark row; there is no
+            # battery shape, deliberately, so a single bad assumption cannot
+            # spend five times over before anyone reads a result.
+            import modelprobe
+
+            if through != 16:
+                raise SpendStop(
+                    "probe-through-phase",
+                    "model_probe supports through_phase 16 (one candidate) only",
+                )
+            candidate = os.environ.get("PROBE_MODEL", "").strip()
+            if candidate in modelprobe.NOT_EVALUATED:
+                raise SpendStop(
+                    "probe-not-evaluated",
+                    f"{candidate} is NOT_EVALUATED: "
+                    f"{modelprobe.NOT_EVALUATED[candidate]}",
+                )
+            if candidate not in modelprobe.PROBE_MODELS:
+                raise SpendStop(
+                    "probe-unknown",
+                    f"PROBE_MODEL={candidate!r} — authorised rows are "
+                    + ", ".join(sorted(modelprobe.PROBE_MODELS)),
+                )
+            # THE REFERENCE MUST EXIST BEFORE THE GPU IS RENTED. Run 72 paid
+            # for a job whose input had been deleted; the same check that
+            # guards the battery guards this.
+            reference = f"{facts['output_prefix']}/{PROBE_REFERENCE_KEY}"
+            require_reference(facts, reference)
+            row = modelprobe.PROBE_MODELS[candidate]
+            print(f"probing {row['label']} — {row['repo']} @ {row['revision']}")
+            print(f"  conditioned on: {reference}")
+            print(f"  shape: {probe_shape_line(row)}")
+            print(f"  published weights: {row['download_gib']:.2f} GiB, "
+                  f"loading {row['dtype']} with {row['offload']} offload")
+            frames = None
+            if candidate in modelprobe.DERIVED_FRAME_ROWS:
+                frames = derived_probe_frames(row)
+            rows = [
+                one_job(
+                    rp,
+                    facts,
+                    output_key=f"{facts['output_prefix']}/probe-{candidate}.mp4",
+                    op=op,
+                    prompt=PROBE_ACTION_PROMPT,
+                    input_key=reference,
+                    model=candidate,
+                    preview=True,
+                    frames=frames,
+                )
+            ]
+            print(f"PHASE 13-16 PASS — {row['label']} probed and terminated")
         elif op == "video_generate":
-            # Video knows exactly two shapes (owner directives 2026-08-26):
-            # 16 = the single job; 18 = the five-scene battery — EXACTLY
-            # five, never 1+5, never twenty. Anything else refuses.
+            # Video knows exactly two shapes (owner directives 2026-08-26
+            # and 2026-08-29): 16 = the single canary; 18 = the five-shot
+            # action battery — EXACTLY five, never 1+5, never twenty.
+            # Anything else refuses.
             if through == 16:
                 rows = [
                     one_job(
                         rp,
                         facts,
-                        output_key=f"{facts['output_prefix']}/ltx-001.mp4",
+                        # never ltx-001: a calibration fixture's basename — a rerun would overwrite it (measured 2026-08-29)
+                        output_key=f"{facts['output_prefix']}/ltx-canary-001.mp4",
                         op=op,
                     )
                 ]
@@ -1168,14 +2099,14 @@ def main(argv) -> int:
             elif through == 18:
                 rows = video_battery(rp, facts)
                 print(
-                    "PHASE 18 PASS — five-scene battery, each job verified "
-                    "and terminated"
+                    "PHASE 18 PASS — five-shot action battery, each job "
+                    "verified and terminated"
                 )
             else:
                 raise SpendStop(
                     "video-through-phase",
                     "video_generate supports through_phase 16 (one job) or "
-                    "18 (the five-scene battery) — nothing else",
+                    "18 (the five-shot action battery) — nothing else",
                 )
         else:
             rows = [
@@ -1197,6 +2128,19 @@ def main(argv) -> int:
                 rows += battery(rp, facts, 20)
                 print("PHASE 19 PASS — twenty-job battery")
         _show("economics (real rows only)", economics(rows))
+        # WHAT THIS RUN GENERATED, named for the frame pull that follows.
+        #
+        # Owner directive 2026-08-29: LTX quality is judged from actual
+        # frames, so a run has to say which objects it wrote. Purely
+        # additive — nothing below reads this, no gate consults it, and a
+        # filesystem error here cannot refuse work that already
+        # succeeded. It carries keys and sizes, never a price and never a
+        # credential.
+        try:
+            manifest = frame_pull.write_manifest(rows)
+            print(f"artifact manifest: {len(manifest['clips'])} clip(s) named")
+        except OSError as exc:
+            print(f"artifact manifest not written ({type(exc).__name__})")
         sweep = rp.sweep_orphans()
         if sweep is None or sweep.get("pods") != 0 or sweep.get("endpoint_min_workers") != 0:
             raise SpendStop("orphan-alarm", f"final sweep not clean: {sweep}")

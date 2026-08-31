@@ -1,0 +1,338 @@
+name: image-publish
+
+# Build the `media` image and push it to a registry, so a RunPod template
+# has something to name.
+#
+# OWNER DIRECTIVE 2026-08-28 (route 2, then option 1). RunPod's API cannot
+# build an image from a repository — POST /templates requires an imageName
+# and accepts no repo, git or build field, measured from the live OpenAPI
+# document on 2026-08-28 — so a template can only ever REFERENCE an image
+# that already exists. The endpoint p3zmlv8ek10dzt has referenced a
+# template that does not exist since the worker was deleted, because
+# RunPod's own builder held the only copy of the image. This workflow ends
+# that: the image lives in a registry ONIQ controls, and can be rebuilt.
+#
+# NEVER on push. The media stage bakes an LTX pipeline, an 8B causal LLM
+# and a torch+CUDA stack; building it per commit would burn hours of
+# runner time for nothing. Dispatch only, behind a literal token, the same
+# shape as the stale-run cancel.
+#
+# It carries TWO credentials and neither reaches the other side:
+# - GITHUB_TOKEN, to push to GHCR. Short-lived, issued per run.
+# - HF_TOKEN, a read-only Hugging Face token. The chosen checkpoint turned
+#   out to be PUBLIC — the 401 that prompted this token was the registry
+#   refusing to confirm a non-existent repository to an anonymous caller,
+#   not a gate — so the token is not strictly required to download it. It
+#   is kept because owner directive 2026-08-28 asks for it, because it
+#   makes the identity check authoritative rather than best-effort, and
+#   because an authenticated read distinguishes 404 from 401 instead of
+#   conflating them, which is the exact confusion that cost four runs.
+#   It reaches exactly one RUN in the Dockerfile, through a BuildKit secret
+#   mount, and the image is scanned afterwards to prove it did not survive.
+# There is deliberately NO RunPod credential here. Pushing an image cannot
+# start a worker or spend GPU money, and keeping the two apart means a
+# mistake in this workflow cannot become a GPU bill.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Type PUBLISH-MEDIA-IMAGE (exactly) to allow the build and push."
+        type: string
+        default: ""
+      tag:
+        description: "Extra tag to apply alongside the commit SHA (optional)."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+  # For the environments listing in the credential diagnostic. Read-only,
+  # and it is the permission GitHub itself named on run 41 when the
+  # environments API answered 403 to deployments:read.
+  actions: read
+
+jobs:
+  publish:
+    name: "build --target media and push to GHCR"
+    if: inputs.publish == 'PUBLISH-MEDIA-IMAGE'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # MEASURED 2026-08-28 (run 4): HF_TOKEN interpolated EMPTY on a job with
+    # no environment declared. This repository's other credential,
+    # RUNPOD_API_KEY, is a gpu-spend ENVIRONMENT secret, and gpu-validation
+    # run #7 failed the same way for the same reason — a job that references
+    # an environment secret without declaring the environment reads an empty
+    # string rather than erroring. Declaring it here costs nothing and gates
+    # nothing: owner directive 2026-08-25, confirmed through the API on run
+    # 41, records that gpu-spend carries no required reviewers on this plan.
+    # A REPOSITORY secret resolves with or without this line; an ENVIRONMENT
+    # secret resolves only with it. Declaring it covers both.
+    environment: gpu-spend
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ---------------------------------------------------- preconditions
+
+      - name: "The credential is present (owner action if not)"
+        env:
+          # NAMES only, never values. GitHub cannot be asked to list its
+          # secrets, but an unset one interpolates to the empty string — so
+          # naming the plausible spellings turns "absent" into "absent under
+          # THIS name, present under THAT one", which is a diagnosis instead
+          # of another round trip. None of these is accepted as a substitute
+          # for HF_TOKEN; they are reported so the owner can rename one.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ALT_HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+          ALT_HUGGING_FACE_TOKEN: ${{ secrets.HUGGING_FACE_TOKEN }}
+          ALT_HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          ALT_HUGGINGFACE_HUB_TOKEN: ${{ secrets.HUGGINGFACE_HUB_TOKEN }}
+          ALT_HF_ACCESS_TOKEN: ${{ secrets.HF_ACCESS_TOKEN }}
+          ALT_HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+          VAR_HF_TOKEN: ${{ vars.HF_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "${HF_TOKEN}" ]; then
+            echo "HF_TOKEN is present (name only)"
+            exit 0
+          fi
+          echo "BLOCKED: HF_TOKEN resolved empty in this job."
+          echo "This job declares environment: gpu-spend, so both repository"
+          echo "and gpu-spend environment secrets would resolve here."
+          echo ""
+          echo "Other spellings, presence only:"
+          for name in ALT_HUGGINGFACE_TOKEN ALT_HUGGING_FACE_TOKEN \
+                      ALT_HF_API_TOKEN ALT_HUGGINGFACE_HUB_TOKEN \
+                      ALT_HF_ACCESS_TOKEN ALT_HF_READ_TOKEN; do
+            if [ -n "${!name}" ]; then
+              echo "  PRESENT: ${name#ALT_}"
+            else
+              echo "  absent:  ${name#ALT_}"
+            fi
+          done
+          echo ""
+          echo "If one above is PRESENT, the secret exists under that name —"
+          echo "rename it to HF_TOKEN, or say the word and the workflow will"
+          echo "read that name instead."
+          echo ""
+          echo "Same name under Variables rather than Secrets:"
+          if [ -n "${VAR_HF_TOKEN}" ]; then
+            echo "  PRESENT: vars.HF_TOKEN — it was saved as a Variable."
+            echo "  Variables are not secret and are not read by this build."
+            echo "  Delete it and re-add it under Secrets."
+          else
+            echo "  absent:  vars.HF_TOKEN"
+          fi
+          echo ""
+          echo "This job is running in: ${GITHUB_REPOSITORY}"
+          echo "Secrets must be on THAT repository. If the token was added to"
+          echo "the app repo (oniq-sparkle-pay) it will never resolve here."
+          echo "Environments that exist on this repository:"
+          curl -sS -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+               -H "Accept: application/vnd.github+json" \
+               "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/environments" \
+            | python -c "import json,sys; d=json.load(sys.stdin); print('\n'.join('  ' + e['name'] for e in d.get('environments') or [])) or None" \
+            || echo "  (could not list environments)"
+          echo ""
+          echo "No substitute will be built. Owner action required."
+          exit 1
+
+      - name: "The intended checkpoint answers, and IS the model that was chosen"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python -m validation.hf_auth
+
+      # ---------------------------------------------------------- disk
+
+      - name: "Disk before anything"
+        run: df -B1 --output=source,size,used,avail,target / /mnt || true
+
+      - name: "Reclaim the runner's preinstalled toolchains"
+        run: |
+          # The hosted runner ships several toolchains this build never
+          # uses, and they occupy most of the root filesystem. Removing
+          # them is the difference between a build that fits and one that
+          # dies at 90% with no space left.
+          # MEASURED 2026-08-28: 13.76 GiB free of 71.61 on this runner, one
+          # filesystem, no separate /mnt. The projected media image is
+          # ~40 GiB, so the reclaim is not an optimisation — without it the
+          # build cannot start. df runs on both sides so the reclaimable
+          # figure becomes a measurement instead of the estimate
+          # image_size currently carries.
+          before=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules \
+                      /usr/local/graalvm /usr/local/.ghcup \
+                      /usr/local/share/powershell /usr/share/swift \
+                      /opt/hostedtoolcache || true
+          sudo apt-get clean || true
+          # The runner ships preloaded container images this build never
+          # uses, in the same data root the build writes to.
+          docker system prune -af --volumes || true
+          after=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          echo "RECLAIMED: $((after - before)) bytes"
+          df -B1 --output=source,size,used,avail,target / || true
+
+      - name: "Free space after reclaim, and refuse a build that cannot finish"
+        run: |
+          set -euo pipefail
+          # MEASURED 2026-08-28 (run 3): `df / /mnt` reported /dev/root for
+          # BOTH targets on these runners — there is no separate /mnt temp
+          # disk, whatever the documented default says. An earlier version
+          # of this workflow moved docker's data root onto /mnt for exactly
+          # nothing. So the reclaim above is the only lever, and this is
+          # where its result gets checked rather than assumed.
+          AVAIL=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          echo "FREE AFTER RECLAIM: ${AVAIL} bytes"
+          # awk, not python: the reclaim above deletes /opt/hostedtoolcache,
+          # which is where actions/setup-python put the interpreter. Every
+          # python call has to happen BEFORE that step from here on.
+          awk -v b="${AVAIL}" 'BEGIN{printf "FREE AFTER RECLAIM: %.2f GiB\n", b/1073741824}'
+          docker info --format 'docker data root: {{.DockerRootDir}}'
+          # A build that dies at 90% costs 40 minutes and produces nothing.
+          # MEASURED, validation run 54, for the pinned model:
+          #   base stage        7.79 GiB
+          #   Lightricks/LTX-Video @ 8984fa25   26.47 GiB
+          #   Qwen/Qwen3-8B-AWQ                  5.69 GiB
+          #   piper                              0.10 GiB
+          #   projected image (FLOOR)           40.05 GiB
+          # The floor is that projection, not a round number: below it the
+          # build certainly cannot finish, and starting one anyway wastes
+          # the runner's time to learn what a $0 read already knew. It is
+          # not a promise the build fits — the peak also holds the layer
+          # cache — so clearing it is necessary, not sufficient.
+          # Shell arithmetic, not a heredoc: a heredoc terminator indented
+          # inside a YAML block scalar never closes, since <<- strips tabs
+          # and not spaces.
+          FLOOR=43002000000
+          if [ "${AVAIL}" -lt "${FLOOR}" ]; then
+            echo "BLOCKED: only ${AVAIL} bytes free, below the ${FLOOR} byte floor."
+            awk -v a="${AVAIL}" -v f="${FLOOR}" 'BEGIN{printf "  free %.2f GiB, need %.2f GiB, short by %.2f GiB\n", a/1073741824, f/1073741824, (f-a)/1073741824}'
+            echo "The reclaim above is the only lever on a hosted runner."
+            echo "This needs a larger runner, or a smaller image."
+            exit 1
+          fi
+          echo "disk floor cleared"
+
+      # --------------------------------------------------------- build
+
+      - name: "Build the media stage"
+        env:
+          # Through the environment into BuildKit's secret mount. Never an
+          # ARG, never an ENV in the image, never on a command line.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DOCKER_BUILDKIT: "1"
+        run: |
+          set -euo pipefail
+          docker build --target media \
+            --secret id=hf_token,env=HF_TOKEN \
+            -t "${IMAGE}:${GITHUB_SHA}" \
+            -t "${IMAGE}:latest" .
+
+      - name: "Image size, measured"
+        run: |
+          set -euo pipefail
+          SIZE=$(docker image inspect "${IMAGE}:${GITHUB_SHA}" --format '{{.Size}}')
+          echo "IMAGE SIZE: ${SIZE} bytes"
+          awk -v b="${SIZE}" 'BEGIN{printf "IMAGE SIZE: %.2f GiB\n", b/1073741824}'
+          df -B1 --output=source,size,used,avail,target / /mnt || true
+
+      # -------------------------------------------------------- proofs
+      # Everything below runs BEFORE the push. A pushed image that cannot
+      # start, or that carries the wrong model, is worse than no image: it
+      # turns a visible dangling reference into a worker that fails on the
+      # rented card, at cost.
+
+      - name: "The image starts"
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+            python3 -c "import handler; print('PROOF start: handler imports')"
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" \
+            python3 -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda; print('PROOF torch:', torch.__version__, torch.version.cuda)"
+
+      - name: "It runs as uid 10001, not root"
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" id | tee /dev/stderr | grep -q 'uid=10001'
+          echo "PROOF uid: 10001"
+
+      - name: "LTX 2B, Qwen3-8B, piper and the licence records"
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}/validation/proofs:/proofs:ro" \
+            "${IMAGE}:${GITHUB_SHA}" python3 /proofs/baked_assets.py
+
+      - name: "The credential did NOT survive into the image"
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Checked from outside the container too: an ARG or ENV
+          # credential would be readable here even with a clean filesystem.
+          if docker image inspect "${IMAGE}:${GITHUB_SHA}" \
+               --format '{{json .Config.Env}}' | grep -qiE 'hf_token|token='; then
+            echo "FAIL: an image environment variable names a credential"; exit 1
+          fi
+          echo "PROOF image env: no credential variable"
+          if docker history --no-trunc "${IMAGE}:${GITHUB_SHA}" \
+               | grep -qiE 'build-arg|hf_token='; then
+            echo "FAIL: build history carries a credential"; exit 1
+          fi
+          echo "PROOF build history: no build argument"
+          # The value goes IN and only a count comes out.
+          docker run --rm -e SCAN_FOR="${HF_TOKEN}" \
+            -v "${PWD}/validation/proofs:/proofs:ro" \
+            "${IMAGE}:${GITHUB_SHA}" python3 /proofs/no_credential.py
+
+      # ---------------------------------------------------------- push
+
+      - name: "Log in to GHCR"
+        env:
+          # Through the environment, never interpolated into the script
+          # text: an expression expanded into a run block becomes part of
+          # the command line, which is the documented injection shape and
+          # is the wrong place for a credential regardless.
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "${REGISTRY_TOKEN}" \
+            | docker login ghcr.io -u "${REGISTRY_USER}" --password-stdin
+
+      - name: "Push, and record the immutable digest"
+        env:
+          EXTRA: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          docker push "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:latest"
+          if [ -n "${EXTRA}" ]; then
+            docker tag "${IMAGE}:${GITHUB_SHA}" "${IMAGE}:${EXTRA}"
+            docker push "${IMAGE}:${EXTRA}"
+          fi
+          # A TAG IS NOT AN IDENTITY. Tags move; a digest does not, and the
+          # template is to name the digest so the endpoint can never
+          # silently start running a different image than the one these
+          # proofs passed on.
+          DIGEST=$(docker image inspect "${IMAGE}:${GITHUB_SHA}" \
+            --format '{{index .RepoDigests 0}}')
+          echo "PUBLISHED: ${DIGEST}"
+          {
+            echo "### media image published"
+            echo ""
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- digest: \`${DIGEST}\`"
+            echo ""
+            echo "Name the DIGEST in the template, never the tag."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: "Disk after"
+        if: always()
+        run: df -B1 --output=source,size,used,avail,target / /mnt || true
