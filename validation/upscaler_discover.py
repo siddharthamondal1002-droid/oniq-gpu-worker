@@ -94,11 +94,15 @@ def _get_text(url: str, token, timeout: int = 60) -> str:
         return resp.read().decode("utf-8")
 
 
-def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
+def measure(repo: str, token, get=_get, get_text=_get_text, revision=None) -> dict:
     """One candidate, against the gates the build would apply to it."""
     row: dict = {"repo": repo}
+    url = INFO_API.format(repo=repo)
+    if revision:
+        url = url.replace("/api/models/", "/api/models/").replace(
+            f"{repo}?", f"{repo}/revision/{revision}?")
     try:
-        info = get(INFO_API.format(repo=repo), token)
+        info = get(url, token)
     except Exception as exc:
         row.update(verdict="UNREADABLE", detail=_why(exc))
         return row
@@ -200,6 +204,46 @@ def measure(repo: str, token, get=_get, get_text=_get_text) -> dict:
     return row
 
 
+# THE CHECKPOINT ONIQ ACTUALLY BAKES, and the revision its Dockerfile pins.
+# The upsampler was TRAINED against a particular VAE latent distribution, and
+# LTXLatentUpsamplePipeline normalises with self.vae.latents_mean/latents_std —
+# ONIQ's own baked vae. If that vae is byte-identical to the one shipped beside
+# the upsampler, the latent space is provably the same and the 0.9.7-vs-2B
+# question is closed rather than argued.
+BAKED_REPO = "Lightricks/LTX-Video"
+BAKED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+
+
+def vae_crosscheck(rows, token, get=_get) -> dict:
+    """Is the vae beside the upsampler the vae ONIQ bakes?"""
+    out: dict = {"baked": f"{BAKED_REPO}@{BAKED_REVISION}"}
+    try:
+        info = get(INFO_API.format(repo=BAKED_REPO).replace(
+            f"{BAKED_REPO}?", f"{BAKED_REPO}/revision/{BAKED_REVISION}?"), token)
+    except Exception as exc:
+        out["error"] = _why(exc)
+        return out
+    out["baked_vae"] = {
+        (s.get("rfilename") or ""): ((s.get("lfs") or {}).get("oid"))
+        for s in info.get("siblings") or []
+        if (s.get("rfilename") or "").startswith("vae/")
+        and (s.get("rfilename") or "").endswith(".safetensors")
+        and (s.get("lfs") or {})
+    }
+    out["candidate_vae"] = {
+        r["repo"]: {k: v for k, v in (r.get("blob_hashes") or {}).items()
+                    if k.startswith("vae/")}
+        for r in rows if any(k.startswith("vae/")
+                             for k in (r.get("blob_hashes") or {}))
+    }
+    baked = set(out["baked_vae"].values())
+    out["matches"] = {
+        repo: bool(baked & set(h.values()))
+        for repo, h in out["candidate_vae"].items()
+    }
+    return out
+
+
 def report(token, get=_get, get_text=_get_text) -> tuple:
     if not token:
         print("BLOCKED: no credential, and an anonymous read cannot tell a "
@@ -236,6 +280,21 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
         if row.get("config_mismatch"):
             print(f"    MISMATCH      {row['config_mismatch']}")
         print(f"    VERDICT       {row['verdict']}")
+
+    cross = vae_crosscheck(rows, token, get)
+    print("")
+    print("  VAE CROSS-CHECK — is the latent space the same one ONIQ bakes?")
+    print(f"    baked          {cross.get('baked')}")
+    if cross.get("error"):
+        print(f"    UNREADABLE     {cross['error']}")
+    else:
+        for name, digest in sorted((cross.get("baked_vae") or {}).items()):
+            print(f"    baked vae      {digest}  {name}")
+        for repo, hashes in (cross.get("candidate_vae") or {}).items():
+            for name, digest in sorted(hashes.items()):
+                print(f"    {repo}")
+                print(f"      vae          {digest}  {name}")
+        print(f"    SAME LATENTS   {cross.get('matches')}")
 
     print("")
     print("A VERDICT OF PINNABLE IS NOT PERMISSION. It says the revision "
