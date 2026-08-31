@@ -141,10 +141,36 @@
 # WHAT REMAINS UNMEASURED
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# This is the 0.9.7 component and ONIQ bakes the base LTX-Video (2B). The
-# byte-identical size strongly suggests the "0.9.8" upsampler is the same
-# artifact under a different name, so the version skew is probably cosmetic —
-# but PROBABLY IS NOT MEASURED. Whether multi-scale actually improves ONIQ's
-# output is unknown until a real generation is run and looked at.
+# SETTLED since this pin was first written. The two candidates are the SAME
+# FILE: sha256 e1d5e5cc4bdda2ff8ece07ab86e746890e1e515848797d2dd1c9e0179f442fdc
+# for both Lightricks' latent_upsampler/diffusion_pytorch_model.safetensors and
+# the third party's diffusion_pytorch_model.safetensors. There is no separate
+# 0.9.8 upsampler; it is this component re-uploaded without its licence. So the
+# "0.9.7 against a 2B checkpoint" worry was about a version label that does not
+# correspond to different weights.
+#
+# ALSO SETTLED, from the diffusers source rather than from inference:
+#   - LTXLatentUpsamplerModel's defaults ARE in_channels=128, mid_channels=512,
+#     num_blocks_per_stage=4, dims=3, spatial_upsample=True,
+#     temporal_upsample=False. Lightricks' terse config constructs to exactly
+#     the shape this build asserts.
+#   - The class upsamples VAE LATENTS ("Model to spatially upsample VAE
+#     latents"), never transformer output, so the transformer's size — 2B or
+#     13B — is not a compatibility question at all.
+#   - AutoencoderKLLTXVideo.latent_channels defaults to 128, matching
+#     in_channels, and LTXLatentUpsamplePipeline takes exactly (vae,
+#     latent_upsampler) and normalises with self.vae.latents_mean/latents_std
+#     — ONIQ's OWN baked vae, not Lightricks'.
+#
+# STILL UNRESOLVED. Whether the vae ONIQ bakes is byte-identical to the one the
+# upsampler shipped beside is UNKNOWN, not disproven: HuggingFace returned no
+# lfs.oid for Lightricks/LTX-Video@8984fa25's vae (most likely Xet-backed
+# storage rather than classic LFS), so there is nothing to compare. Upstream
+# uses this same upsampler with both the 0.9.7 and 0.9.8 pipelines, each
+# passing its own vae, which is evidence the latent space is stable across
+# those checkpoints — evidence, not proof.
+#
+# AND STILL NOT MEASURED. Whether multi-scale actually improves ONIQ's output
+# is unknown until a real generation is run and looked at.
 
 Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f

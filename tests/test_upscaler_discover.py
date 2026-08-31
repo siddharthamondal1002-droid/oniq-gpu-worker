@@ -238,3 +238,30 @@ class TestAbsentIsNotWrong:
         assert "LTXLatentUpsamplerModel.from_config(cfg)" in docker
         assert "getattr(model.config, k, None)" in docker
         assert "SIZE_GUARD_BYTES = 1024**3" in docker
+
+
+class TestUnknownIsNotFalse:
+    """The cross-check's first run printed SAME LATENTS: False for a repo whose
+    hash had not come back. Absent data is not negative data — the third time
+    this module made that mistake, so it is pinned."""
+
+    def _cross(self, baked_oid, candidate_oid):
+        def get(url, token, timeout=60):
+            return {"siblings": [{"rfilename": "vae/diffusion_pytorch_model.safetensors",
+                                  "lfs": {"oid": baked_oid} if baked_oid else {}}]}
+        rows = [{"repo": "cand", "blob_hashes":
+                 {"vae/diffusion_pytorch_model.safetensors": candidate_oid}}]
+        return ud.vae_crosscheck(rows, "tok", get)
+
+    def test_a_missing_baked_hash_is_unknown_not_a_mismatch(self):
+        out = self._cross(None, "a" * 64)
+        assert out["matches"]["cand"].startswith("UNKNOWN")
+        assert "UNRESOLVED" in out["note"]
+
+    def test_two_real_and_equal_hashes_are_the_same(self):
+        out = self._cross("a" * 64, "a" * 64)
+        assert out["matches"]["cand"] == "SAME"
+
+    def test_two_real_and_different_hashes_are_different(self):
+        out = self._cross("a" * 64, "b" * 64)
+        assert out["matches"]["cand"] == "DIFFERENT"

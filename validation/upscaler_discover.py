@@ -236,11 +236,26 @@ def vae_crosscheck(rows, token, get=_get) -> dict:
         for r in rows if any(k.startswith("vae/")
                              for k in (r.get("blob_hashes") or {}))
     }
-    baked = set(out["baked_vae"].values())
-    out["matches"] = {
-        repo: bool(baked & set(h.values()))
-        for repo, h in out["candidate_vae"].items()
-    }
+    # UNKNOWN IS NOT FALSE. The first run of this cross-check reported
+    # SAME LATENTS: False for a repository whose hash simply had not come back
+    # — HuggingFace returned no lfs.oid for the baked vae, and comparing a set
+    # containing None against real hashes answers False. That is the third
+    # false negative this module has produced by treating absent data as
+    # negative data, so the verdict is now three-valued.
+    baked = {h for h in out["baked_vae"].values() if h}
+    out["matches"] = {}
+    for repo, hashes in out["candidate_vae"].items():
+        theirs = {h for h in hashes.values() if h}
+        if not baked or not theirs:
+            out["matches"][repo] = "UNKNOWN — no content hash returned"
+        else:
+            out["matches"][repo] = "SAME" if baked & theirs else "DIFFERENT"
+    if not baked:
+        out["note"] = (
+            "the baked checkpoint returned no lfs.oid for its vae, so this "
+            "question is UNRESOLVED rather than answered — most likely the "
+            "blob is Xet-backed rather than classic LFS"
+        )
     return out
 
 
@@ -295,6 +310,8 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
                 print(f"    {repo}")
                 print(f"      vae          {digest}  {name}")
         print(f"    SAME LATENTS   {cross.get('matches')}")
+        if cross.get("note"):
+            print(f"    NOTE           {cross['note']}")
 
     print("")
     print("A VERDICT OF PINNABLE IS NOT PERMISSION. It says the revision "
