@@ -111,6 +111,15 @@ def measure(repo: str, upstream_vae: dict, token, revision=None,
     row["pipeline_bytes"] = sum(
         size for p, size in paths.items()
         if p == "model_index.json" or any(p.startswith(c + "/") for c in COMPONENTS))
+    # PER COMPONENT, because the image no longer carries all of them. The text
+    # encoder moved onto the network volume (owner directive 2026-08-31) after
+    # the 13B repoint pushed the image past what a hosted runner can build, and
+    # modelhydrate's disk check is fed by its size — so that size has to be
+    # measured here rather than estimated by subtracting the parts we know.
+    row["component_bytes"] = {
+        c: sum(size for p, size in paths.items() if p.startswith(c + "/"))
+        for c in COMPONENTS
+    }
     row["within_size_guard"] = 0 < row["transformer_bytes"] <= SIZE_GUARD_BYTES
     row["fits_card"] = 0 < row["transformer_bytes"] < CARD_VRAM_BYTES
 
@@ -213,6 +222,8 @@ def report(token, get=_get, get_text=_get_text) -> tuple:
               f"card {CARD_VRAM_BYTES / 1024**3:.0f} GiB — "
               f"{', '.join(sorted(CARD_VRAM_GIB))})")
         print(f"    pipeline      {row['pipeline_bytes'] / 1024**3:.2f} GiB to download")
+        for name, size in sorted((row.get("component_bytes") or {}).items()):
+            print(f"      {name:14s}{size / 1024**3:8.2f} GiB  ({size} bytes)")
         print(f"    PAIRS         {row['pairs']}")
         if row.get("latent_delta"):
             for key, (theirs_, ours) in sorted(row["latent_delta"].items()):
