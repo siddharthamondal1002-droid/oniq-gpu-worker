@@ -81,6 +81,9 @@ COPY modelprobe.py /app/modelprobe.py
 COPY storygen.py /app/storygen.py
 COPY audio.py /app/audio.py
 COPY handler.py /app/handler.py
+# The spatial-upscaler revision pin, read by the media stage's bake. Empty by
+# default, which is why the image is unchanged until an owner fills it in.
+COPY ltx-upscaler.pin /app/ltx-upscaler.pin
 
 # base is itself a complete, secure worker image: uid-10001 runtime,
 # read-only /app. CI proves THIS stage. media re-escalates to root
@@ -503,6 +506,163 @@ landed = sum(os.path.getsize(os.path.join(DEST, name)) for name, _ in files)
 print(f"TEXT ENCODER COMPLETE: {len(files)} file(s), {landed} bytes")
 
 import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+# ---------------------------------------------------------------------------
+# THE SPATIAL LATENT UPSCALER — OFF BY DEFAULT, AND OFF MEANS ABSENT.
+#
+# WHY IT MATTERS. Measured arithmetic, not opinion: the generation canvas is
+# 704 wide and the delivered film is 1080 wide, so assembly resamples every
+# frame UP by 1.534x. A pixel resampler cannot invent detail that was never
+# sampled, and that 53% is exactly the softness a viewer reads as "hazy" — it
+# is baked in before Remotion ever opens the clip. Upstream's answer is
+# multi-scale: generate latents at the base canvas, upsample them IN LATENT
+# SPACE, run a short second denoise so the transformer actually synthesises
+# the new detail, then decode. videogen.py implements all three passes and
+# ltxcaps.py turns them on the moment this component is present.
+#
+# WHY IT IS A PIN FILE AND NOT A DEFAULT. Three reasons, and each is a rule
+# this repository already holds:
+#
+#   1. A REVISION IS THE LICENCE. The LTX bake above pins a sha because the
+#      owner accepted the LTX Open Weights terms AS THEY STOOD at those
+#      bytes. The upscaler ships under the same family of terms, so it gets
+#      the same treatment: no sha, no bake. Inventing a plausible-looking
+#      revision would be worse than shipping without the capability.
+#   2. UNSET MUST BE A NO-OP. With the pin file empty this stage does nothing
+#      at all, so the image is byte-identical to the one before this change
+#      and no build that works today can start failing because of it.
+#   3. THE BUILD IS WHERE VERIFICATION CAN HAPPEN. The gates below — repo
+#      reachable, revision matches, licence text present, component config
+#      loadable by the installed diffusers, size inside the guard — need the
+#      registry. They run there and fail closed.
+#
+# WHY A FILE RATHER THAN A BUILD ARG. `test_the_image_takes_no_build_argument`
+# bans ARG outright, because ARG and ENV both survive into the published image
+# where `docker history` can read them, and a blanket ban is stronger than
+# case-by-case judgement about which ARG is sensitive. That guard stands. A
+# committed pin is better here anyway: enabling a licence-bearing model becomes
+# a reviewable one-line diff rather than an invisible build flag, which is
+# exactly how the LTX revision above is already pinned.
+#
+# SIZE, computed from the architecture in diffusers 0.38.0
+# (pipelines/ltx/modeling_latent_upsampler.py) rather than guessed:
+# in_channels 128, mid_channels 512, 4 res blocks per stage, Conv3d ->
+# 126.25 M parameters, ~482 MiB at fp32 and ~241 MiB at bf16. Against the
+# ~40 GiB media image that is roughly 1.2%, so the disk finding that blocked
+# earlier work does NOT block this. The guard below is set well above the
+# computed figure and well below anything that could be a different model.
+RUN --mount=type=secret,id=hf_token python3 - <<'EOF'
+import json, os, shutil
+
+# The pin file: blank lines and # comments ignored, then "<repo> <revision>".
+REPO = REVISION = ""
+try:
+    with open("/app/ltx-upscaler.pin", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) != 2:
+                raise SystemExit(
+                    f"ltx-upscaler.pin: expected '<repo> <revision>', got {line!r}"
+                )
+            REPO, REVISION = parts
+            break
+except FileNotFoundError:
+    pass
+DEST = "/app/models/ltx/latent_upsampler"
+# 2x the computed fp32 size. Comfortably above the real component and far
+# below anything that could be a transformer arriving under the wrong name.
+SIZE_GUARD_BYTES = 1024**3
+
+if not (REPO and REVISION):
+    print("UPSCALER SKIPPED: ltx-upscaler.pin names no revision. The image "
+          "ships without multi-scale; videogen records "
+          "upscaler_absent_reason=latent-upsampler-not-baked on every clip.")
+    raise SystemExit(0)
+
+from huggingface_hub import HfApi, snapshot_download
+
+
+def build_token():
+    try:
+        with open("/run/secrets/hf_token") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+TOKEN = build_token()
+api = HfApi()
+info = api.model_info(REPO, revision=REVISION, files_metadata=True, token=TOKEN)
+
+# A NAME NAMES A BRANCH; A SHA NAMES BYTES. Same rule as the LTX bake.
+if getattr(info, "sha", None) != REVISION:
+    raise SystemExit(
+        f"{REPO} resolved to {getattr(info, 'sha', None)} but this build was "
+        f"pinned to {REVISION} — refusing to bake different bytes"
+    )
+
+weights = sum(
+    (f.size or 0) for f in info.siblings
+    if f.rfilename.endswith((".safetensors", ".bin"))
+)
+if not 0 < weights <= SIZE_GUARD_BYTES:
+    raise SystemExit(
+        f"{REPO} carries {weights} weight bytes; the upscaler guard is "
+        f"{SIZE_GUARD_BYTES}. That is not a spatial latent upsampler."
+    )
+
+snapshot_download(
+    REPO, revision=REVISION, token=TOKEN, local_dir=DEST,
+    allow_patterns=["*.json", "*.safetensors", "LICENSE*", "NOTICE*",
+                    "*icense*.txt", "*icence*.txt"],
+)
+
+# THE TERMS MUST TRAVEL WITH THE WEIGHTS — the same compliance check the LTX
+# bake makes, for the same reason: an image that redistributes someone's model
+# without their licence text beside it is a failure caught here rather than by
+# a human noticing later.
+licence_files = sorted(
+    n for n in os.listdir(DEST)
+    if "LICENSE" in n.upper() or "LICENCE" in n.upper() or n.upper().startswith("NOTICE")
+)
+if not licence_files:
+    raise SystemExit(
+        f"{REPO} shipped no LICENSE or NOTICE at {REVISION} — refusing to "
+        "redistribute the weights without their terms"
+    )
+
+# IT MUST BE THE CLASS THE CODE WILL CONSTRUCT. A config that loads under a
+# different model class would fail at job time on a rented card, which is the
+# class of failure this whole bake exists to prevent.
+with open(os.path.join(DEST, "config.json")) as fh:
+    cfg = json.load(fh)
+klass = str(cfg.get("_class_name") or "")
+if klass != "LTXLatentUpsamplerModel":
+    raise SystemExit(
+        f"{DEST}/config.json declares {klass!r}, not LTXLatentUpsamplerModel"
+    )
+from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
+LTXLatentUpsamplerModel.from_config(cfg)  # raises if the config is not loadable
+
+on_disk = sum(
+    os.path.getsize(os.path.join(r, n))
+    for r, _, fs in os.walk(DEST) for n in fs if n.endswith(".safetensors")
+)
+with open("/app/models/LTX_UPSCALER_ID", "w") as fh:
+    fh.write(f"{REPO}\n")
+with open("/app/models/LTX_UPSCALER_REVISION", "w") as fh:
+    fh.write(f"{REVISION}\n")
+print(f"UPSCALER BAKED {REPO} at {REVISION} ({on_disk} bytes on disk); "
+      f"licence files {licence_files}")
+
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
              "/home/oniq/.cache/huggingface"):

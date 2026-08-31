@@ -1,0 +1,44 @@
+# THE SPATIAL LATENT UPSCALER PIN — empty means "do not bake one".
+#
+# One line, "<huggingface-repo> <revision-sha>", to turn multi-scale generation
+# on. Blank or absent and the media image is built exactly as it is today:
+# ltxcaps reports latent_upsampler_baked=false, videogen records
+# upscaler_absent_reason=latent-upsampler-not-baked on every clip, and the
+# single-scale path runs unchanged.
+#
+# WHY THIS FILE EXISTS AT ALL, rather than a default the build could apply
+# on its own. A revision is the licence. The LTX transformer above it is
+# pinned to 8984fa25007f376c1a299016d0957a37a2f797bb because the owner
+# accepted the LTX Open Weights terms as they stood at those exact bytes; the
+# spatial upscaler ships under the same family of terms and gets the same
+# treatment. An agent cannot accept a licence on the owner's behalf, and
+# writing a plausible-looking sha here would be a fabrication wearing the
+# costume of a fact.
+#
+# WHAT ENABLING IT BUYS, and it is the largest single quality lever left.
+# Measured arithmetic: the generation canvas is 704 wide and the delivered
+# film is 1080 wide, so assembly resamples every frame UP by 1.534x. A pixel
+# resampler cannot invent detail that was never sampled — that 53% is the
+# softness a viewer reads as "hazy", and it is baked in before Remotion ever
+# opens the clip. With the upscaler present videogen generates at 704x1248,
+# upsamples the LATENTS 2x, runs a short partial re-denoise at 1408x2496 so
+# the transformer actually synthesises the new detail, and only then decodes.
+# The film's 1080 then becomes a DOWNSCALE of real detail.
+#
+# COST, computed from the architecture in diffusers 0.38.0
+# (pipelines/ltx/modeling_latent_upsampler.py): 126.25 M parameters,
+# ~482 MiB fp32 / ~241 MiB bf16 — roughly 1.2% of the ~40 GiB media image.
+# Disk is not the blocker here. GPU time is unmeasured: the refine pass adds
+# ltxcaps.REFINE_STEPS steps at 4x the pixels, which is real additional
+# inference and must be measured on a real generation before any cost claim
+# is made about it.
+#
+# TO ENABLE: uncomment and complete the line below with the repository and
+# the exact revision whose licence terms have been read and accepted. The
+# build then verifies, and refuses if any of it does not hold — the revision
+# must resolve to that sha, a LICENSE or NOTICE must ship with the weights,
+# config.json must declare LTXLatentUpsamplerModel, the config must load
+# under the installed diffusers, and the weights must be inside the size
+# guard.
+#
+# <huggingface-repo> <revision-sha>

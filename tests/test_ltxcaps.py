@@ -308,8 +308,12 @@ class ConditionRecorder(Recorder):
     class — the discriminator is which KWARGS arrive, not which type does."""
 
 
-def _fake_condition(image):
-    return {"image": image, "frame_index": 0, "strength": videogen.CONDITION_STRENGTH}
+def _fake_condition(image, frame_index=None, strength=None):
+    return {
+        "image": image,
+        "frame_index": videogen.CONDITION_FRAME_INDEX if frame_index is None else frame_index,
+        "strength": videogen.CONDITION_STRENGTH if strength is None else strength,
+    }
 
 
 def test_the_conditioning_frame_strength_and_noise_are_all_named(
@@ -401,3 +405,316 @@ def test_the_still_is_written_losslessly():
     # It is a CONDITIONING FRAME. A jpeg here would put compression artifacts
     # into the video model's own input.
     assert contract.IMAGE_GEN_FORMAT == "png"
+
+
+# ─────────────────────────────────── multi-scale latent upscaling (§6, §10)
+
+class UpsampleRecorder:
+    """Stands in for LTXLatentUpsamplePipeline. Records the latents it was
+    handed and returns a marker, so the test can prove the REFINE pass was
+    given the upsampler's output and not the base pass's."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        return SimpleNamespace(frames=["UPSCALED-LATENTS"])
+
+
+class TwoPassRecorder(Recorder):
+    """A pipe that answers both the latent pass and the decode pass."""
+
+    def __call__(self, **kwargs):
+        from types import SimpleNamespace
+
+        if kwargs.get("output_type") == "latent":
+            self.calls.append(kwargs)
+            return SimpleNamespace(frames=["BASE-LATENTS"])
+        return super().__call__(**kwargs)  # Recorder records the decode pass
+
+
+@pytest.fixture
+def multiscale_checkpoint(tmp_path, monkeypatch):
+    root = write_fake_checkpoint(tmp_path / "ltx-up", upscaler=True)
+    monkeypatch.setattr(videogen, "_model_dir", lambda: root)
+    monkeypatch.setattr(videogen, "model_id", lambda: "Lightricks/LTX-Video")
+    monkeypatch.setattr(ltxcaps, "_multiscale_available", lambda caps: (True, "ok"))
+    return root
+
+
+def test_the_upscaler_runs_in_latent_space_not_on_pixels(io_paths, multiscale_checkpoint):
+    """The whole point of §6, as a behavioural assertion.
+
+    A generic pixel upscaler on the finished MP4 cannot invent detail that was
+    never sampled. The latent path upsamples BEFORE the decode and then runs a
+    short second denoise, so the transformer actually synthesises the detail.
+    This proves the order: base pass hands latents out, the upsampler receives
+    THOSE latents, and the refine pass receives the upsampler's output.
+    """
+    src, out = io_paths
+    pipe = TwoPassRecorder()
+    up = UpsampleRecorder()
+    metrics = videogen.run(
+        _job(), src, out, load_pipeline=lambda: pipe, load_upsampler=lambda: up
+    )
+
+    assert len(pipe.calls) == 2, "expected a base pass and a refine pass"
+    base, refine = pipe.calls
+    assert base["output_type"] == "latent"
+    assert up.calls[0]["latents"] == "BASE-LATENTS"
+    assert refine["latents"] == "UPSCALED-LATENTS"
+    assert "output_type" not in refine, "the refine pass decodes"
+    assert metrics["upscaler_used"] is True
+    assert metrics["upscaler_absent_reason"] is None
+
+
+def test_the_refine_pass_is_partial_and_at_double_the_canvas(
+    io_paths, multiscale_checkpoint
+):
+    src, out = io_paths
+    pipe = TwoPassRecorder()
+    metrics = videogen.run(
+        _job(), src, out,
+        load_pipeline=lambda: pipe, load_upsampler=lambda: UpsampleRecorder(),
+    )
+    base, refine = pipe.calls
+    assert (base["width"], base["height"]) == (contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT)
+    assert refine["width"] == contract.VIDEO_WIDTH * 2
+    assert refine["height"] == contract.VIDEO_HEIGHT * 2
+    # PARTIAL: a full re-denoise would cost the whole step count again and
+    # discard the composition the base pass just agreed on.
+    assert 0 < refine["denoise_strength"] < 1.0
+    assert refine["num_inference_steps"] == ltxcaps.REFINE_STEPS
+    assert refine["num_inference_steps"] < base["num_inference_steps"]
+    assert metrics["render_width"] == contract.VIDEO_WIDTH * 2
+    assert metrics["refine_steps_run"] == ltxcaps.REFINE_STEPS
+
+
+def test_the_film_stops_upscaling_the_render_once_multiscale_runs():
+    """1080 must become a DOWNSCALE of real detail, not an upscale of absent
+    detail. That is the whole haze finding, as arithmetic."""
+    film_w = 1080
+    assert contract.VIDEO_WIDTH < film_w, "the base canvas is upscaled by the film"
+    assert contract.VIDEO_WIDTH * ltxcaps.UPSCALE_SPATIAL_FACTOR > film_w
+
+
+def test_a_missing_upscaler_is_recorded_never_silent(io_paths, fake_checkpoint):
+    """'The clip was soft' and 'the upscaler was never in the image' are
+    indistinguishable in an output file and completely different in a
+    diagnosis."""
+    src, out = io_paths
+    pipe = Recorder()
+    metrics = videogen.run(_job(), src, out, load_pipeline=lambda: pipe)
+    assert metrics["upscaler_used"] is False
+    assert metrics["upscaler_absent_reason"] == "latent-upsampler-not-baked"
+    assert metrics["render_width"] == contract.VIDEO_WIDTH
+    assert len(pipe.calls) == 1, "no refine pass without an upscaler"
+
+
+def test_nothing_in_the_worker_pixel_upscales_a_finished_clip():
+    source = open("videogen.py", encoding="utf-8").read()
+    encode = source[source.index("def _encode_mp4"): source.index("def _encode_mp4") + 700]
+    for generic in ("scale=", "LANCZOS", "resize(", "upscale"):
+        assert generic not in encode
+
+
+# ───────────────────────────── the identity anchor (§3, §4, §5)
+
+def test_a_reference_key_must_be_a_published_canonical_reference():
+    """The field is an AUTHORITY TO READ ONE OBJECT, so it is pinned to a
+    server-owned prefix rather than trusted as a key."""
+    for bad in (
+        "../secrets.png",
+        "story/still/someone-elses.png",
+        "story/ref/../escape.png",
+        "https://evil.example/x.png",
+        "story/ref/x.exe",
+        "/story/ref/x.png",
+        "",
+        123,
+    ):
+        with pytest.raises(contract.ContractError):
+            contract.validate_job({
+                "op": "image_generate",
+                "output_key": "out/a.png",
+                "params": {"prompt": "p", "reference_key": bad},
+            })
+    ok = contract.validate_job({
+        "op": "image_generate",
+        "output_key": "out/a.png",
+        "params": {"prompt": "p", "reference_key": "story/ref/ali-01.png"},
+    })
+    assert ok["params"]["reference_key"] == "story/ref/ali-01.png"
+    # ABSENT is not an error — it is the unconditioned path, unchanged.
+    plain = contract.validate_job({
+        "op": "image_generate", "output_key": "out/a.png", "params": {"prompt": "p"},
+    })
+    assert "reference_key" not in plain["params"]
+
+
+def test_the_strength_band_refuses_both_useless_ends():
+    for bad in (0.0, 1.0, 1.5, -0.2, "0.5", True):
+        with pytest.raises(contract.ContractError):
+            contract.validate_job({
+                "op": "image_generate",
+                "output_key": "out/a.png",
+                "params": {
+                    "prompt": "p",
+                    "reference_key": "story/ref/a.png",
+                    "reference_strength": bad,
+                },
+            })
+
+
+def test_a_strength_without_a_reference_is_refused():
+    with pytest.raises(contract.ContractError):
+        contract.validate_job({
+            "op": "image_generate",
+            "output_key": "out/a.png",
+            "params": {"prompt": "p", "reference_strength": 0.5},
+        })
+
+
+def _image_job(**params):
+    return contract.validate_job({
+        "op": "image_generate",
+        "output_key": "out/a.png",
+        "params": {"prompt": "a person by a window", **params},
+    })
+
+
+def test_the_identity_anchor_reaches_the_sampler_as_a_frame_0_condition(
+    tmp_path, fake_checkpoint, monkeypatch
+):
+    ref = str(tmp_path / "ref.png")
+    Image.new("RGB", (900, 1600), (200, 120, 60)).save(ref)
+    pipe = Recorder(n=contract.IMAGE_GEN_NUM_FRAMES)
+    monkeypatch.setattr(videogen, "_video_condition", _fake_condition)
+    metrics = videogen.run_image(
+        _image_job(reference_key="story/ref/a.png", reference_strength=0.6),
+        str(tmp_path / "out.png"),
+        load_pipeline=lambda: pipe,
+        reference_path=ref,
+    )
+    kw = pipe.calls[0]
+    assert kw["conditions"][0]["frame_index"] == 0
+    assert kw["conditions"][0]["strength"] == 0.6
+    assert "image_cond_noise_scale" in kw
+    assert metrics["conditioning_count"] == 1
+    assert metrics["conditioning_strength"] == 0.6
+
+
+def test_an_anchor_below_full_strength_is_the_point(tmp_path, fake_checkpoint, monkeypatch):
+    """Strength 1.0 hands the reference straight back and wastes the shot's
+    own prompt; the anchor has to start PARTWAY from that person."""
+    ref = str(tmp_path / "ref.png")
+    Image.new("RGB", (704, 1248), (10, 20, 30)).save(ref)
+    pipe = Recorder(n=contract.IMAGE_GEN_NUM_FRAMES)
+    monkeypatch.setattr(videogen, "_video_condition", _fake_condition)
+    videogen.run_image(
+        _image_job(reference_key="story/ref/a.png"),
+        str(tmp_path / "out.png"),
+        load_pipeline=lambda: pipe,
+        reference_path=ref,
+    )
+    assert 0 < pipe.calls[0]["conditions"][0]["strength"] < 1.0
+    assert pipe.calls[0]["conditions"][0]["strength"] == videogen.DEFAULT_REFERENCE_STRENGTH
+
+
+def test_a_still_with_no_reference_is_byte_for_byte_the_old_path(
+    tmp_path, fake_checkpoint
+):
+    pipe = Recorder(n=contract.IMAGE_GEN_NUM_FRAMES)
+    metrics = videogen.run_image(
+        _image_job(), str(tmp_path / "out.png"), load_pipeline=lambda: pipe
+    )
+    assert "conditions" not in pipe.calls[0]
+    assert metrics["conditioning_count"] == 0
+    assert metrics["conditioning_strength"] is None
+
+
+def test_an_unbuildable_reference_refuses_rather_than_drawing_an_unanchored_still(
+    tmp_path, fake_checkpoint, monkeypatch
+):
+    """A still drawn without the anchor the caller asked for looks exactly like
+    one drawn with it. The difference only shows up as the character changing
+    face between shots — the defect, arriving silently."""
+    ref = str(tmp_path / "ref.png")
+    Image.new("RGB", (704, 1248), (1, 2, 3)).save(ref)
+    monkeypatch.setattr(videogen, "_video_condition", lambda *a, **k: None)
+    with pytest.raises(videogen.ReferenceUnsupported):
+        videogen.run_image(
+            _image_job(reference_key="story/ref/a.png"),
+            str(tmp_path / "out.png"),
+            load_pipeline=lambda: Recorder(n=contract.IMAGE_GEN_NUM_FRAMES),
+            reference_path=ref,
+        )
+
+
+def test_the_reference_download_is_bounded_and_by_key_only():
+    """The worker reads the reference with its OWN credentials, so the handler
+    may only ever hand storage.download a contract-validated key."""
+    handler_src = open("handler.py", encoding="utf-8").read()
+    block = handler_src[handler_src.rindex('elif job["op"] == "image_generate"'):]
+    block = block[: block.index("\n        else:")]
+    assert 'job["params"].get("reference_key")' in block
+    assert "contract.MAX_INPUT_BYTES" in block
+    # No URL, no caller-supplied path, no origin of any kind.
+    for forbidden in ("http", "url", "requests", "urlopen"):
+        assert forbidden not in block.lower()
+
+
+def test_the_upscaler_bake_is_off_unless_a_revision_is_pinned():
+    """A revision is the licence. No sha, no bake — and unset must be a no-op,
+    so no build that works today can start failing because of this stage."""
+    docker = open("Dockerfile", encoding="utf-8").read()
+    pin = open("ltx-upscaler.pin", encoding="utf-8").read()
+    # The shipped pin names nothing: every non-comment line is blank, so the
+    # stage skips and the image is what it was before this change.
+    assert not [l for l in pin.splitlines() if l.split("#", 1)[0].strip()]
+    assert "COPY ltx-upscaler.pin" in docker
+    assert "UPSCALER SKIPPED" in docker
+    # And it is a FILE, not a build arg: ARG survives into `docker history`,
+    # which is why test_the_image_takes_no_build_argument bans it outright.
+    assert not any(l.strip().startswith("ARG ") for l in docker.splitlines())
+    # The same gates the LTX bake makes.
+    stage = docker[docker.index("THE SPATIAL LATENT UPSCALER"):]
+    stage = stage[: stage.index("# Bake the STORY model")]
+    assert "refusing to bake different bytes" in stage
+    assert "without their terms" in stage
+    assert "LTXLatentUpsamplerModel" in stage
+    assert "SIZE_GUARD_BYTES" in stage
+
+
+def test_a_fallback_pipeline_is_never_sent_conditions(io_paths, fake_checkpoint):
+    """`conditions=` on LTXImageToVideoPipeline is a TypeError mid-job on a
+    rented GPU. The capability is read off the object that actually loaded,
+    not off what the checkpoint could in principle support."""
+    src, out = io_paths
+
+    class NoConditions(Recorder):
+        _oniq_supports_conditions = False
+
+    pipe = NoConditions()
+    videogen.run(_job(), src, out, load_pipeline=lambda: pipe)
+    assert "conditions" not in pipe.calls[0]
+    assert pipe.calls[0]["image"] is not None
+
+
+def test_an_anchor_on_a_fallback_pipeline_refuses(tmp_path, fake_checkpoint):
+    ref = str(tmp_path / "ref.png")
+    Image.new("RGB", (704, 1248), (5, 5, 5)).save(ref)
+
+    class NoConditions(Recorder):
+        _oniq_supports_conditions = False
+
+    with pytest.raises(videogen.ReferenceUnsupported):
+        videogen.run_image(
+            _image_job(reference_key="story/ref/a.png"),
+            str(tmp_path / "out.png"),
+            load_pipeline=lambda: NoConditions(n=contract.IMAGE_GEN_NUM_FRAMES),
+            reference_path=ref,
+        )

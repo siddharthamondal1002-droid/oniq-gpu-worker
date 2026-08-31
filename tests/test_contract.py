@@ -378,7 +378,7 @@ def test_image_generate_takes_no_watermark_field():
     # A conditioning frame is an intermediate. The mark belongs to the
     # delivered film, burned by the stage that knows the entitlement.
     assert contract._IMAGE_GEN_PARAM_FIELDS == frozenset(
-        {"prompt", "seed", "negative_prompt"}
+        {"prompt", "seed", "negative_prompt", "reference_key", "reference_strength"}
     )
     assert "watermark" not in contract._IMAGE_GEN_PARAM_FIELDS
     with pytest.raises(contract.ContractError):

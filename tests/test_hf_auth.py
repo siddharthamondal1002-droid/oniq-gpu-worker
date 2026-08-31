@@ -212,6 +212,13 @@ def _bakes_by_role():
     for block in _bake_blocks():
         if "LTX_PASS" in block:
             roles.setdefault("ltx_passes", []).append(block)
+        elif "ltx-upscaler.pin" in block:
+            # BEFORE the /app/models/ltx test below, because the upscaler
+            # lands INSIDE that directory and would otherwise be filed as the
+            # transformer bake — silently replacing it, and taking the count
+            # with it. Named first, for exactly the reason this function's
+            # docstring gives: a name cannot slide the way an index can.
+            roles["upscaler"] = block
         elif "/app/models/ltx" in block:
             roles["ltx"] = block
         elif "/app/models/piper" in block:
@@ -232,7 +239,12 @@ def test_every_bake_is_syntactically_valid_python():
     roles = _bakes_by_role()
     # Three named bakes plus however many text-encoder passes the layer
     # split uses; every one of them is compiled, none is skipped.
-    assert len(blocks) == 3 + len(roles.get("ltx_passes", []))
+    # Three named bakes, the optional upscaler, plus however many
+    # text-encoder passes the layer split uses; every one compiled, none
+    # skipped.
+    assert len(blocks) == 3 + len(roles.get("ltx_passes", [])) + (
+        1 if "upscaler" in roles else 0
+    )
     for block in blocks:
         ast.parse(block)
 

@@ -181,6 +181,13 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         "storygen.py",
         "audio.py",
         "handler.py",
+        # ltx-upscaler.pin joined 2026-08-31 with multi-scale generation. It
+        # is DATA, not code: one line naming the spatial upscaler's repo and
+        # revision, empty by default so the image is unchanged until an owner
+        # fills it in. A build arg would have done the same job and is banned
+        # outright (ARG survives into `docker history`), and a committed pin
+        # makes enabling a licence-bearing model a reviewable diff.
+        "ltx-upscaler.pin",
     ]
 
 
@@ -272,6 +279,7 @@ def test_dockerignore_denies_by_default():
         "!storygen.py",
         "!audio.py",
         "!handler.py",
+        "!ltx-upscaler.pin",
     }
 
 

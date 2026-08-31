@@ -292,7 +292,9 @@ MIN_PROBE_FRAMES = 5
 MAX_PROBE_FRAMES = 121
 MIN_PROBE_STEPS = 1
 MAX_PROBE_STEPS = 50
-_IMAGE_GEN_PARAM_FIELDS = frozenset({"prompt", "seed", "negative_prompt"})
+_IMAGE_GEN_PARAM_FIELDS = frozenset(
+    {"prompt", "seed", "negative_prompt", "reference_key", "reference_strength"}
+)
 _STORY_PARAM_FIELDS = frozenset({"prompt", "max_tokens"})
 _AUDIO_PARAM_FIELDS = frozenset({"narration"})
 _CONCAT_PARAM_FIELDS = frozenset({"segment_keys"})
@@ -357,7 +359,25 @@ OUTPUT_WHITELIST = frozenset(
         "pipeline_used",
         "conditioning",
         "conditioning_strength",
+        # MULTI-SCALE evidence. `multiscale` is what the checkpoint CAN do;
+        # `upscaler_used` is what this job actually did; `upscaler_absent_reason`
+        # says why when the two differ. All three, because a soft clip and a
+        # missing component look identical in an output file.
+        "multiscale",
+        "multiscale_reason",
+        "refine_steps",
+        "refine_denoise_strength",
+        "upscale_spatial_factor",
+        "max_sequence_length",
         "upscaler_used",
+        "upscaler_absent_reason",
+        # The resolution the LAST pass actually sampled at. The film is 1080
+        # wide; whether that is a downscale of real detail or an upscale of
+        # absent detail is the whole of the haze question, and this is the
+        # number that answers it.
+        "render_width",
+        "render_height",
+        "refine_steps_run",
         # WHICH precision actually loaded. 4-bit and bf16 differ by ~12GB
         # of the card, and the load can silently fall back, so the mode is
         # reported by the job rather than assumed from the config.
@@ -447,6 +467,42 @@ def _require_key(value, field: str) -> str:
         )
     if ".." in value:
         raise ContractError("invalid-input", f"{field} may not contain '..'")
+    return value
+
+
+# THE ONLY SHAPE A REFERENCE MAY ARRIVE IN.
+#
+# The worker reads a character reference from the media bucket with its OWN
+# credentials, so the field naming it is an authority to read one object. It is
+# therefore NOT a free object key: it is pinned to a server-owned prefix and a
+# bounded id, so the set of objects any caller can name is exactly the set of
+# canonical character references the application has published — and nothing
+# else in the bucket, of any user's.
+#
+# `input_key` stays a general key because the caller that supplies it is the
+# edge function, which DERIVES it from a job token; this field can arrive from
+# further out, so it is narrowed at the contract rather than trusted.
+REFERENCE_PREFIX = "story/ref/"
+# The usable band for an identity anchor, and both ends are refusals rather
+# than clamps. Above the top the sampler simply returns the reference; below
+# the bottom the anchor is indistinguishable from no anchor at all, and a
+# caller that asked for one deserves to be told it would have done nothing.
+MIN_REFERENCE_STRENGTH = 0.05
+MAX_REFERENCE_STRENGTH = 0.95
+_REFERENCE_RE = __import__("re").compile(
+    r"^story/ref/[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(png|jpg|jpeg|webp)$"
+)
+
+
+def _require_reference_key(value) -> str:
+    if not isinstance(value, str) or not _REFERENCE_RE.match(value):
+        raise ContractError(
+            "invalid-input",
+            "params.reference_key must be a canonical character reference "
+            f"under {REFERENCE_PREFIX} (bounded id, image extension)",
+        )
+    if ".." in value:
+        raise ContractError("invalid-input", "params.reference_key may not contain '..'")
     return value
 
 
@@ -614,12 +670,55 @@ def validate_job(raw) -> dict:
         # INTERMEDIATE, never delivered. The mark is burned by the video
         # stage that consumes it, from the entitlement of record, so a
         # still cannot carry a second mark into the film.
+        # THE IDENTITY ANCHOR (owner directive, 2026-08-31 — character
+        # identity is not preserved between character creation, scene
+        # creation and motion).
+        #
+        # WHAT THIS IS AND IS NOT. LTX-Video has no identity-transfer
+        # mechanism — no IP-Adapter, no face embedding, no reference-only
+        # attention; VERIFIED by reading the installed diffusers 0.38.0 LTX
+        # pipelines end to end. What it has is FRAME conditioning. So the
+        # honest anchor is img2img-shaped: the canonical character frame is
+        # supplied as the frame-0 condition at a strength below 1.0, and the
+        # sampler starts partway from that person instead of from noise. A
+        # strength of 1.0 would hand the reference straight back; low
+        # strengths are indistinguishable from drawing the character again.
+        #
+        # It is bounded here rather than trusted because it is the difference
+        # between "a new shot of this person" and "the reference, returned".
+        reference_key = params_raw.get("reference_key")
+        reference = None
+        if reference_key is not None:
+            reference = _require_reference_key(reference_key)
+        strength = params_raw.get("reference_strength")
+        if strength is not None:
+            if reference is None:
+                raise ContractError(
+                    "invalid-input",
+                    "params.reference_strength without params.reference_key",
+                )
+            if isinstance(strength, bool) or not isinstance(strength, (int, float)):
+                raise ContractError(
+                    "invalid-input", "params.reference_strength must be a number"
+                )
+            if not MIN_REFERENCE_STRENGTH <= float(strength) <= MAX_REFERENCE_STRENGTH:
+                raise ContractError(
+                    "invalid-input",
+                    "params.reference_strength must be between "
+                    f"{MIN_REFERENCE_STRENGTH} and {MAX_REFERENCE_STRENGTH}",
+                )
+            strength = float(strength)
         return {
             "op": op,
             "input_key": None,
             "output_key": output_key,
             "preview": preview,
-            "params": {"prompt": prompt.strip(), **_sampling_params(params_raw)},
+            "params": {
+                "prompt": prompt.strip(),
+                **_sampling_params(params_raw),
+                **({"reference_key": reference} if reference else {}),
+                **({"reference_strength": strength} if strength is not None else {}),
+            },
         }
 
     if op == "model_hydrate":

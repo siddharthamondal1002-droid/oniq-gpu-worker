@@ -103,6 +103,16 @@ def _generator(seed: int):
     return None
 
 
+class ReferenceUnsupported(RuntimeError):
+    """A reference was supplied and could not be honoured.
+
+    Refused rather than dropped. A still drawn without the anchor the caller
+    asked for looks exactly like one drawn with it, and the difference only
+    shows up as the character changing face between shots — which is the
+    defect, arriving silently.
+    """
+
+
 class OutOfMemory(RuntimeError):
     """The canvas did not fit. Refused, never silently downscaled."""
 
@@ -146,7 +156,7 @@ CONDITION_STRENGTH = 1.0
 CONDITION_FRAME_INDEX = 0
 
 
-def _video_condition(image):
+def _video_condition(image, frame_index=None, strength=None):
     """The explicit frame-0 condition, or None when it cannot be built.
 
     WHY THIS IS A SEPARATE FUNCTION. Two callers need it to degrade rather
@@ -167,8 +177,8 @@ def _video_condition(image):
     try:
         return LTXVideoCondition(
             image=image,
-            frame_index=CONDITION_FRAME_INDEX,
-            strength=CONDITION_STRENGTH,
+            frame_index=CONDITION_FRAME_INDEX if frame_index is None else frame_index,
+            strength=CONDITION_STRENGTH if strength is None else strength,
         )
     except TypeError:
         # A diffusers version whose condition object is shaped differently.
@@ -207,6 +217,12 @@ def _load_real_pipeline():
             )
             pipe.to("cuda")
             pipe.vae.enable_tiling()
+            # WHAT LOADED, recorded on the object itself. The profile says what
+            # the CHECKPOINT can support; this says what is actually on the
+            # card. They differ exactly when the fallback below runs, and
+            # sending `conditions=` to LTXImageToVideoPipeline — which has no
+            # such parameter — would be a TypeError mid-job on a rented GPU.
+            pipe._oniq_supports_conditions = True
             return pipe
         except (ImportError, AttributeError, TypeError, ValueError, OSError):
             # Named exceptions only: an OOM or a CUDA fault must NOT be caught
@@ -220,7 +236,36 @@ def _load_real_pipeline():
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()
+    pipe._oniq_supports_conditions = False
     return pipe
+
+
+def _load_real_upsampler(pipe):
+    """LTXLatentUpsamplePipeline over the BAKED upsampler and the pipeline's
+    OWN vae. Returns None when the component is not present.
+
+    VERIFIED against diffusers 0.38.0 (pipeline_ltx_latent_upsample.py): the
+    pipeline takes exactly two modules — `vae` and `latent_upsampler` — so
+    reusing the loaded pipeline's vae means the only new weights on the card
+    are the upsampler itself, and the two stages cannot disagree about how a
+    latent is normalised.
+    """
+    import torch
+    from diffusers import LTXLatentUpsamplePipeline
+    from diffusers.pipelines.ltx.modeling_latent_upsampler import (
+        LTXLatentUpsamplerModel,
+    )
+
+    caps, _ = _profile()
+    where = caps.get("latent_upsampler_dir")
+    if not where:
+        return None
+    upsampler = LTXLatentUpsamplerModel.from_pretrained(
+        os.path.join(_model_dir(), where), torch_dtype=torch.bfloat16
+    )
+    up = LTXLatentUpsamplePipeline(vae=pipe.vae, latent_upsampler=upsampler)
+    up.to("cuda")
+    return up
 
 
 def _load_real_text_pipeline():
@@ -243,16 +288,47 @@ def _load_real_text_pipeline():
     return pipe
 
 
-def _generate_still(pipe, prompt: str, sampler: dict):
-    """One deterministic T2V pass at the shortest legal length. Returns
-    the frames; frame 0 is the still the caller keeps.
+# The identity anchor's default strength, when a caller names a reference and
+# not a number.
+#
+# STATED, NOT BORROWED, and the reasoning is the whole value of the constant.
+# LTXVideoCondition.strength defaults to 1.0 — "hold this frame as given" —
+# which for a canonical character reference means the sampler returns the
+# reference and the shot's own prompt is wasted. What an identity anchor wants
+# is to start PARTWAY from that person and let the prompt place them somewhere
+# new, which is the img2img trade: too high and every shot is the same frame,
+# too low and the character is redrawn from scratch, which is the defect this
+# exists to fix.
+#
+# 0.5 is the midpoint of the band the contract admits and is deliberately
+# UNTUNED. No measurement on this hardware justifies a sharper value yet, and
+# inventing one would repeat exactly the mistake the audit found. The caller
+# may send any strength in [0.05, 0.95]; a tuning pass sets a better default
+# WITH a measured comparison beside it.
+DEFAULT_REFERENCE_STRENGTH = 0.5
 
-    Every sampler value is now passed EXPLICITLY. Guidance in particular was
-    never sent before, so the pipeline's own default applied silently and no
-    record of it reached the job's metrics — a value nobody chose and nobody
-    could see.
+
+def _generate_still(pipe, prompt: str, sampler: dict, profile: dict,
+                    reference=None, reference_strength=None):
+    """One deterministic pass at the shortest legal length. Returns
+    (frames, stats); frame 0 is the still the caller keeps.
+
+    Every sampler value is passed EXPLICITLY. Guidance in particular was never
+    sent before, so the pipeline's own default applied silently and no record
+    of it reached the job's metrics — a value nobody chose and nobody could see.
+
+    THE IDENTITY ANCHOR, when the job named a canonical character reference.
+    Supplied as the frame-0 condition below 1.0 strength, so the sampler starts
+    partway from that person rather than from noise. This is the honest limit
+    of what LTX offers: it has frame conditioning and text conditioning and no
+    identity-transfer mechanism at all — no IP-Adapter, no face embedding, no
+    reference-only attention — VERIFIED by reading the installed diffusers
+    0.38.0 LTX pipelines end to end. An anchored still is a real improvement on
+    drawing the character from scratch every shot; it is not a guarantee, and
+    nothing here should be read as one.
     """
-    result = pipe(
+    stats = {"conditioning_count": 0, "conditioning_strength": None}
+    call = dict(
         prompt=prompt,
         negative_prompt=sampler["negative_prompt"],
         width=contract.VIDEO_WIDTH,
@@ -263,23 +339,94 @@ def _generate_still(pipe, prompt: str, sampler: dict):
         guidance_rescale=sampler["guidance_rescale"],
         generator=_generator(sampler["seed"]),
     )
-    return result.frames[0]
+    if reference is not None:
+        if not getattr(pipe, "_oniq_supports_conditions", True):
+            # The condition pipeline did not load, so this build cannot honour
+            # the anchor. Refused, for the same reason as below: an unanchored
+            # still is indistinguishable from an anchored one until the
+            # character's face changes between shots.
+            raise ReferenceUnsupported(
+                "a character reference was supplied but the loaded pipeline "
+                f"({type(pipe).__name__}) takes no conditions"
+            )
+        strength = (
+            DEFAULT_REFERENCE_STRENGTH if reference_strength is None
+            else float(reference_strength)
+        )
+        condition = _video_condition(
+            _fit_to_canvas(reference),
+            frame_index=CONDITION_FRAME_INDEX,
+            strength=strength,
+        )
+        if condition is None:
+            # The reference could not be made into a condition (no diffusers
+            # condition type on this build). Refuse rather than draw an
+            # UNANCHORED still and let the caller believe it was anchored —
+            # that silent substitution is the class of bug this whole body of
+            # work exists to remove.
+            raise ReferenceUnsupported(
+                "a character reference was supplied but this build cannot "
+                "construct an LTX condition for it"
+            )
+        call["conditions"] = [condition]
+        call["image_cond_noise_scale"] = profile["image_cond_noise_scale"]
+        stats["conditioning_count"] = 1
+        stats["conditioning_strength"] = strength
+    result = pipe(**call)
+    return result.frames[0], stats
 
 
-def _generate(pipe, image, prompt: str, sampler: dict, profile: dict):
-    """One deterministic I2V pass. Returns a list of PIL frames.
+def _base_condition(image):
+    """The scene condition: this shot's own still, held at frame 0."""
+    return _video_condition(image, frame_index=CONDITION_FRAME_INDEX,
+                            strength=CONDITION_STRENGTH)
 
-    The VAE decode settings travel with the sampler now. They are the
+
+def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
+              load_upsampler=None):
+    """One deterministic I2V pass, single- or multi-scale.
+
+    Returns (frames, stats) where stats records what actually ran — never what
+    was intended. The VAE decode settings travel with the sampler; they are the
     pipeline's own documented values rather than numbers invented here, and
     they are sent explicitly for the same reason guidance is: a value that is
     never passed is a value that cannot be recorded, and an unrecorded value
     cannot be compared between a good clip and a bad one.
+
+    MULTI-SCALE, WHEN THE UPSCALER IS PRESENT.
+
+    The softness this addresses is arithmetic, not opinion. The base canvas is
+    704 wide; the delivered film is 1080 wide; assembly therefore resamples
+    every frame UP by 1.534x, and a pixel resampler cannot invent detail that
+    was never sampled. Generating at 704 and refining at 1408 means the film's
+    1080 is a DOWNSCALE of real synthesised detail rather than an upscale of
+    absent detail.
+
+    Three documented calls, in the order upstream specifies:
+
+      1. base pass    LTXConditionPipeline(..., output_type="latent")
+      2. upsample     LTXLatentUpsamplePipeline(latents=..., output_type="latent")
+      3. refine       LTXConditionPipeline(..., latents=..., denoise_strength=d)
+
+    The refine pass is PARTIAL on purpose: a full re-denoise at 2x would cost
+    the whole step count again and discard the composition the base pass just
+    agreed on. It adds detail while holding the frame.
+
+    When the upscaler is absent the single-scale path runs unchanged and says
+    so in `upscaler_absent_reason`. It is never silent — "the clip was soft"
+    and "the upscaler was never in the image" are indistinguishable in an
+    output file and completely different in a diagnosis.
     """
+    stats = {
+        "upscaler_used": False,
+        "upscaler_absent_reason": profile.get("multiscale_reason"),
+        "render_width": contract.VIDEO_WIDTH,
+        "render_height": contract.VIDEO_HEIGHT,
+        "refine_steps_run": 0,
+    }
     common = dict(
         prompt=prompt,
         negative_prompt=sampler["negative_prompt"],
-        width=contract.VIDEO_WIDTH,
-        height=contract.VIDEO_HEIGHT,
         num_frames=contract.VIDEO_NUM_FRAMES,
         num_inference_steps=sampler["num_inference_steps"],
         guidance_scale=sampler["guidance_scale"],
@@ -288,20 +435,78 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict):
         decode_noise_scale=profile["decode_noise_scale"],
         generator=_generator(sampler["seed"]),
     )
-    condition = _video_condition(image) if profile.get("conditioning") else None
+    # The CAPABILITY OF THE OBJECT THAT LOADED, falling back to the
+    # checkpoint's own answer for the test rig's fakes (which take **kwargs and
+    # therefore accept either shape).
+    can_condition = getattr(pipe, "_oniq_supports_conditions", profile.get("conditioning"))
+    condition = _base_condition(image) if can_condition else None
     if condition is not None:
         # EXPLICIT CONDITIONING. The frame is named, the strength is named,
         # and the noise added to it is named — all three reach the metrics, so
         # a clip that drifted off its opening frame can be told apart from one
         # that was never asked to hold it.
-        result = pipe(
+        conditioned = dict(
             conditions=[condition],
             image_cond_noise_scale=profile["image_cond_noise_scale"],
-            **common,
         )
     else:
-        result = pipe(image=image, **common)
-    return result.frames[0], 1 if condition is not None else 0
+        conditioned = dict(image=image)
+    stats["conditioning_count"] = 1 if condition is not None else 0
+
+    upsampler = load_upsampler() if (profile.get("multiscale") and load_upsampler) else None
+    if upsampler is None:
+        if profile.get("multiscale") and load_upsampler:
+            # The profile said the component was there and the load did not
+            # produce one. Recorded, never swallowed.
+            stats["upscaler_absent_reason"] = "upsampler-load-returned-none"
+        result = pipe(
+            width=contract.VIDEO_WIDTH,
+            height=contract.VIDEO_HEIGHT,
+            **conditioned,
+            **common,
+        )
+        return result.frames[0], stats
+
+    up_w = contract.VIDEO_WIDTH * profile["upscale_spatial_factor"]
+    up_h = contract.VIDEO_HEIGHT * profile["upscale_spatial_factor"]
+
+    # 1. base pass, latents out
+    base = pipe(
+        width=contract.VIDEO_WIDTH,
+        height=contract.VIDEO_HEIGHT,
+        output_type="latent",
+        **conditioned,
+        **common,
+    )
+    # 2. latent spatial upsample
+    upscaled = upsampler(
+        latents=base.frames[0] if hasattr(base, "frames") else base,
+        adain_factor=profile["upscale_adain_factor"],
+        tone_map_compression_ratio=profile["upscale_tone_map_compression"],
+        output_type="latent",
+    )
+    # 3. short partial refine at the higher resolution, then decode
+    refine = dict(common)
+    refine["num_inference_steps"] = profile["refine_steps"]
+    # A fresh generator for the refine pass, derived from the same seed so the
+    # whole clip stays reproducible from one number.
+    refine["generator"] = _generator(sampler["seed"])
+    result = pipe(
+        width=up_w,
+        height=up_h,
+        latents=upscaled.frames[0] if hasattr(upscaled, "frames") else upscaled,
+        denoise_strength=profile["refine_denoise_strength"],
+        **conditioned,
+        **refine,
+    )
+    stats.update(
+        upscaler_used=True,
+        upscaler_absent_reason=None,
+        render_width=up_w,
+        render_height=up_h,
+        refine_steps_run=profile["refine_steps"],
+    )
+    return result.frames[0], stats
 
 
 def _encode_mp4(frames, output_path: str) -> None:
@@ -368,7 +573,8 @@ def _fit_to_canvas(image: Image.Image) -> Image.Image:
     return resized.crop((left, top, left + target_w, top + target_h))
 
 
-def run(job: dict, input_path: str, output_path: str, load_pipeline=None) -> dict:
+def run(job: dict, input_path: str, output_path: str, load_pipeline=None,
+        load_upsampler=None) -> dict:
     """Decode, generate on CUDA, encode mp4. Returns measured metrics only.
 
     `load_pipeline` exists for the CPU test rig: injecting a fake
@@ -410,8 +616,14 @@ def run(job: dict, input_path: str, output_path: str, load_pipeline=None) -> dic
 
     infer_started = time.monotonic()
     try:
-        frames, conditioning_count = _generate(
-            pipe, image, job["params"]["prompt"], sampler, profile
+        frames, gen_stats = _generate(
+            pipe,
+            image,
+            job["params"]["prompt"],
+            sampler,
+            profile,
+            load_upsampler=(lambda: _load_real_upsampler(pipe)) if load_upsampler is None
+            else load_upsampler,
         )
     except Exception as exc:  # noqa: BLE001 - re-raised, never swallowed
         # FAIL CLOSED ON OOM. The portrait canvas is 2.6x the pixels the old
@@ -465,11 +677,22 @@ def run(job: dict, input_path: str, output_path: str, load_pipeline=None) -> dic
         "duration_ms": int((time.monotonic() - started) * 1000),
         "seed": sampler["seed"],
         "negative_prompt_chars": len(sampler["negative_prompt"]),
-        "conditioning_count": conditioning_count,
+        "conditioning_count": gen_stats["conditioning_count"],
         # The class that actually ran, not the one model_index.json declares.
         "pipeline_used": type(pipe).__name__,
-        "conditioning_strength": CONDITION_STRENGTH if conditioning_count else None,
-        "upscaler_used": False,
+        "conditioning_strength": (
+            CONDITION_STRENGTH if gen_stats["conditioning_count"] else None
+        ),
+        # WHAT ACTUALLY RAN, at what size. `render_width/height` is the
+        # resolution the LAST pass sampled at — which is the base canvas on the
+        # single-scale path and twice it on the multi-scale one. The film's
+        # 1080 is then a downscale or an upscale of that, and which one it was
+        # is the difference this records.
+        "upscaler_used": gen_stats["upscaler_used"],
+        "upscaler_absent_reason": gen_stats["upscaler_absent_reason"],
+        "render_width": gen_stats["render_width"],
+        "render_height": gen_stats["render_height"],
+        "refine_steps_run": gen_stats["refine_steps_run"],
         **__import__("ltxcaps").diagnostics(caps, profile),
         **metrics,
     }
@@ -485,7 +708,8 @@ class ConcatRefused(Exception):
         self.message = message
 
 
-def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
+def run_image(job: dict, output_path: str, load_pipeline=None,
+              reference_path: str | None = None) -> dict:
     """ONIQ's in-house image engine: prompt -> still, on this worker's own
     GPU. Returns measured metrics only.
 
@@ -507,7 +731,13 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
             raise GpuUnavailable(
                 "image_generate requires CUDA; there is no CPU fallback"
             )
-        load_pipeline = _load_real_text_pipeline
+        # A reference needs a pipeline that can take a condition. The
+        # condition pipeline draws text-only just as well (`conditions` is
+        # optional), so this is not two engines — it is the same five modules
+        # opened through the class that exposes the extra control.
+        load_pipeline = (
+            _load_real_pipeline if reference_path else _load_real_text_pipeline
+        )
 
     load_started = time.monotonic()
     pipe = load_pipeline()
@@ -524,7 +754,14 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
     caps, profile = _profile()
     sampler = _sampler_kwargs(job, profile)
     try:
-        frames = _generate_still(pipe, job["params"]["prompt"], sampler)
+        frames, still_stats = _generate_still(
+            pipe,
+            job["params"]["prompt"],
+            sampler,
+            profile,
+            reference=_decode(reference_path) if reference_path else None,
+            reference_strength=job["params"].get("reference_strength"),
+        )
     except Exception as exc:  # noqa: BLE001 - re-raised, never swallowed
         if _is_oom(exc):
             raise OutOfMemory(
@@ -562,10 +799,17 @@ def run_image(job: dict, output_path: str, load_pipeline=None) -> dict:
         "duration_ms": int((time.monotonic() - started) * 1000),
         "seed": sampler["seed"],
         "negative_prompt_chars": len(sampler["negative_prompt"]),
-        "conditioning_count": 0,
+        "conditioning_count": still_stats["conditioning_count"],
         "pipeline_used": type(pipe).__name__,
-        "conditioning_strength": None,
+        "conditioning_strength": still_stats["conditioning_strength"],
+        # A still is one frame; the multi-scale refine pass is a VIDEO stage
+        # and is not run here. Reported as false rather than omitted so the
+        # two ops' metrics have the same shape.
         "upscaler_used": False,
+        "upscaler_absent_reason": "not-applicable-to-image-generate",
+        "render_width": contract.VIDEO_WIDTH,
+        "render_height": contract.VIDEO_HEIGHT,
+        "refine_steps_run": 0,
         **__import__("ltxcaps").diagnostics(caps, profile),
         **_gpu_metrics(),
     }

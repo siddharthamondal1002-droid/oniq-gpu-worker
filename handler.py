@@ -123,9 +123,25 @@ def handle(event) -> dict:
                 _check_deadline(started, job["op"])
             metrics = videogen.run_concat(job, segment_paths, output_path)
         elif job["op"] == "image_generate":
-            # Text-only: there is no source object to fetch. The engine
-            # draws from the prompt on this worker's own GPU.
-            metrics = videogen.run_image(job, output_path)
+            # Text-only, UNLESS the job named a canonical character
+            # reference. The engine draws from the prompt on this worker's
+            # own GPU either way; a reference makes the draw start partway
+            # from that person instead of from noise.
+            #
+            # THE KEY IS ALREADY PROVEN by the time it reaches here: the
+            # contract pins it to the server-owned story/ref/ prefix and a
+            # bounded id, so this download can only ever name a published
+            # canonical reference — not another user's still, not a clip, not
+            # anything else in the bucket. The bytes are then bounded by the
+            # same MAX_INPUT_BYTES every other input is, and decoded by the
+            # same magic-byte-and-pixel-bounded decoder.
+            reference_path = None
+            reference_key = job["params"].get("reference_key")
+            if reference_key:
+                reference_path = f"{workdir}/reference.img"
+                storage.download(reference_key, reference_path, contract.MAX_INPUT_BYTES)
+                _check_deadline(started, job["op"])
+            metrics = videogen.run_image(job, output_path, reference_path=reference_path)
         else:
             storage.download(job["input_key"], input_path, contract.MAX_INPUT_BYTES)
             _check_deadline(started, job["op"])

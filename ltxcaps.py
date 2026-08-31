@@ -45,12 +45,90 @@ import os
 # IDENTICAL five modules, which is why conditioning needs no new weights.
 LTX_COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 
-# Where a spatial latent upscaler would live if one were ever baked. It is a
-# SEPARATE model (LTXLatentUpsamplerModel, its own repository) and the current
-# image does not carry it — see Dockerfile FIRST_PASS/COMPONENTS, neither of
-# which names it. Detected rather than assumed so that baking one later turns
-# the path on without another code change.
+# Where a spatial latent upscaler lives once baked. It is a SEPARATE model
+# (LTXLatentUpsamplerModel, its own repository), so it is DETECTED rather than
+# assumed and baking one turns the path on without another code change.
 UPSCALER_DIRS = ("latent_upsampler", "spatial_upscaler", "ltxv-spatial-upscaler")
+
+# ---------------------------------------------------------------- multi-scale
+#
+# WHAT THE UPSCALER IS FOR, and why it is the largest remaining quality lever.
+#
+# MEASURED, arithmetic rather than opinion: the generation canvas is 704 wide
+# and the delivered film is 1080 wide. Even with the portrait canvas fixed,
+# assembly still resamples every frame UP by 1080/704 = 1.534x. A pixel
+# upscaler cannot invent detail that was never sampled, so that 53% is
+# precisely the softness a viewer reads as "hazy" — it is baked in before
+# Remotion ever opens the clip.
+#
+# The fix upstream ships is MULTI-SCALE: generate latents at the base canvas,
+# upsample them IN LATENT SPACE with LTXLatentUpsamplerModel, then run a short
+# second denoise pass at the higher resolution so the transformer actually
+# synthesises the new detail, and only then decode. VERIFIED against the
+# installed diffusers 0.38.0 source:
+#
+#   LTXLatentUpsamplePipeline(vae, latent_upsampler)   pipeline_ltx_latent_upsample.py
+#     __call__(video|latents, height, width, decode_timestep, decode_noise_scale,
+#              adain_factor, tone_map_compression_ratio, generator, output_type)
+#   LTXConditionPipeline.__call__(..., latents=..., denoise_strength=...)
+#
+# so the base pass can hand latents out (output_type="latent"), the upsampler
+# can take them and hand back 2x latents, and the condition pipeline can take
+# THOSE back for a partial re-denoise. No new pipeline class is invented here;
+# all three calls are the ones diffusers documents.
+#
+# The upsampler reuses the VAE ALREADY BAKED — it is the only other module the
+# pipeline takes — so the incremental cost is the upsampler weights alone.
+
+# The second pass is SHORT and PARTIAL. Refining from scratch at 2x would cost
+# the full step count again and throw away the composition the base pass just
+# agreed on; a partial denoise adds detail while holding the frame.
+#
+# These three are ONIQ's, and they are stated here rather than borrowed,
+# because diffusers exposes no default for them: `denoise_strength` defaults to
+# 1.0 (a full re-generation, which is not what a refinement pass is) and the
+# refine step count has no default at all. They are conservative on purpose —
+# a low denoise strength cannot destroy the base composition, and the honest
+# tuning pass happens against a measured generation, not here.
+REFINE_STEPS = 10
+REFINE_DENOISE_STRENGTH = 0.4
+
+# ADAIN back onto the pre-upscale latents' statistics. The upsampler can shift
+# the latent distribution; matching moments back to the base pass keeps colour
+# and contrast where the base pass put them. 0.0 disables it, which is
+# diffusers' own default, and is what ONIQ sends until a measurement says
+# otherwise — an unmeasured "improvement" is the mistake this whole body of
+# work exists to stop repeating.
+UPSCALE_ADAIN_FACTOR = 0.0
+UPSCALE_TONE_MAP_COMPRESSION = 0.0
+
+# The spatial factor LTXLatentUpsamplerModel applies (spatial_upsample=True,
+# temporal_upsample=False -> PixelShuffleND(2) over the spatial dims).
+UPSCALE_SPATIAL_FACTOR = 2
+
+# The T5 window LTX actually encodes. VERIFIED from the installed
+# LTXConditionPipeline.__call__ signature: max_sequence_length defaults to 256.
+# Everything past it is DROPPED silently, which is why a prompt budget stated
+# in characters has to be reasoned about in tokens.
+MAX_SEQUENCE_LENGTH = 256
+
+
+def _multiscale_available(caps: dict) -> tuple:
+    """(supported, reason). Both halves of the answer, always.
+
+    A capability that is merely absent must still say WHY, because "the clip
+    was soft" and "the upscaler was never in the image" look identical in an
+    output file and completely different in a diagnosis.
+    """
+    if not caps.get("latent_upsampler_baked"):
+        return False, "latent-upsampler-not-baked"
+    if caps.get("components_missing"):
+        return False, "checkpoint-incomplete"
+    try:
+        from diffusers import LTXLatentUpsamplePipeline  # noqa: F401
+    except Exception:  # noqa: BLE001 - absent or too old, same consequence
+        return False, "diffusers-has-no-latent-upsample-pipeline"
+    return True, "ok"
 
 
 class CheckpointInconsistent(RuntimeError):
@@ -203,6 +281,7 @@ def inference_profile(caps: dict) -> dict:
 
     d = _documented_defaults()
     distilled = bool(caps["distilled"])
+    multiscale, multiscale_reason = _multiscale_available(caps)
     profile = {
         "num_inference_steps": STEPS_DISTILLED if distilled else STEPS_FULL,
         # Classifier-free guidance is what a distilled checkpoint removes the
@@ -217,6 +296,17 @@ def inference_profile(caps: dict) -> dict:
         # named strength, named noise scale — instead of implicit and
         # unrecordable. Derived from the components actually on disk.
         "conditioning": bool(caps.get("condition_pipeline_supported")),
+        # MULTI-SCALE. Both halves of the answer travel in the profile, so a
+        # soft clip can be told apart from a missing capability without
+        # re-running anything.
+        "multiscale": multiscale,
+        "multiscale_reason": multiscale_reason,
+        "refine_steps": REFINE_STEPS if multiscale else 0,
+        "refine_denoise_strength": REFINE_DENOISE_STRENGTH if multiscale else None,
+        "upscale_adain_factor": UPSCALE_ADAIN_FACTOR,
+        "upscale_tone_map_compression": UPSCALE_TONE_MAP_COMPRESSION,
+        "upscale_spatial_factor": UPSCALE_SPATIAL_FACTOR if multiscale else 1,
+        "max_sequence_length": MAX_SEQUENCE_LENGTH,
         "timesteps": None,
         "defaults_source": d["source"],
         "profile_for": "distilled" if distilled else "full",
@@ -244,5 +334,11 @@ def diagnostics(caps: dict, profile: dict) -> dict:
         "decode_noise_scale": profile.get("decode_noise_scale"),
         "image_cond_noise_scale": profile.get("image_cond_noise_scale"),
         "conditioning": profile.get("conditioning"),
+        "multiscale": profile.get("multiscale"),
+        "multiscale_reason": profile.get("multiscale_reason"),
+        "refine_steps": profile.get("refine_steps"),
+        "refine_denoise_strength": profile.get("refine_denoise_strength"),
+        "upscale_spatial_factor": profile.get("upscale_spatial_factor"),
+        "max_sequence_length": profile.get("max_sequence_length"),
         "defaults_source": profile.get("defaults_source"),
     }
