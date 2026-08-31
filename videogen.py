@@ -155,6 +155,13 @@ def model_id() -> str:
 CONDITION_STRENGTH = 1.0
 CONDITION_FRAME_INDEX = 0
 
+# The VAE's spatial compression ratio, and therefore the divisibility every
+# canvas must satisfy. VERIFIED from diffusers 0.38.0: LTXConditionPipeline
+# refuses outright — "height and width have to be divisible by 32" — and its
+# own multi-scale example rounds down to vae_spatial_compression_ratio before
+# generating.
+VAE_SPATIAL_RATIO = 32
+
 
 def _video_condition(image, frame_index=None, strength=None):
     """The explicit frame-0 condition, or None when it cannot be built.
@@ -428,7 +435,6 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
         prompt=prompt,
         negative_prompt=sampler["negative_prompt"],
         num_frames=contract.VIDEO_NUM_FRAMES,
-        num_inference_steps=sampler["num_inference_steps"],
         guidance_scale=sampler["guidance_scale"],
         guidance_rescale=sampler["guidance_rescale"],
         decode_timestep=profile["decode_timestep"],
@@ -462,32 +468,59 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
         result = pipe(
             width=contract.VIDEO_WIDTH,
             height=contract.VIDEO_HEIGHT,
+            num_inference_steps=sampler["num_inference_steps"],
             **conditioned,
             **common,
         )
         return result.frames[0], stats
 
-    up_w = contract.VIDEO_WIDTH * profile["upscale_spatial_factor"]
-    up_h = contract.VIDEO_HEIGHT * profile["upscale_spatial_factor"]
+    # THE STAGE-2 RESOLUTION IS DERIVED, NOT WRITTEN DOWN. The upsampler's own
+    # architecture fixes the factor (spatial_upsample=True, PixelShuffleND(2)),
+    # ltxcaps reports it, and the base canvas is contract.py's. Nothing here is
+    # a magic number, and a canvas change moves both stages together.
+    factor = profile["upscale_spatial_factor"]
+    up_w = contract.VIDEO_WIDTH * factor
+    up_h = contract.VIDEO_HEIGHT * factor
 
-    # 1. base pass, latents out
+    # Both stages must be legal for the VAE. Upstream rounds DOWN to the
+    # spatial compression ratio; ONIQ's canvas is already aligned, so this
+    # asserts rather than adjusts — a silent adjustment would change the film's
+    # aspect and nobody would see it happen.
+    for w, h, where in ((contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT, "base"),
+                        (up_w, up_h, "upscaled")):
+        if w % VAE_SPATIAL_RATIO or h % VAE_SPATIAL_RATIO:
+            raise ValueError(
+                f"{where} canvas {w}x{h} is not divisible by {VAE_SPATIAL_RATIO}"
+            )
+
+    first_steps = profile.get("first_pass_timesteps")
+    second_steps = profile.get("second_pass_timesteps")
+
+    # 1. BASE PASS, latents out. An explicit timestep list wins over a step
+    #    count — on the distilled recipe the schedule IS the sampler, and
+    #    diffusers derives num_inference_steps from its length.
     base = pipe(
         width=contract.VIDEO_WIDTH,
         height=contract.VIDEO_HEIGHT,
         output_type="latent",
+        **({"timesteps": first_steps} if first_steps
+           else {"num_inference_steps": sampler["num_inference_steps"]}),
         **conditioned,
         **common,
     )
-    # 2. latent spatial upsample
+    # 2. LATENT SPATIAL UPSAMPLE — before the decode, which is the whole point.
+    #    A pixel resize after the decode cannot recover detail the VAE never
+    #    wrote.
     upscaled = upsampler(
         latents=base.frames[0] if hasattr(base, "frames") else base,
         adain_factor=profile["upscale_adain_factor"],
         tone_map_compression_ratio=profile["upscale_tone_map_compression"],
         output_type="latent",
     )
-    # 3. short partial refine at the higher resolution, then decode
+    # 3. PARTIAL REFINE at the higher resolution, then decode. `denoise_strength`
+    #    is what makes it partial: the transformer synthesises the new detail
+    #    without re-deciding the composition the base pass agreed on.
     refine = dict(common)
-    refine["num_inference_steps"] = profile["refine_steps"]
     # A fresh generator for the refine pass, derived from the same seed so the
     # whole clip stays reproducible from one number.
     refine["generator"] = _generator(sampler["seed"])
@@ -496,6 +529,8 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
         height=up_h,
         latents=upscaled.frames[0] if hasattr(upscaled, "frames") else upscaled,
         denoise_strength=profile["refine_denoise_strength"],
+        **({"timesteps": second_steps} if second_steps
+           else {"num_inference_steps": sampler["num_inference_steps"]}),
         **conditioned,
         **refine,
     )
@@ -504,7 +539,7 @@ def _generate(pipe, image, prompt: str, sampler: dict, profile: dict,
         upscaler_absent_reason=None,
         render_width=up_w,
         render_height=up_h,
-        refine_steps_run=profile["refine_steps"],
+        refine_steps_run=len(second_steps) if second_steps else sampler["num_inference_steps"],
     )
     return result.frames[0], stats
 

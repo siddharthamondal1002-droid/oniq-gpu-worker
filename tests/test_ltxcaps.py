@@ -487,10 +487,11 @@ def test_the_refine_pass_is_partial_and_at_double_the_canvas(
     # PARTIAL: a full re-denoise would cost the whole step count again and
     # discard the composition the base pass just agreed on.
     assert 0 < refine["denoise_strength"] < 1.0
-    assert refine["num_inference_steps"] == ltxcaps.REFINE_STEPS
-    assert refine["num_inference_steps"] < base["num_inference_steps"]
+    # A FULL checkpoint has no upstream multi-scale schedule, so it keeps its
+    # own step count and the partiality comes from denoise_strength alone.
+    assert refine["num_inference_steps"] == base["num_inference_steps"]
+    assert refine["denoise_strength"] == ltxcaps.FULL_REFINE_DENOISE_STRENGTH
     assert metrics["render_width"] == contract.VIDEO_WIDTH * 2
-    assert metrics["refine_steps_run"] == ltxcaps.REFINE_STEPS
 
 
 def test_the_film_stops_upscaling_the_render_once_multiscale_runs():
@@ -529,10 +530,18 @@ def test_a_reference_key_must_be_a_published_canonical_reference():
     for bad in (
         "../secrets.png",
         "story/still/someone-elses.png",
-        "story/ref/../escape.png",
+        "story/ref/canon/../escape/v1.png",
         "https://evil.example/x.png",
-        "story/ref/x.exe",
-        "/story/ref/x.png",
+        "story/ref/canon/x/v1.exe",
+        "/story/ref/canon/x/v1.png",
+        # The scope segment is not optional, and it is not the caller's.
+        "story/ref/ali-01/v1.png",
+        "story/ref/u/another-user/x/v1.png",
+        # A version must be a real one: v0 does not exist, and an unversioned
+        # key would be mutable — the whole point of versioning is that a film
+        # drawn against v1 keeps looking like v1.
+        "story/ref/canon/x/v0.png",
+        "story/ref/canon/x.png",
         "",
         123,
     ):
@@ -545,9 +554,15 @@ def test_a_reference_key_must_be_a_published_canonical_reference():
     ok = contract.validate_job({
         "op": "image_generate",
         "output_key": "out/a.png",
-        "params": {"prompt": "p", "reference_key": "story/ref/ali-01.png"},
+        "params": {"prompt": "p", "reference_key": CANON_REF},
     })
-    assert ok["params"]["reference_key"] == "story/ref/ali-01.png"
+    assert ok["params"]["reference_key"] == CANON_REF
+    # And v2 is a DIFFERENT object, never an overwrite of v1.
+    v2 = CANON_REF.replace("/v1.png", "/v2.png")
+    assert contract.validate_job({
+        "op": "image_generate", "output_key": "out/a.png",
+        "params": {"prompt": "p", "reference_key": v2},
+    })["params"]["reference_key"] == v2
     # ABSENT is not an error — it is the unconditioned path, unchanged.
     plain = contract.validate_job({
         "op": "image_generate", "output_key": "out/a.png", "params": {"prompt": "p"},
@@ -563,7 +578,7 @@ def test_the_strength_band_refuses_both_useless_ends():
                 "output_key": "out/a.png",
                 "params": {
                     "prompt": "p",
-                    "reference_key": "story/ref/a.png",
+                    "reference_key": CANON_REF,
                     "reference_strength": bad,
                 },
             })
@@ -576,6 +591,10 @@ def test_a_strength_without_a_reference_is_refused():
             "output_key": "out/a.png",
             "params": {"prompt": "p", "reference_strength": 0.5},
         })
+
+
+# The one shape the contract admits: scope, character, version.
+CANON_REF = "story/ref/canon/ali-01/v1.png"
 
 
 def _image_job(**params):
@@ -594,7 +613,7 @@ def test_the_identity_anchor_reaches_the_sampler_as_a_frame_0_condition(
     pipe = Recorder(n=contract.IMAGE_GEN_NUM_FRAMES)
     monkeypatch.setattr(videogen, "_video_condition", _fake_condition)
     metrics = videogen.run_image(
-        _image_job(reference_key="story/ref/a.png", reference_strength=0.6),
+        _image_job(reference_key=CANON_REF, reference_strength=0.6),
         str(tmp_path / "out.png"),
         load_pipeline=lambda: pipe,
         reference_path=ref,
@@ -615,7 +634,7 @@ def test_an_anchor_below_full_strength_is_the_point(tmp_path, fake_checkpoint, m
     pipe = Recorder(n=contract.IMAGE_GEN_NUM_FRAMES)
     monkeypatch.setattr(videogen, "_video_condition", _fake_condition)
     videogen.run_image(
-        _image_job(reference_key="story/ref/a.png"),
+        _image_job(reference_key=CANON_REF),
         str(tmp_path / "out.png"),
         load_pipeline=lambda: pipe,
         reference_path=ref,
@@ -647,7 +666,7 @@ def test_an_unbuildable_reference_refuses_rather_than_drawing_an_unanchored_stil
     monkeypatch.setattr(videogen, "_video_condition", lambda *a, **k: None)
     with pytest.raises(videogen.ReferenceUnsupported):
         videogen.run_image(
-            _image_job(reference_key="story/ref/a.png"),
+            _image_job(reference_key=CANON_REF),
             str(tmp_path / "out.png"),
             load_pipeline=lambda: Recorder(n=contract.IMAGE_GEN_NUM_FRAMES),
             reference_path=ref,
@@ -713,8 +732,186 @@ def test_an_anchor_on_a_fallback_pipeline_refuses(tmp_path, fake_checkpoint):
 
     with pytest.raises(videogen.ReferenceUnsupported):
         videogen.run_image(
-            _image_job(reference_key="story/ref/a.png"),
+            _image_job(reference_key=CANON_REF),
             str(tmp_path / "out.png"),
             load_pipeline=lambda: NoConditions(n=contract.IMAGE_GEN_NUM_FRAMES),
             reference_path=ref,
         )
+
+
+# ───────────── the official 0.9.8 recipe, and where each number came from
+
+def _profile_for(distilled, monkeypatch, multiscale=True):
+    monkeypatch.setattr(ltxcaps, "_multiscale_available", lambda caps: (multiscale, "ok"))
+    return ltxcaps.inference_profile({
+        "latent_upsampler_baked": multiscale,
+        "components_missing": [],
+        "distilled": distilled,
+        "condition_pipeline_supported": True,
+    })
+
+
+def test_the_distilled_schedule_is_transcribed_not_invented(monkeypatch):
+    """Every value below was fetched from upstream on 2026-08-31:
+    Lightricks/LTX-Video configs/ltxv-2b-0.9.8-distilled.yaml, and the worked
+    multi-scale example in the diffusers LTX docs. The two agree on all the
+    values they share."""
+    p = _profile_for(True, monkeypatch)
+    assert p["multiscale_schedule"] == "ltx-0.9.8-distilled"
+    assert p["first_pass_timesteps"] == [1000, 993, 987, 981, 975, 909, 725, 0.03]
+    assert p["second_pass_timesteps"] == [1000, 909, 725, 421, 0]
+    assert p["refine_denoise_strength"] == 0.999
+    assert p["guidance_scale"] == 1.0
+    assert p["guidance_rescale"] == 0.7
+    assert p["image_cond_noise_scale"] == 0.0
+    assert p["decode_timestep"] == 0.05
+    assert p["decode_noise_scale"] == 0.025
+    assert p["upscale_adain_factor"] == 1.0
+    assert ltxcaps.DOWNSCALE_FACTOR == 2 / 3
+    # And the provenance travels with them.
+    assert "ltxv-2b-0.9.8-distilled.yaml" in p["multiscale_source"]
+
+
+def test_the_distilled_recipe_is_never_applied_to_a_full_checkpoint(monkeypatch):
+    """THE MIXING RULE, as a test.
+
+    `guidance_scale: 1` turns classifier-free guidance OFF. That is correct
+    for a guidance-distilled checkpoint and actively wrong for a full one,
+    which needs CFG to follow the prompt at all. Likewise the seven-step
+    schedule is the distilled sampler's own. Applying either to ONIQ's
+    non-distilled checkpoint is the '0.9.8 config on a different LTX
+    checkpoint' mixing the owner directive forbids.
+    """
+    full = _profile_for(False, monkeypatch)
+    assert full["multiscale_schedule"] == "full-checkpoint-conservative"
+    assert full["first_pass_timesteps"] is None
+    assert full["second_pass_timesteps"] is None
+    # The checkpoint's OWN guidance and steps stand.
+    assert full["guidance_scale"] == 3.0
+    assert full["num_inference_steps"] == ltxcaps.STEPS_FULL
+    assert full["decode_timestep"] == 0.0
+    # And the source says plainly that this half is ONIQ's, not upstream's.
+    assert "ONIQ" in full["multiscale_source"]
+
+
+def test_tone_mapping_is_enabled_only_where_upstream_demonstrates_it(monkeypatch):
+    """A PARAMETER EXISTING IS NOT EVIDENCE IT BELONGS IN THIS RECIPE.
+
+    The diffusers note recommends 0.6 for 'the 0.9.8 distilled model' and its
+    worked example (a 13B) passes it. But ltxv-2b-0.9.8-distilled.yaml does
+    NOT set tone_map_compression_ratio — only the 13B config does. So it is
+    applied on the distilled path, where a source demonstrates it, and left at
+    diffusers' own 0.0 elsewhere.
+    """
+    assert _profile_for(True, monkeypatch)["upscale_tone_map_compression"] == 0.6
+    assert _profile_for(False, monkeypatch)["upscale_tone_map_compression"] == 0.0
+    # And off entirely when there is no multi-scale path at all.
+    assert _profile_for(True, monkeypatch, multiscale=False)["upscale_tone_map_compression"] == 0.0
+
+
+@pytest.fixture
+def distilled_multiscale_checkpoint(tmp_path, monkeypatch):
+    """A checkpoint the evidence says IS distilled, and which carries the
+    upscaler. Both halves matter: the distilled recipe only applies when the
+    shipped scheduler agrees with the name."""
+    root = write_fake_checkpoint(tmp_path / "ltx-d", distilled=True, upscaler=True)
+    monkeypatch.setattr(videogen, "_model_dir", lambda: root)
+    monkeypatch.setattr(videogen, "model_id", lambda: "LTX-Video-0.9.8-2B-distilled")
+    monkeypatch.setattr(ltxcaps, "_multiscale_available", lambda caps: (True, "ok"))
+    return root
+
+
+def test_the_distilled_first_pass_sends_timesteps_not_a_step_count(
+    io_paths, distilled_multiscale_checkpoint
+):
+    """On the distilled recipe the SCHEDULE is the sampler. diffusers derives
+    num_inference_steps from the list's length, so sending both would be two
+    answers to one question."""
+    src, out = io_paths
+    pipe = TwoPassRecorder()
+    metrics = videogen.run(
+        _job(), src, out,
+        load_pipeline=lambda: pipe, load_upsampler=lambda: UpsampleRecorder(),
+    )
+    base, refine = pipe.calls
+    assert base["timesteps"] == [1000, 993, 987, 981, 975, 909, 725, 0.03]
+    assert "num_inference_steps" not in base
+    assert refine["timesteps"] == [1000, 909, 725, 421, 0]
+    assert refine["denoise_strength"] == 0.999
+    # Guidance is OFF, which is what "guidance-distilled" means.
+    assert base["guidance_scale"] == 1.0
+    assert base["guidance_rescale"] == 0.7
+    assert metrics["multiscale_schedule"] == "ltx-0.9.8-distilled"
+
+
+def test_a_full_checkpoint_keeps_its_own_guidance_on_the_multiscale_path(
+    io_paths, multiscale_checkpoint
+):
+    """The other half of the mixing rule, at the call site rather than in the
+    profile: a non-distilled checkpoint must still receive CFG."""
+    src, out = io_paths
+    pipe = TwoPassRecorder()
+    videogen.run(
+        _job(), src, out,
+        load_pipeline=lambda: pipe, load_upsampler=lambda: UpsampleRecorder(),
+    )
+    base, refine = pipe.calls
+    assert base["guidance_scale"] == 3.0
+    assert "timesteps" not in base
+    assert "timesteps" not in refine
+    assert base["num_inference_steps"] == ltxcaps.STEPS_FULL
+
+
+def test_the_upsample_stage_gets_the_recipes_own_adain_and_tone_map(
+    io_paths, multiscale_checkpoint
+):
+    src, out = io_paths
+    up = UpsampleRecorder()
+    videogen.run(
+        _job(), src, out,
+        load_pipeline=lambda: TwoPassRecorder(), load_upsampler=lambda: up,
+    )
+    call = up.calls[0]
+    assert call["output_type"] == "latent", "the upscale happens BEFORE the decode"
+    assert call["adain_factor"] == ltxcaps.UPSCALE_ADAIN_FACTOR
+    assert "tone_map_compression_ratio" in call
+
+
+def test_both_canvases_are_legal_for_the_vae():
+    """diffusers refuses outright: 'height and width have to be divisible by
+    32'. Both stages, not just the first."""
+    f = ltxcaps.UPSCALE_SPATIAL_FACTOR
+    for w, h in ((contract.VIDEO_WIDTH, contract.VIDEO_HEIGHT),
+                 (contract.VIDEO_WIDTH * f, contract.VIDEO_HEIGHT * f)):
+        assert w % videogen.VAE_SPATIAL_RATIO == 0
+        assert h % videogen.VAE_SPATIAL_RATIO == 0
+
+
+def test_the_two_stages_bracket_the_film_so_the_last_step_is_a_downscale():
+    """The point of the whole path. Stage 1 sits BELOW the film's width and
+    stage 2 ABOVE it, so assembly resizes DOWN — which preserves detail —
+    instead of UP, which cannot invent it.
+
+    Upstream's own step 4 is exactly this: 'Downscale the video to the
+    expected resolution'.
+    """
+    film_w, film_h = 1080, 1920
+    f = ltxcaps.UPSCALE_SPATIAL_FACTOR
+    assert contract.VIDEO_WIDTH < film_w
+    assert contract.VIDEO_WIDTH * f > film_w
+    assert contract.VIDEO_HEIGHT * f > film_h
+    # And the aspect survives the trip: the crop into 1080x1920 stays a
+    # rounding error rather than a composition decision.
+    scale = max(film_w / (contract.VIDEO_WIDTH * f), film_h / (contract.VIDEO_HEIGHT * f))
+    assert film_w / (contract.VIDEO_WIDTH * f * scale) > 0.99
+    assert film_h / (contract.VIDEO_HEIGHT * f * scale) > 0.99
+
+
+def test_the_base_canvas_is_near_the_official_downscale_factor():
+    """Upstream generates at 2/3 of the target. 1080 * 2/3 = 720, which is NOT
+    divisible by 32, so the nearest legal portrait pair is used instead — and
+    the deviation is small enough to state."""
+    film_w = 1080
+    ratio = contract.VIDEO_WIDTH / film_w
+    assert abs(ratio - ltxcaps.DOWNSCALE_FACTOR) < 0.02
+    assert 720 % videogen.VAE_SPATIAL_RATIO != 0, "720 would have been exact but is illegal"

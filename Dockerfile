@@ -639,15 +639,38 @@ if not licence_files:
         "redistribute the weights without their terms"
     )
 
-# IT MUST BE THE CLASS THE CODE WILL CONSTRUCT. A config that loads under a
-# different model class would fail at job time on a rented card, which is the
-# class of failure this whole bake exists to prevent.
+# IT MUST BE THE MODEL THE CODE WILL CONSTRUCT, field by field.
+#
+# A config that merely LOADS under the right class is not enough: a temporal
+# upsampler, a 2-D variant or a different channel width would all construct
+# happily and then produce latents the refine pass cannot use — at job time,
+# on a rented card, which is the class of failure this whole bake exists to
+# prevent.
+#
+# The expected shape is VERIFIED FROM UPSTREAM (diffusers 0.38.0,
+# pipelines/ltx/modeling_latent_upsampler.py) and cross-checks against the
+# published artifact size: 128/512/4 with dims=3 is 126.25 M parameters, which
+# at fp32 is 505 MB — the size the 0.9.8 upsampler actually ships at, to the
+# megabyte. Two independent facts agreeing is why these are assertions rather
+# than hopes.
 with open(os.path.join(DEST, "config.json")) as fh:
     cfg = json.load(fh)
-klass = str(cfg.get("_class_name") or "")
-if klass != "LTXLatentUpsamplerModel":
+EXPECTED = {
+    "_class_name": "LTXLatentUpsamplerModel",
+    "dims": 3,
+    "in_channels": 128,
+    "mid_channels": 512,
+    "num_blocks_per_stage": 4,
+    "spatial_upsample": True,
+    # A TEMPORAL upsampler would change the frame count, and the clip contract
+    # is 97 frames. This one must move pixels, not time.
+    "temporal_upsample": False,
+}
+wrong = {k: cfg.get(k) for k, v in EXPECTED.items() if cfg.get(k) != v}
+if wrong:
     raise SystemExit(
-        f"{DEST}/config.json declares {klass!r}, not LTXLatentUpsamplerModel"
+        f"{DEST}/config.json is not the 0.9.8 spatial upsampler: {wrong} "
+        f"(expected {EXPECTED})"
     )
 from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
 LTXLatentUpsamplerModel.from_config(cfg)  # raises if the config is not loadable

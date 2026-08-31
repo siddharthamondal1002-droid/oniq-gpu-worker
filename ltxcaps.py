@@ -80,27 +80,92 @@ UPSCALER_DIRS = ("latent_upsampler", "spatial_upscaler", "ltxv-spatial-upscaler"
 # The upsampler reuses the VAE ALREADY BAKED — it is the only other module the
 # pipeline takes — so the incremental cost is the upsampler weights alone.
 
-# The second pass is SHORT and PARTIAL. Refining from scratch at 2x would cost
-# the full step count again and throw away the composition the base pass just
-# agreed on; a partial denoise adds detail while holding the frame.
+# ── THE OFFICIAL 0.9.8 MULTI-SCALE RECIPE ────────────────────────────────────
 #
-# These three are ONIQ's, and they are stated here rather than borrowed,
-# because diffusers exposes no default for them: `denoise_strength` defaults to
-# 1.0 (a full re-generation, which is not what a refinement pass is) and the
-# refine step count has no default at all. They are conservative on purpose —
-# a low denoise strength cannot destroy the base composition, and the honest
-# tuning pass happens against a measured generation, not here.
-REFINE_STEPS = 10
-REFINE_DENOISE_STRENGTH = 0.4
+# TRANSCRIBED FROM TWO UPSTREAM SOURCES, fetched 2026-08-31. Not recalled, not
+# inferred from a model card, and not invented — the previous draft of this
+# file carried placeholder numbers and said so; these replace them.
+#
+#   A. Lightricks/LTX-Video @ main, configs/ltxv-2b-0.9.8-distilled.yaml
+#      raw.githubusercontent.com — the checkpoint family's OWN config.
+#   B. huggingface/diffusers @ main, docs/source/en/api/pipelines/ltx_video.md
+#      the worked multi-scale example, which is what the pipeline code expects.
+#
+# The two agree on every value they share (downscale factor, decode timestep,
+# decode noise scale, both timestep schedules, guidance 1). B additionally
+# supplies the three A does not state: guidance_rescale, image_cond_noise_scale
+# and adain_factor.
+#
+# ── WHY THIS IS GATED ON DISTILLATION, AND WHY THAT IS THE WHOLE POINT ───────
+#
+# Every number below belongs to a GUIDANCE- AND TIMESTEP-DISTILLED checkpoint.
+# `guidance_scale: 1` means classifier-free guidance is OFF, which is correct
+# for a distilled model and actively wrong for a full one — CFG is what a
+# non-distilled checkpoint uses to follow the prompt at all. The explicit
+# timestep lists are the distilled sampler's own schedule; a full checkpoint
+# has no business walking seven steps.
+#
+# ONIQ's baked checkpoint is Lightricks/LTX-Video at revision 8984fa25, and
+# inspect_checkpoint() reads its shipped scheduler at runtime rather than
+# trusting its name. Applying this recipe to a checkpoint the evidence says is
+# NOT distilled would be exactly the "0.9.8 config on a different LTX
+# checkpoint" mixing the owner directive forbids. So the profile carries two
+# multi-scale schedules and picks by evidence, and records WHICH it used.
+DOWNSCALE_FACTOR = 2 / 3
 
-# ADAIN back onto the pre-upscale latents' statistics. The upsampler can shift
-# the latent distribution; matching moments back to the base pass keeps colour
-# and contrast where the base pass put them. 0.0 disables it, which is
-# diffusers' own default, and is what ONIQ sends until a measurement says
-# otherwise — an unmeasured "improvement" is the mistake this whole body of
-# work exists to stop repeating.
-UPSCALE_ADAIN_FACTOR = 0.0
+# Source A + B, verbatim. The trailing 0.03 on the first pass and the trailing
+# 0 on the second are upstream's, not a typo: the schedules are open at one end.
+DISTILLED_FIRST_PASS_TIMESTEPS = [1000, 993, 987, 981, 975, 909, 725, 0.03]
+DISTILLED_SECOND_PASS_TIMESTEPS = [1000, 909, 725, 421, 0]
+# "Effectively, 4 inference steps out of 5" — upstream's own comment.
+DISTILLED_DENOISE_STRENGTH = 0.999
+DISTILLED_GUIDANCE_SCALE = 1.0
+DISTILLED_GUIDANCE_RESCALE = 0.7
+# ZERO on the multi-scale path, where diffusers' standalone default is 0.15.
+# The conditioning frame is held by the first pass; re-noising it during the
+# refine would fight the latents the upsampler just produced.
+DISTILLED_IMAGE_COND_NOISE_SCALE = 0.0
+# Decode settings differ from the single-pass defaults (0.0 / None) and both
+# sources agree on these.
+DISTILLED_DECODE_TIMESTEP = 0.05
+DISTILLED_DECODE_NOISE_SCALE = 0.025
+
+# ── THE UPSCALE STAGE ────────────────────────────────────────────────────────
+#
+# ADAIN 1.0, from source B. The upsampler shifts the latent distribution;
+# matching its moments back to the pre-upscale latents keeps colour and
+# contrast where the first pass put them. diffusers' standalone default is 0.0
+# — that is the "no opinion" value, not the recommended one for this recipe.
+UPSCALE_ADAIN_FACTOR = 1.0
+
+# TONE MAPPING — enabled ONLY where upstream actually demonstrates it.
+#
+# This is the one place the two sources differ, and the difference is
+# load-bearing. The diffusers note recommends 0.6 for "the 0.9.8 distilled
+# model", and its worked example (a 13B) passes it. The 2B config file does
+# NOT set it; only ltxv-13b-0.9.8-distilled.yaml carries
+# tone_map_compression_ratio in its second pass.
+#
+# So a parameter EXISTING is not evidence it belongs in this recipe. It is
+# applied on the distilled path, where a source demonstrates it, and left at
+# diffusers' own 0.0 elsewhere. A measurement can move it; a plausible-sounding
+# default should not.
+DISTILLED_TONE_MAP_COMPRESSION = 0.6
 UPSCALE_TONE_MAP_COMPRESSION = 0.0
+
+# ── THE NON-DISTILLED SECOND PASS ────────────────────────────────────────────
+#
+# ONIQ's, and labelled as ONIQ's. No upstream config exists for multi-scale on
+# a FULL 0.9.8 checkpoint, so there is nothing to transcribe. What is known is
+# the shape: the second pass must be short and partial, or it re-generates at
+# 2x cost and discards the composition the first pass agreed on.
+#
+# With no explicit timestep list, diffusers derives the refine schedule from
+# num_inference_steps scaled by denoise_strength — so 0.4 of the checkpoint's
+# own 30 steps is roughly 12, which is the same order as the distilled path's
+# 4-of-5. Conservative on purpose: a low denoise strength cannot destroy the
+# base composition. It is UNMEASURED and a tuning pass moves it WITH a figure.
+FULL_REFINE_DENOISE_STRENGTH = 0.4
 
 # The spatial factor LTXLatentUpsamplerModel applies (spatial_upsample=True,
 # temporal_upsample=False -> PixelShuffleND(2) over the spatial dims).
@@ -270,6 +335,60 @@ STEPS_DISTILLED = 8
 STEPS_FULL = 30
 
 
+def _multiscale_schedule(multiscale: bool, distilled: bool) -> dict:
+    """The two-pass numbers, and WHERE EACH ONE CAME FROM.
+
+    `multiscale_schedule` is the answer to "which recipe ran", which is the
+    question a soft clip actually poses. Reporting the values without their
+    provenance would leave nobody able to tell an upstream figure from a
+    guess — and this file has carried both.
+    """
+    if not multiscale:
+        return {
+            "multiscale_schedule": "none",
+            "multiscale_source": None,
+            "first_pass_timesteps": None,
+            "second_pass_timesteps": None,
+            "refine_denoise_strength": None,
+            "upscale_adain_factor": UPSCALE_ADAIN_FACTOR,
+            "upscale_tone_map_compression": UPSCALE_TONE_MAP_COMPRESSION,
+        }
+    if distilled:
+        # Every value transcribed. Nothing here is ONIQ's opinion.
+        return {
+            "multiscale_schedule": "ltx-0.9.8-distilled",
+            "multiscale_source": (
+                "Lightricks/LTX-Video configs/ltxv-2b-0.9.8-distilled.yaml + "
+                "diffusers docs ltx_video.md, fetched 2026-08-31"
+            ),
+            "first_pass_timesteps": list(DISTILLED_FIRST_PASS_TIMESTEPS),
+            "second_pass_timesteps": list(DISTILLED_SECOND_PASS_TIMESTEPS),
+            "refine_denoise_strength": DISTILLED_DENOISE_STRENGTH,
+            "guidance_scale": DISTILLED_GUIDANCE_SCALE,
+            "guidance_rescale": DISTILLED_GUIDANCE_RESCALE,
+            "image_cond_noise_scale": DISTILLED_IMAGE_COND_NOISE_SCALE,
+            "decode_timestep": DISTILLED_DECODE_TIMESTEP,
+            "decode_noise_scale": DISTILLED_DECODE_NOISE_SCALE,
+            "upscale_adain_factor": UPSCALE_ADAIN_FACTOR,
+            "upscale_tone_map_compression": DISTILLED_TONE_MAP_COMPRESSION,
+        }
+    # A FULL checkpoint. The distilled schedule must not be applied to it:
+    # guidance 1 turns classifier-free guidance off, and a full checkpoint
+    # needs CFG to follow the prompt at all. So the checkpoint's own guidance
+    # and step count stand (set by the caller above) and only the refine
+    # strength is added — ONIQ's, stated, unmeasured.
+    return {
+        "multiscale_schedule": "full-checkpoint-conservative",
+        "multiscale_source": "ONIQ — no upstream multi-scale config exists for a full 0.9.8 checkpoint",
+        "first_pass_timesteps": None,
+        "second_pass_timesteps": None,
+        "refine_denoise_strength": FULL_REFINE_DENOISE_STRENGTH,
+        "upscale_adain_factor": UPSCALE_ADAIN_FACTOR,
+        # Not demonstrated for a full checkpoint anywhere upstream.
+        "upscale_tone_map_compression": UPSCALE_TONE_MAP_COMPRESSION,
+    }
+
+
 def inference_profile(caps: dict) -> dict:
     """The exact kwargs this checkpoint should be sampled with."""
     if not isinstance(caps, dict) or "distilled" not in caps:
@@ -296,18 +415,18 @@ def inference_profile(caps: dict) -> dict:
         # named strength, named noise scale — instead of implicit and
         # unrecordable. Derived from the components actually on disk.
         "conditioning": bool(caps.get("condition_pipeline_supported")),
+        # NOTE: the multi-scale block below is spread LAST on purpose — on a
+        # distilled checkpoint it legitimately overrides guidance and the
+        # decode settings with the recipe's own values.
         # MULTI-SCALE. Both halves of the answer travel in the profile, so a
         # soft clip can be told apart from a missing capability without
         # re-running anything.
         "multiscale": multiscale,
         "multiscale_reason": multiscale_reason,
-        "refine_steps": REFINE_STEPS if multiscale else 0,
-        "refine_denoise_strength": REFINE_DENOISE_STRENGTH if multiscale else None,
-        "upscale_adain_factor": UPSCALE_ADAIN_FACTOR,
-        "upscale_tone_map_compression": UPSCALE_TONE_MAP_COMPRESSION,
         "upscale_spatial_factor": UPSCALE_SPATIAL_FACTOR if multiscale else 1,
         "max_sequence_length": MAX_SEQUENCE_LENGTH,
         "timesteps": None,
+        **_multiscale_schedule(multiscale, distilled),
         "defaults_source": d["source"],
         "profile_for": "distilled" if distilled else "full",
     }
@@ -336,8 +455,13 @@ def diagnostics(caps: dict, profile: dict) -> dict:
         "conditioning": profile.get("conditioning"),
         "multiscale": profile.get("multiscale"),
         "multiscale_reason": profile.get("multiscale_reason"),
-        "refine_steps": profile.get("refine_steps"),
+        "multiscale_schedule": profile.get("multiscale_schedule"),
+        "multiscale_source": profile.get("multiscale_source"),
+        "first_pass_timesteps": profile.get("first_pass_timesteps"),
+        "second_pass_timesteps": profile.get("second_pass_timesteps"),
         "refine_denoise_strength": profile.get("refine_denoise_strength"),
+        "upscale_adain_factor": profile.get("upscale_adain_factor"),
+        "upscale_tone_map_compression": profile.get("upscale_tone_map_compression"),
         "upscale_spatial_factor": profile.get("upscale_spatial_factor"),
         "max_sequence_length": profile.get("max_sequence_length"),
         "defaults_source": profile.get("defaults_source"),

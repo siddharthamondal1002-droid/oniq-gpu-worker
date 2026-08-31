@@ -365,8 +365,17 @@ OUTPUT_WHITELIST = frozenset(
         # missing component look identical in an output file.
         "multiscale",
         "multiscale_reason",
-        "refine_steps",
+        # WHICH RECIPE RAN, and where each number came from. The distilled
+        # 0.9.8 schedule and a full checkpoint's are different sets of values,
+        # and a clip that used the wrong one looks exactly like a clip that
+        # used the right one until somebody reads this field.
+        "multiscale_schedule",
+        "multiscale_source",
+        "first_pass_timesteps",
+        "second_pass_timesteps",
         "refine_denoise_strength",
+        "upscale_adain_factor",
+        "upscale_tone_map_compression",
         "upscale_spatial_factor",
         "max_sequence_length",
         "upscaler_used",
@@ -482,7 +491,25 @@ def _require_key(value, field: str) -> str:
 # `input_key` stays a general key because the caller that supplies it is the
 # edge function, which DERIVES it from a job token; this field can arrive from
 # further out, so it is narrowed at the contract rather than trusted.
+# THE KEY SCHEME, and why it has a scope segment and a version.
+#
+#     story/ref/canon/<characterId>/v<n>.png
+#
+# SCOPE (`canon`) because today's references are ONIQ's own published
+# characters — shared canon, belonging to no user and no film. The segment
+# exists so that per-user references, if they are ever added, land under a
+# DIFFERENT scope and the isolation is structural rather than a rule somebody
+# has to remember. A regex that admitted only `story/ref/<id>` would have to
+# be widened later, and widening an authorisation pattern is exactly the
+# change nobody reviews carefully enough.
+#
+# VERSION because a reference must be IMMUTABLE once a film has used it. A
+# shot drawn against v1 keeps looking like v1 even after the character is
+# re-published as v2; overwriting one key in place would silently change
+# films that were already finished. Versions are integers, not timestamps and
+# not random ids — the same reason storySeed derives rather than rolls.
 REFERENCE_PREFIX = "story/ref/"
+REFERENCE_SCOPE_CANON = "canon"
 # The usable band for an identity anchor, and both ends are refusals rather
 # than clamps. Above the top the sampler simply returns the reference; below
 # the bottom the anchor is indistinguishable from no anchor at all, and a
@@ -490,7 +517,7 @@ REFERENCE_PREFIX = "story/ref/"
 MIN_REFERENCE_STRENGTH = 0.05
 MAX_REFERENCE_STRENGTH = 0.95
 _REFERENCE_RE = __import__("re").compile(
-    r"^story/ref/[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(png|jpg|jpeg|webp)$"
+    r"^story/ref/canon/[A-Za-z0-9][A-Za-z0-9._-]{0,120}/v[1-9][0-9]{0,3}\.png$"
 )
 
 
@@ -498,8 +525,8 @@ def _require_reference_key(value) -> str:
     if not isinstance(value, str) or not _REFERENCE_RE.match(value):
         raise ContractError(
             "invalid-input",
-            "params.reference_key must be a canonical character reference "
-            f"under {REFERENCE_PREFIX} (bounded id, image extension)",
+            "params.reference_key must be a canonical character reference: "
+            f"{REFERENCE_PREFIX}{REFERENCE_SCOPE_CANON}/<characterId>/v<n>.png",
         )
     if ".." in value:
         raise ContractError("invalid-input", "params.reference_key may not contain '..'")
