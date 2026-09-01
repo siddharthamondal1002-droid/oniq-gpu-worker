@@ -194,7 +194,14 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
             "bytes": marker.get("bytes"),
         }
 
-    need = spec["download_gib"] + DISK_HEADROOM_GIB
+    # A CACHE FETCH LANDS TWICE: weights_r2 downloads a tar and then
+    # extracts it beside itself, so the peak is two full copies. The volume
+    # path streams files straight from the hub and peaks at one. Checking
+    # for one copy on a path that needs two is the shape of guard this
+    # repository has spent a day removing — it passes and then the write
+    # fails halfway, inside a job already being paid for.
+    copies = 2 if modelroot.storage_class(model_id) == "cache" else 1
+    need = spec["download_gib"] * copies + DISK_HEADROOM_GIB
     # THE ROOT THIS MODEL ACTUALLY LANDS ON. Checking the volume's free
     # space before a fetch that goes to container disk would measure the
     # wrong filesystem — and on an endpoint with no volume it would measure
