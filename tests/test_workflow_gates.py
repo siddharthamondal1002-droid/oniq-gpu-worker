@@ -837,9 +837,18 @@ def test_the_proofs_all_run_before_the_push():
     steps = _publish_steps()
     names = [s.get("name") or s.get("uses") for s in steps]
     push_at = next(i for i, n in enumerate(names) if n and "Push" in n)
-    for needle in ("The image starts", "uid 10001", "LTX 2B", "credential did NOT"):
+    for needle in ("The image starts", "uid 10001", "credential did NOT"):
         at = next(i for i, n in enumerate(names) if n and needle in n)
         assert at < push_at, needle
+
+    # THE MODEL-IDENTITY PROOF, matched by what it RUNS rather than by its
+    # name. This needle used to be "LTX 2B" and broke the moment the step was
+    # renamed for the 13B checkpoint — a proof's position in the pipeline has
+    # nothing to do with the marketing size in its title, and a test that
+    # conflates the two fails for the wrong reason.
+    proof_at = next(i for i, s in enumerate(steps)
+                    if "baked_assets.py" in (s.get("run") or ""))
+    assert proof_at < push_at, "the baked-asset proof must run before the push"
 
 
 # ------------------------------------------- gate 7: frames, never metadata

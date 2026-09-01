@@ -278,7 +278,7 @@ jobs:
           docker run --rm "${IMAGE}:${GITHUB_SHA}" id | tee /dev/stderr | grep -q 'uid=10001'
           echo "PROOF uid: 10001"
 
-      - name: "LTX 2B, Qwen3-8B, piper and the licence records"
+      - name: "LTX 13B distilled, Qwen3-8B, piper and the licence records"
         run: |
           set -euo pipefail
           docker run --rm -v "${PWD}/validation/proofs:/proofs:ro" \
