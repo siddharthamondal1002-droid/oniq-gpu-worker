@@ -458,3 +458,49 @@ def test_the_last_transformer_pass_refuses_an_incomplete_component():
         assert "TRANSFORMER COMPLETE" in block
         # The guard is what stops pass 0 declaring a two-thirds download whole.
         assert "if PASS == PASSES - 1:" in block
+
+
+def test_a_bake_block_only_verifies_what_it_downloads():
+    """MEASURED THE EXPENSIVE WAY, run 33464498069: the first LTX block still
+    weighed DEST/transformer on disk after the transformer had moved into its
+    own split passes, so the build refused itself with "downloaded transformer
+    is 0 bytes".
+
+    A block that verifies a component it does not fetch fails for a reason
+    that has nothing to do with the component. This checks the invariant
+    directly: every component the first block walks on disk must be one
+    FIRST_PASS actually downloads."""
+    import re
+
+    from validation.image_size import _first_strings
+
+    block = _bakes_by_role()["ltx"]
+    first_pass = set(_first_strings(block, "FIRST_PASS", "(", ")"))
+    assert first_pass, "FIRST_PASS is not parseable"
+
+    walked = set(re.findall(r'os\.path\.join\(DEST,\s*"([a-z_]+)"\)', block))
+    # A loop over FIRST_PASS itself is fine — it cannot name a component the
+    # pass does not fetch.
+    stray = walked - first_pass
+    assert not stray, (
+        f"the first LTX bake verifies {sorted(stray)} on disk but FIRST_PASS "
+        f"only downloads {sorted(first_pass)}"
+    )
+
+
+def test_the_on_disk_size_guard_lives_where_the_weights_land():
+    """The metadata guard in survey() refuses an oversized model before a byte
+    moves. The ON-DISK guard is the second half of that pair — a registry that
+    under-reported a size could otherwise smuggle a bigger model past both —
+    and it has to sit in the pass that actually writes the weights."""
+    passes = _bakes_by_role()["transformer_passes"]
+    for block in passes:
+        assert "SIZE_GUARD_BYTES" in block
+        assert "outside the" in block
+    # And it is guarded to the final pass, like the completeness check: an
+    # earlier pass holds only part of the weights and would refuse a model
+    # that is fine.
+    for block in passes:
+        guarded = block.split("if PASS == PASSES - 1:", 1)
+        assert len(guarded) == 2
+        assert "SIZE_GUARD_BYTES" in guarded[1]

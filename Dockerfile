@@ -353,13 +353,24 @@ for repo, tag in CANDIDATES:
                 f"components {sorted(declared - accepted)} are not loadable "
                 "by LTXImageToVideoPipeline"
             )
-        on_disk = 0
-        for root, _, files in os.walk(os.path.join(DEST, "transformer")):
-            for name in files:
-                if name.endswith(".safetensors"):
-                    on_disk += os.path.getsize(os.path.join(root, name))
-        if not 0 < on_disk <= SIZE_GUARD_BYTES:
-            raise RuntimeError(f"downloaded transformer is {on_disk} bytes")
+        # A BLOCK VERIFIES WHAT IT DOWNLOADED, AND ONLY THAT.
+        #
+        # This used to weigh DEST/transformer, which was right while the
+        # transformer rode in FIRST_PASS. It no longer does — it goes through
+        # the three-way split below — so the check found 0 bytes and refused
+        # the build (run 33464498069). The metadata guard in survey() is the
+        # one that refuses an oversized model BEFORE anything downloads, and
+        # it still runs; the on-disk guard moved to the final transformer
+        # pass, where the bytes actually are.
+        first_pass_bytes = 0
+        for component in FIRST_PASS:
+            for root, _, files in os.walk(os.path.join(DEST, component)):
+                for name in files:
+                    first_pass_bytes += os.path.getsize(os.path.join(root, name))
+        if first_pass_bytes <= 0:
+            raise RuntimeError(
+                f"first pass downloaded nothing for {list(FIRST_PASS)}"
+            )
 
         # The terms must travel WITH the weights. An image that
         # redistributes someone's model without their licence text beside
@@ -380,7 +391,9 @@ for repo, tag in CANDIDATES:
         resolved = repo + tag
         resolved_revision = revision
         resolved_licence = licence
-        print(f"BAKED {resolved} at {revision} ({on_disk} transformer bytes on disk)")
+        print(f"BAKED {resolved} at {revision} "
+              f"({first_pass_bytes} bytes for {list(FIRST_PASS)}; the "
+              f"transformer follows in its own passes)")
         break
     except Exception as exc:
         # There is nothing to fall through to — the list has one member by
@@ -406,7 +419,7 @@ with open("/app/models/MODEL_ID", "w") as fh:
 # rather than that being knowable only from a build log that scrolls away.
 with open("/app/models/LTX_REVISION", "w") as fh:
     fh.write(resolved_revision + "\n")
-# The BARE repo id, for the text-encoder passes below. MODEL_ID carries
+# The BARE repo id, for the transformer passes below. MODEL_ID carries
 # repo+tag and is what the worker reports; this is what the hub is asked
 # for, and keeping them separate stops a display string from becoming a
 # download argument.
@@ -445,6 +458,9 @@ if os.path.exists("/run/secrets/hf_token"):
 DEST = "/app/models/ltx"
 PREFIX = "transformer/"
 PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
 PASS = int(os.environ["LTX_TX_PASS"])
 
 with open("/app/models/LTX_REPO") as fh:
@@ -492,7 +508,19 @@ if PASS == PASSES - 1:
             f"transformer incomplete after all passes: {missing[:5]}")
     landed = sum(os.path.getsize(os.path.join(DEST, name))
                  for name, _ in files)
-    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
@@ -512,6 +540,9 @@ if os.path.exists("/run/secrets/hf_token"):
 DEST = "/app/models/ltx"
 PREFIX = "transformer/"
 PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
 PASS = int(os.environ["LTX_TX_PASS"])
 
 with open("/app/models/LTX_REPO") as fh:
@@ -559,7 +590,19 @@ if PASS == PASSES - 1:
             f"transformer incomplete after all passes: {missing[:5]}")
     landed = sum(os.path.getsize(os.path.join(DEST, name))
                  for name, _ in files)
-    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
@@ -579,6 +622,9 @@ if os.path.exists("/run/secrets/hf_token"):
 DEST = "/app/models/ltx"
 PREFIX = "transformer/"
 PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
 PASS = int(os.environ["LTX_TX_PASS"])
 
 with open("/app/models/LTX_REPO") as fh:
@@ -626,7 +672,19 @@ if PASS == PASSES - 1:
             f"transformer incomplete after all passes: {missing[:5]}")
     landed = sum(os.path.getsize(os.path.join(DEST, name))
                  for name, _ in files)
-    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes")
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
