@@ -624,6 +624,17 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # is token-gated, and the approved set stays a module constant no
         # dispatch input can reach.
         "endpoint-gpus",
+        # endpoint-locations joined 2026-09-01, after the console's Releases
+        # tab showed what no API surface does: attaching a network volume
+        # narrows `locations` from ALL to that volume's single datacenter,
+        # and DETACHING DOES NOT WIDEN IT BACK. The endpoint is then pinned
+        # for life and dies the day that one datacenter's approved tier runs
+        # dry — which is what the daily endpoint recreation was really
+        # working around. Token-gated, because widening WHERE a worker may
+        # be placed changes which datacenters' prices apply; it changes no
+        # worker count, and the id list is a module constant shared with the
+        # volume path so the two can never disagree.
+        "endpoint-locations",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]

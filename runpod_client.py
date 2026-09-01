@@ -811,6 +811,55 @@ def attach_network_volume(endpoint_id: str, volume_id: str,
     return before, after
 
 
+def set_data_center_ids(endpoint_id: str, datacenter_ids):
+    """PATCH dataCenterIds on ONE endpoint. Nothing else is sent.
+
+    THE FAULT THIS EXISTS FOR, read off the console's Releases tab on
+    2026-09-01 because no API surface shows it:
+
+        Release #3   locations   ALL -> EU-RO-1
+
+    Attaching a network volume NARROWS an endpoint's placement to that
+    volume's single datacenter. Detaching does NOT widen it back —
+    release #7 removed the volume and left the pin untouched. The
+    narrowing is one-way and permanent, so the endpoint spends the rest
+    of its life able to run in exactly one datacenter, and the day that
+    datacenter's approved VRAM tier runs dry it has ZERO placement
+    candidates. The signature is every worker bucket at 0 INCLUDING
+    throttled: not "wants a card and cannot get one" but "has nothing to
+    try". Creating a fresh endpoint appears to fix it only because a new
+    endpoint is born at locations: ALL.
+
+    THIS CANNOT BE READ BACK. Measured 2026-09-01 across BOTH REST routes
+    with validation/endpoint_read.py: neither GET /endpoints/{id} nor GET
+    /endpoints returns `dataCenterIds` or `locations` — the keys are
+    ABSENT, not null. So the caller must not treat a clean read as proof
+    the widening landed; the console's Releases tab is the only record.
+    Read-before and read-after are still returned, for the one thing they
+    CAN establish: that nothing else moved.
+    """
+    if not isinstance(datacenter_ids, (list, tuple)) or not datacenter_ids:
+        raise RunPodApiError(
+            f"refusing an empty datacenter list: {datacenter_ids!r} — an "
+            "endpoint with nowhere to run is the fault, not the repair"
+        )
+    _, before = get_endpoint(endpoint_id)
+    status, raw = _request(
+        f"{REST_BASE}/endpoints/{endpoint_id}",
+        method="PATCH",
+        body={"dataCenterIds": list(datacenter_ids)},
+    )
+    if status not in (200, 201, 202):
+        # The body is the diagnosis and carries no credential — the key
+        # travels in a header. An illegal enum value is named in it, which
+        # is how US-MO-2 was finally identified.
+        raise RunPodApiError(
+            f"PATCH /endpoints/{endpoint_id} -> {status} (body: {raw[:2000]!r})"
+        )
+    _, after = get_endpoint(endpoint_id)
+    return before, after
+
+
 def endpoint_billing():
     """What every endpoint on the account has actually accrued. Read-only.
 
