@@ -392,3 +392,75 @@ def test_image_generate_canvas_matches_the_video_canvas():
     # rescaled at the seam between the two stages.
     assert contract.IMAGE_GEN_NUM_FRAMES % 8 == 1
     assert contract.IMAGE_GEN_FORMAT in contract.ALLOWED_FORMATS
+
+
+class TestHydrateAcceptsEveryVolumeResidentModel:
+    """A hydrate gate that knows only ONE registry rejects the other's models.
+
+    MEASURED BY READING, 2026-08-31, before it cost anything: this gate
+    checked `model not in modelroot.EXPERIMENTAL`, so LTX_TEXT_ENCODER —
+    production, but volume-resident — would have been refused as
+    invalid-input. That refusal happens INSIDE the worker, which is to say
+    after a GPU has been booted and billed: the most expensive place in the
+    system to find a stale allowlist.
+
+    Introducing a second registry created six call sites that had to learn
+    about it. Five were updated together; this was the sixth, in another
+    module, and it is the only one that would have charged for the mistake."""
+
+    def test_the_text_encoder_is_accepted(self):
+        job = contract.validate_job(
+            {"op": "model_hydrate", "model": "LTX_TEXT_ENCODER"})
+        assert job["model"] == "LTX_TEXT_ENCODER"
+
+    def test_the_experimental_model_is_still_accepted(self):
+        job = contract.validate_job(
+            {"op": "model_hydrate", "model": "HUNYUAN_15_I2V_480_STEP"})
+        assert job["model"] == "HUNYUAN_15_I2V_480_STEP"
+
+    def test_every_registered_id_passes_the_gate(self):
+        # Whatever is registered must be hydratable. A model the worker can
+        # resolve but not fetch is a model that can never become READY.
+        import modelroot
+
+        for model_id in modelroot.known_ids():
+            assert contract.validate_job(
+                {"op": "model_hydrate", "model": model_id})["model"] == model_id
+
+    def test_an_unknown_model_is_still_refused_and_lists_them_all(self):
+        with pytest.raises(contract.ContractError) as exc:
+            contract.validate_job({"op": "model_hydrate", "model": "NOPE"})
+        import modelroot
+
+        for known in modelroot.known_ids():
+            assert known in str(exc.value)
+
+    def test_no_gate_anywhere_reads_only_the_experimental_registry(self):
+        """The bug class, guarded directly.
+
+        Six call sites had to learn about the second registry. Five were
+        updated together and the sixth — the one inside the worker, where a
+        refusal costs a booted GPU — was missed. A grep is a blunt instrument,
+        but it catches exactly this: a gate that consults one registry when
+        two exist.
+
+        hunyuan_preflight is exempt BY NAME, not by accident: it indexes
+        EXPERIMENTAL[MODEL_ID] for a Hunyuan-only preflight, which is correct.
+        """
+        import pathlib
+
+        offenders = []
+        for path in pathlib.Path(".").glob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            if "modelroot.EXPERIMENTAL" in text:
+                offenders.append(str(path))
+        for path in pathlib.Path("validation").glob("*.py"):
+            if path.name == "hunyuan_preflight.py":
+                continue
+            if "modelroot.EXPERIMENTAL" in path.read_text(encoding="utf-8"):
+                offenders.append(str(path))
+        assert offenders == [], (
+            f"{offenders} consult EXPERIMENTAL directly; use "
+            "modelroot.spec_for / known_ids so volume-resident models are "
+            "not silently refused"
+        )

@@ -755,13 +755,20 @@ def validate_job(raw) -> dict:
         if not isinstance(model, str) or not model.strip():
             raise ContractError("invalid-input", "model must be a non-empty string")
         model = model.strip()
-        if model not in modelroot.EXPERIMENTAL:
+        if modelroot.spec_for(model) is None:
             # Named, never guessed at. A hydrate that silently fell back to
             # some default would download 32 GiB of the wrong checkpoint
             # and mark it READY.
+            #
+            # BOTH REGISTRIES, since 2026-08-31. This read EXPERIMENTAL alone,
+            # so LTX_TEXT_ENCODER — production, but volume-resident — was
+            # rejected here as invalid-input. That refusal lands INSIDE the
+            # worker, which means after a GPU has been booted and billed: the
+            # most expensive place in the system to discover a typo in an
+            # allowlist.
             raise ContractError(
                 "invalid-input",
-                "model must be one of: " + ", ".join(sorted(modelroot.EXPERIMENTAL)),
+                "model must be one of: " + ", ".join(modelroot.known_ids()),
             )
         return {
             "op": op,
