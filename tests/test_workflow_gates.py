@@ -168,6 +168,14 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         # modelhydrate puts an experimental checkpoint on the volume. It is
         # what makes a model change a data change.
         "modelhydrate.py",
+        # weights_r2 joined 2026-09-01. The text encoder moved to container
+        # disk (owner option B) because a network volume permanently pins an
+        # endpoint to one datacenter — but the checkpoint is GATED, the
+        # build's HF token deliberately does not survive into the image, and
+        # the template carries only the three R2 variables. So the bytes come
+        # from the bucket the worker already writes its output to, and no new
+        # credential reaches a rented machine.
+        "weights_r2.py",
         # preview joined 2026-08-29: the bucket is private, so the only way
         # to LOOK at what the worker made is for the worker to hand a
         # thumbnail back with the reply.
@@ -272,6 +280,7 @@ def test_dockerignore_denies_by_default():
         "!cudaenv.py",
         "!modelroot.py",
         "!modelhydrate.py",
+        "!weights_r2.py",
         "!preview.py",
         "!ltxcaps.py",
         "!videogen.py",
@@ -381,6 +390,11 @@ def test_the_closure_actually_reaches_the_engines():
         # walk finds it anyway — which is the point: storygen once reached CI
         # missing from both locks and the image died on import at start-up.
         "modelprobe",
+        # weights_r2 joined 2026-09-01, imported by modelhydrate inside the
+        # cache-resident branch. The walk found it there, which is exactly
+        # the behaviour modelprobe's note describes — and it had to, because
+        # every clip goes through the text encoder it fetches.
+        "weights_r2",
         # modelroot joined 2026-08-30 with the owner's directive to move
         # the weights onto a network volume. Every engine reaches its
         # weights through it, so it is the one module whose absence from

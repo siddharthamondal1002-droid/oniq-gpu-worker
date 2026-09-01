@@ -72,6 +72,13 @@ COPY storage.py /app/storage.py
 COPY cudaenv.py /app/cudaenv.py
 COPY modelroot.py /app/modelroot.py
 COPY modelhydrate.py /app/modelhydrate.py
+# weights_r2 is how a cache-resident checkpoint reaches a worker WITHOUT a
+# HuggingFace token: modelhydrate imports it, so it must ship or the worker
+# dies on import at start-up. The checkpoint is gated (see the NO CREDENTIAL
+# refusal below), the build's token deliberately does not survive into this
+# image, and the RunPod template carries only the three R2 variables — so
+# the bytes come from the bucket the worker already writes its output to.
+COPY weights_r2.py /app/weights_r2.py
 COPY preview.py /app/preview.py
 COPY videogen.py /app/videogen.py
 # ltxcaps derives the inference profile from the BAKED checkpoint. videogen

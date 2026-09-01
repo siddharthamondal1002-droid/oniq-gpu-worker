@@ -212,17 +212,62 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
     _take_lock(path)
     started = time.monotonic()
     try:
-        if downloader is None:  # pragma: no cover - network path
+        if downloader is not None:
+            # An explicit downloader is the caller's decision and is used as
+            # given — that is what the tests inject, and second-guessing it
+            # here would make the tested path different from the real one.
+            downloader(
+                spec["repo"],
+                revision=spec["revision"],
+                local_dir=path,
+                allow_patterns=spec["allow"],
+                token=token or os.environ.get("HF_TOKEN") or None,
+            )
+        elif modelroot.storage_class(model_id) == "cache":
+            # THE WORKER HAS NO HUGGINGFACE TOKEN, and this checkpoint is
+            # GATED — the Dockerfile refuses to build without one and says
+            # so. The build's token arrives on a BuildKit tmpfs and a
+            # publish proof asserts it does NOT survive into the image, so
+            # an anonymous fetch here would 401 inside a billed worker
+            # after a ~40 GiB image pull.
+            #
+            # OWNER DECISION 2026-09-01, option B: the bytes come from R2,
+            # which the worker already has credentials for because it
+            # writes every output through them. No new credential reaches a
+            # rented machine. Fails closed — see weights_r2 for why there
+            # is deliberately no HuggingFace fallback.
+            import storage
+            import weights_r2
+
+            work = os.path.join(path, ".staging")
+            os.makedirs(work, exist_ok=True)
+            try:
+                weights_r2.fetch(spec, path, work, storage.download)
+            except weights_r2.WeightsUnavailable as refusal:
+                # TRANSLATED, not re-raised as-is. Every caller of hydrate
+                # handles HydrationRefused; a second exception type reaching
+                # them would escape as an unhandled error and lose the
+                # named diagnosis that is the whole point of these codes.
+                raise HydrationRefused(
+                    refusal.code, refusal.detail
+                ) from refusal
+            finally:
+                # The archive is unpacked INTO `path`, so the staging
+                # directory sits inside the tree the manifest is about to
+                # walk. Removing it here — before manifest() runs — is what
+                # keeps a download artefact out of the record of what the
+                # checkpoint contains.
+                shutil.rmtree(work, ignore_errors=True)
+        else:  # pragma: no cover - network path
             from huggingface_hub import snapshot_download
 
-            downloader = snapshot_download
-        downloader(
-            spec["repo"],
-            revision=spec["revision"],
-            local_dir=path,
-            allow_patterns=spec["allow"],
-            token=token or os.environ.get("HF_TOKEN") or None,
-        )
+            snapshot_download(
+                spec["repo"],
+                revision=spec["revision"],
+                local_dir=path,
+                allow_patterns=spec["allow"],
+                token=token or os.environ.get("HF_TOKEN") or None,
+            )
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         files = manifest(path)
