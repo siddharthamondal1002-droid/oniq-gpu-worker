@@ -811,6 +811,32 @@ def attach_network_volume(endpoint_id: str, volume_id: str,
     return before, after
 
 
+def delete_network_volume(volume_id: str):
+    """DELETE /networkvolumes/{id}. IRREVERSIBLE — the data does not come back.
+
+    The one destructive call in this client, and the only one whose mistake
+    cannot be undone by re-running the opposite operation. Detach is
+    reversible; this is not. Every guard that decides WHETHER to call it
+    lives in validation/volume_delete.py, where it can be read and tested;
+    what lives here is the narrow act plus a refusal for an empty id, so a
+    blank variable cannot expand into a request against the collection.
+    """
+    if not (volume_id or "").strip():
+        raise RunPodApiError(
+            "refusing an empty volume id — a blank here would address the "
+            "collection, not one volume"
+        )
+    status, raw = _request(
+        f"{REST_BASE}/networkvolumes/{volume_id}", method="DELETE"
+    )
+    if status not in (200, 202, 204):
+        raise RunPodApiError(
+            f"DELETE /networkvolumes/{volume_id} -> {status} "
+            f"(body: {raw[:500]!r})"
+        )
+    return status, raw
+
+
 def set_data_center_ids(endpoint_id: str, datacenter_ids):
     """PATCH dataCenterIds on ONE endpoint. Nothing else is sent.
 

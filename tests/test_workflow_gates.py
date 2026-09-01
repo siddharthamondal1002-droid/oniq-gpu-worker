@@ -635,6 +635,15 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # worker count, and the id list is a module constant shared with the
         # volume path so the two can never disagree.
         "endpoint-locations",
+        # volume-delete joined 2026-09-01 with the owner's "remove any
+        # unnecessary billing". THE ONLY IRREVERSIBLE MODE in this file:
+        # every other writer is undone by running its opposite, and a
+        # deleted volume is gone with everything on it. So its literal is
+        # the only one that must carry its own target — DELETE-VOLUME:<id>
+        # — because authorizing a deletion in the abstract and taking the id
+        # from elsewhere is how the wrong volume goes. One per run; there is
+        # deliberately no batch shape.
+        "volume-delete",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
