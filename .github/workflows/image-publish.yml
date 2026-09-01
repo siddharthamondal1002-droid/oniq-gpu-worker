@@ -272,6 +272,35 @@ jobs:
           docker run --rm "${IMAGE}:${GITHUB_SHA}" \
             python3 -c "import torch; assert torch.version.cuda == '12.1', torch.version.cuda; print('PROOF torch:', torch.__version__, torch.version.cuda)"
 
+      - name: "Every module the Dockerfile ships actually imports"
+        run: |
+          set -euo pipefail
+          # WHY THIS EXISTS. On 2026-09-01 an image was published from a
+          # commit that predated weights_r2.py by one commit. `import
+          # handler` still succeeded, because weights_r2 is imported inside
+          # a branch — so every proof here passed, the template was
+          # retargeted, and a paid worker died on OSError at the first
+          # still. Two GPU jobs were spent before anyone looked.
+          #
+          # The module list is READ FROM THE DOCKERFILE rather than typed,
+          # so it cannot drift from what is actually COPYed. Importing is
+          # stronger than checking the file exists: it also catches a
+          # module that shipped but cannot load.
+          # [a-z0-9_] and not [a-z_]: the first draft of this line excluded
+          # DIGITS, so it silently skipped weights_r2 — the one module this
+          # proof was written to catch. A guard that omits its own subject
+          # passes and proves nothing.
+          mods=$(grep -E '^COPY [a-z0-9_]+\.py ' Dockerfile \
+                 | awk '{print $2}' | sed 's/\.py$//' | sort)
+          case "$mods" in
+            *weights_r2*) ;;
+            *) echo "::error::weights_r2 missing from the shipped list"; exit 1 ;;
+          esac
+          echo "shipped modules: $(echo $mods | tr '\n' ' ')"
+          py=$(for m in $mods; do printf 'import %s; ' "$m"; done)
+          docker run --rm "${IMAGE}:${GITHUB_SHA}" python3 -c \
+            "$py print('PROOF modules: all $(echo $mods | wc -w) import')"
+
       - name: "It runs as uid 10001, not root"
         run: |
           set -euo pipefail
