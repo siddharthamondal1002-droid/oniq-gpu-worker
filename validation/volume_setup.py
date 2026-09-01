@@ -47,7 +47,38 @@ DEFAULT_SIZE_GB = 50
 # stating where it lives: attaching a volume PINS the endpoint to this
 # datacenter, and if the A5000 is not schedulable here the endpoint gets no
 # GPU. Detaching restores it.
-DEFAULT_DATACENTER = "US-MO-2"
+# US-MO-2 UNTIL 2026-09-01, WHEN IT STOPPED EXISTING.
+#
+# The comment above described it as "the datacenter RunPod has already proven
+# willing to place storage in for this account". That stopped being true: the
+# owner reports the datacenter was removed, and the API agrees — US-MO-2 is
+# absent from the 28 ids the endpoint PATCH schema now enumerates, the account
+# reports EXISTING: 0 volumes, and the endpoint's networkVolumeId is empty. One
+# stale 360 GB billing line dated 2026-08-30 is all that survives of it.
+#
+# There is deliberately NO replacement default. RunPod exposes no document
+# saying which datacenters sell volumes AND carry the approved cards —
+# introspection is disabled and neither side enumerates it — so a constant here
+# would be a guess wearing the costume of a default, and the failure mode is an
+# endpoint pinned to a datacenter with no GPU. The id is now REQUIRED from the
+# caller, who can read availability off the console.
+DEFAULT_DATACENTER = None
+
+# The datacenter ids the endpoint PATCH schema accepts, read from the live
+# OpenAPI document on 2026-09-01. Checked BEFORE a volume is created, because
+# creating one in an id the endpoint cannot be placed in strands the endpoint
+# exactly the way US-MO-2 did — and that check costs nothing.
+#
+# A NAME IN THIS LIST IS NOT A PROMISE OF VOLUMES. It says workers may be
+# placed there, which is necessary and not sufficient; whether that datacenter
+# sells network volumes is the part no API answers.
+KNOWN_DATACENTERS = (
+    "EU-RO-1", "CA-MTL-1", "EU-SE-1", "US-IL-1", "EUR-IS-1", "EU-CZ-1",
+    "US-TX-3", "EUR-IS-2", "US-KS-2", "US-GA-2", "US-WA-1", "US-TX-1",
+    "CA-MTL-3", "EU-NL-1", "US-TX-4", "US-CA-2", "US-NC-1", "OC-AU-1",
+    "US-DE-1", "EUR-IS-3", "CA-MTL-2", "AP-JP-1", "EUR-NO-1", "EU-FR-1",
+    "US-KS-3", "US-GA-1", "AP-IN-1", "US-MD-1",
+)
 DEFAULT_NAME = "oniq-models"
 
 
@@ -80,6 +111,28 @@ def existing_volume(client, name: str):
 
 def apply(client, endpoint_id: str, name: str, size_gb: int,
           datacenter_id: str) -> dict:
+    # REFUSED BEFORE ANYTHING IS READ OR CREATED. US-MO-2 was this module's
+    # default until that datacenter was removed; a create against a dead id
+    # costs a run to discover, and an endpoint pinned to a datacenter it
+    # cannot be placed in is worse — that is precisely how the endpoint was
+    # stranded before.
+    #
+    # Checked even when an existing volume is reused: a volume found by name
+    # in the wrong datacenter would pin the endpoint just as firmly.
+    if not datacenter_id:
+        raise Refused(
+            "datacenter-required",
+            "no datacenter given and there is no safe default since US-MO-2 "
+            "was removed. Name one of: " + ", ".join(KNOWN_DATACENTERS),
+        )
+    if datacenter_id not in KNOWN_DATACENTERS:
+        raise Refused(
+            "datacenter-unknown",
+            f"{datacenter_id!r} is not among the ids the endpoint schema "
+            "accepts, so a worker could never be placed beside the volume. "
+            "Known: " + ", ".join(KNOWN_DATACENTERS),
+        )
+
     found = existing_volume(client, name)
     if found:
         volume = found
@@ -102,13 +155,28 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
     # so this value is not a preference — it is the only place the
     # endpoint can now run, and a typed one could pin it away from its own
     # storage.
-    landed_dc = volume.get("dataCenterId") or datacenter_id
+    # READ, NEVER ASSUMED. This used to fall back to the caller's id with
+    # `or datacenter_id`, which silently asserts the volume landed where it
+    # was asked to — the one thing that must not be taken on trust, because
+    # the endpoint gets pinned to wherever the volume ACTUALLY is. With a
+    # default datacenter that fallback was also the only way the refusal
+    # below could fire; now it would simply hide a mismatch.
+    landed_dc = volume.get("dataCenterId")
     if not landed_dc:
         raise Refused(
             "volume-datacenter-unknown",
             f"the volume document names no dataCenterId: {volume!r}. "
             "Attaching without pinning the endpoint to the volume's "
             "datacenter is what left it unschedulable on 2026-08-30.",
+        )
+    if landed_dc != datacenter_id:
+        # A volume reused by NAME can sit somewhere else entirely. Attaching
+        # it would pin the endpoint there, which is how US-MO-2 stranded it.
+        raise Refused(
+            "volume-datacenter-mismatch",
+            f"asked for {datacenter_id}, the volume reports {landed_dc}. "
+            "Attaching it would pin the endpoint to a datacenter you did "
+            "not choose; delete or rename the stray volume first.",
         )
 
     before, after = client.attach_network_volume(
