@@ -193,11 +193,18 @@ def _video_condition(image, frame_index=None, strength=None):
         return None
 
 
-# THE TEXT ENCODER COMES FROM THE VOLUME, NOT FROM THE IMAGE.
+# THE TEXT ENCODER COMES FROM CONTAINER DISK, NOT FROM THE IMAGE.
 #
 # Owner directive 2026-08-31. The 13B repoint put the image past what a hosted
 # runner can build, and this component is 17.74 GiB of it — see
-# modelroot.VOLUME_RESIDENT["LTX_TEXT_ENCODER"] and the Dockerfile's own note.
+# modelroot.CACHE_RESIDENT["LTX_TEXT_ENCODER"] and the Dockerfile's own note.
+#
+# IT WAS ON A NETWORK VOLUME UNTIL 2026-09-01. Owner decision, option B: no
+# volume at all, because attaching one narrows the endpoint's `locations`
+# from ALL to that volume's single datacenter and DETACHING DOES NOT WIDEN IT
+# BACK. The endpoint then cannot get a GPU the day that datacenter's approved
+# tier runs dry, which is what the daily endpoint recreation was working
+# around. Placement breadth beat persistent storage; see modelroot.CACHE_ROOT.
 #
 # WHY PASSING IT IN IS SAFE, verified rather than assumed. diffusers 0.38.0's
 # pipeline_utils.py loads each component with:
@@ -218,11 +225,29 @@ LTX_TEXT_ENCODER = "LTX_TEXT_ENCODER"
 
 
 def _text_encoder():
-    """The T5 encoder, from the volume, on the same dtype as the pipeline."""
+    """The T5 encoder, from container disk, on the pipeline's dtype.
+
+    `ensure`, NOT `resolve`. Since the 2026-09-01 no-volume decision these
+    weights live on the worker's own disk, and a worker RunPod has just
+    placed has an empty one. An empty cache on a cold worker is the normal
+    first state, not a fault, so it is fetched here and reused by every
+    later clip that worker serves. Every other refusal — corrupt manifest,
+    wrong revision, unknown id — still propagates untouched: a clip that
+    cannot trust its own text encoder must refuse rather than run with an
+    embedding nobody verified.
+    """
     # RESOLVED FIRST, before torch or transformers are imported. A missing or
-    # unhydrated volume is a configuration fact, and diagnosing it should not
-    # depend on the ML stack loading successfully — nor pay for the import.
-    path = modelroot.resolve(LTX_TEXT_ENCODER)
+    # unhydrated cache is a storage fact, and diagnosing it should not depend
+    # on the ML stack loading successfully — nor pay for the import.
+    #
+    # THE FETCHER IS PASSED IN, because modelroot imports nothing but json and
+    # os and a test holds it to that over the AST. Layering, not ceremony:
+    # keeping every module that handles a job out of modelroot's import graph
+    # is what keeps "a caller cannot steer where weights load from" cheap to
+    # verify.
+    import modelhydrate
+
+    path = modelroot.ensure(LTX_TEXT_ENCODER, modelhydrate.hydrate)
 
     import torch
     from transformers import T5EncoderModel

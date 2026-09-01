@@ -1207,6 +1207,23 @@ for name in ("en-us-ryan-high.onnx", "en-us-ryan-high.onnx.json"):
 print("BAKED piper voice en-us-ryan-high")
 EOF
 
+# THE CONTAINER-DISK CACHE, created here and OWNED BY THE RUNTIME USER.
+#
+# OWNER DECISION 2026-09-01, option B. The 17.74 GiB text encoder is fetched
+# to /app/cache on a cold worker rather than living on a network volume,
+# because attaching a volume permanently narrows the endpoint's `locations`
+# from ALL to that volume's single datacenter — and detaching does NOT widen
+# it back. See modelroot.CACHE_ROOT for the whole finding.
+#
+# CREATED AT BUILD TIME, DELIBERATELY. Every stage builds as root and runs as
+# uid 10001, so a directory made on demand by the worker would be created
+# under a root-owned /app and fail with EACCES — inside a job already being
+# paid for, forty minutes into a cold start. That exact failure killed the
+# first model probe when the hub tried to make its cache under a root-owned
+# parent; this is the same mistake, and it is cheaper to prevent here than
+# to diagnose on a rented card.
+RUN mkdir -p /app/cache && chown -R 10001:10001 /app/cache
+
 USER oniq:oniq
 
 CMD ["python3", "-u", "handler.py"]

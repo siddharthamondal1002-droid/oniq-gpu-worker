@@ -154,13 +154,14 @@ def check(report=print, root=ROOT):
         n.endswith(".safetensors") for n in os.listdir(encoder)
     ):
         raise ProofFailed(
-            f"{encoder} carries weights, but the text encoder is meant to "
-            "live on the network volume (modelroot.VOLUME_RESIDENT"
-            "['LTX_TEXT_ENCODER']). Baking it back adds 17.74 GiB and puts "
-            "the image past what a hosted runner can build."
+            f"{encoder} carries weights, but the text encoder is meant to be "
+            "fetched to the worker's container disk "
+            "(modelroot.CACHE_RESIDENT['LTX_TEXT_ENCODER']). Baking it back "
+            "adds 17.74 GiB and puts the image past what a hosted runner can "
+            "build — measured at 57.97 GiB, run 33434875038."
         )
     report("PROOF ltx text encoder: absent from the image, as intended "
-           "(hydrated onto the volume)")
+           "(fetched to container disk on first use)")
 
     story_bytes = weight_bytes(at("story"))
     if not 0 < story_bytes <= STORY_GUARD_BYTES:

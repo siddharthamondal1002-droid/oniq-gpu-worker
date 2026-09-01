@@ -169,7 +169,12 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
             f"{model_id!r} is not a known volume-resident model; known ids "
             "are " + ", ".join(modelroot.known_ids()),
         )
-    if not modelroot.volume_mounted():
+    # ONLY VOLUME MODELS NEED A VOLUME. A cache-resident model hydrates onto
+    # the worker's own container disk, which is always present — requiring a
+    # mount for it would refuse the very fetch that makes a cold worker
+    # usable under the 2026-09-01 no-volume decision.
+    if (modelroot.storage_class(model_id) == "volume"
+            and not modelroot.volume_mounted()):
         raise HydrationRefused(
             MISSING,
             f"{modelroot.VOLUME_ROOT} is not mounted; there is nowhere to "
@@ -190,7 +195,11 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
         }
 
     need = spec["download_gib"] + DISK_HEADROOM_GIB
-    free = _free_gib(modelroot.oniq_root())
+    # THE ROOT THIS MODEL ACTUALLY LANDS ON. Checking the volume's free
+    # space before a fetch that goes to container disk would measure the
+    # wrong filesystem — and on an endpoint with no volume it would measure
+    # a path that does not exist.
+    free = _free_gib(modelroot.root_for(model_id))
     if free < need:
         raise HydrationRefused(
             DISK_INSUFFICIENT,

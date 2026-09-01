@@ -89,6 +89,31 @@ ONIQ_TREE = os.path.join("models", "oniq")
 BAKED_ROOT = "/app/models"
 PRODUCTION_COMPONENTS = ("ltx", "story", "piper")
 
+# THE WORKER'S OWN CONTAINER DISK, and the third place weights can live.
+#
+# OWNER DECISION 2026-09-01, option B: no network volume, every datacenter.
+# The reason is not storage cost, it is placement. Attaching a network
+# volume narrows an endpoint's `locations` from ALL to that volume's single
+# datacenter — and DETACHING DOES NOT WIDEN IT BACK (read off the console's
+# Releases tab, releases #3 and #7; no API surface reports the field). The
+# endpoint is then pinned for life, and the day that one datacenter's
+# approved VRAM tier runs dry it has zero placement candidates and simply
+# stops getting workers. That is what the daily endpoint recreation was
+# working around: a new endpoint is born at locations: ALL.
+#
+# So the 17.74 GiB text encoder cannot live on a volume. It also cannot go
+# back into the image: that was measured at 57.97 GiB (run 33434875038) and
+# a hosted runner could not build it, with the last SUCCESSFUL publish
+# leaving 5.73 GiB free of 71.61. Container disk is the remaining place,
+# and the template already provisions 201 GB of it.
+#
+# THE COST IS A COLD START, and it is real: a worker that has never held
+# these weights fetches them before its first clip, inside the endpoint's
+# execution ceiling. A warm worker pays nothing. That trade was taken
+# deliberately — an endpoint that is slow to start beats an endpoint that
+# cannot get a GPU at all.
+CACHE_ROOT = os.environ.get("MODEL_CACHE_ROOT") or "/app/cache"
+
 # Written by the hydrator as the LAST act of a successful fetch, so its
 # presence means "complete", never "started". Anything else on disk
 # without it is an interrupted download.
@@ -127,9 +152,16 @@ EXPERIMENTAL = {
     },
 }
 
-# VOLUME-RESIDENT PRODUCTION. A third class, and it is deliberately NOT
+# CACHE-RESIDENT PRODUCTION. A third class, and it is deliberately NOT
 # "experimental" — this is the production text encoder every clip goes
 # through.
+#
+# IT WAS VOLUME-RESIDENT UNTIL 2026-09-01. The owner moved it to container
+# disk (option B) once the console's Releases tab showed that attaching any
+# network volume permanently pins the endpoint to one datacenter. See
+# CACHE_ROOT above for the whole finding; the short version is that storage
+# and placement breadth are mutually exclusive on RunPod, and placement
+# breadth is what keeps the product running.
 #
 # WHY IT LEFT THE IMAGE, owner directive 2026-08-31. Moving the checkpoint to
 # LTX-Video-0.9.7-distilled — needed so its vae matches the pinned spatial
@@ -148,7 +180,7 @@ EXPERIMENTAL = {
 # A clip that cannot find its text encoder must REFUSE and say so. It must
 # never quietly run with an untrained embedding, which is the failure a
 # silent fallback would produce.
-VOLUME_RESIDENT = {
+CACHE_RESIDENT = {
     "LTX_TEXT_ENCODER": {
         "family": "ltx",
         # Named for the CHECKPOINT, not just "text-encoder". The encoder and
@@ -176,18 +208,37 @@ VOLUME_RESIDENT = {
 
 
 def spec_for(model_id: str):
-    """The spec for a volume-resident model of EITHER class, or None.
+    """The spec for a fetched model of EITHER class, or None.
 
-    One lookup, because there are now two registries and five call sites that
+    One lookup, because there are two registries and five call sites that
     used to index EXPERIMENTAL directly. A second registry that only some of
     them knew about would resolve for hydration and not for loading, or the
     reverse.
     """
-    return EXPERIMENTAL.get(model_id) or VOLUME_RESIDENT.get(model_id)
+    return EXPERIMENTAL.get(model_id) or CACHE_RESIDENT.get(model_id)
 
 
 def known_ids() -> list:
-    return sorted({**EXPERIMENTAL, **VOLUME_RESIDENT})
+    return sorted({**EXPERIMENTAL, **CACHE_RESIDENT})
+
+
+def storage_class(model_id: str) -> str:
+    """'volume' or 'cache' — WHERE this model's weights are expected.
+
+    The two classes fail differently and must not be conflated. A volume
+    model with no volume is a configuration error the operator has to fix.
+    A cache model with nothing on disk is normal on a cold worker and is
+    fixed by fetching, which is why `ensure` exists.
+    """
+    if model_id in CACHE_RESIDENT:
+        return "cache"
+    if model_id in EXPERIMENTAL:
+        return "volume"
+    raise ModelUnavailable(
+        "MODEL_UNKNOWN",
+        f"{model_id!r} is not a known model; known ids are "
+        + ", ".join(known_ids()),
+    )
 
 
 class ModelUnavailable(Exception):
@@ -201,6 +252,22 @@ class ModelUnavailable(Exception):
 
 def oniq_root() -> str:
     return os.path.join(VOLUME_ROOT, ONIQ_TREE)
+
+
+def cache_root() -> str:
+    """The same deterministic tree, on the worker's own container disk.
+
+    Deliberately the SAME layout as the volume — <root>/models/oniq/<family>/
+    <dir> — so a model can move between the two by changing which registry
+    it is in and nothing else. The directory names are the contract; the
+    root is where that contract is satisfied today.
+    """
+    return os.path.join(CACHE_ROOT, ONIQ_TREE)
+
+
+def root_for(model_id: str) -> str:
+    """The tree this model's weights belong under."""
+    return cache_root() if storage_class(model_id) == "cache" else oniq_root()
 
 
 def volume_mounted() -> bool:
@@ -223,10 +290,10 @@ def model_dir(model_id: str) -> str:
     if spec is None:
         raise ModelUnavailable(
             "MODEL_UNKNOWN",
-            f"{model_id!r} is not a volume-resident model; known ids are "
+            f"{model_id!r} is not a fetched model; known ids are "
             + ", ".join(known_ids()),
         )
-    return os.path.join(oniq_root(), spec["family"], spec["directory"])
+    return os.path.join(root_for(model_id), spec["family"], spec["directory"])
 
 
 def read_marker(path: str):
@@ -271,10 +338,14 @@ def resolve(model_id: str) -> str:
     if spec is None:
         raise ModelUnavailable(
             "MODEL_UNKNOWN",
-            f"{model_id!r} is not a volume-resident model; known ids are "
+            f"{model_id!r} is not a fetched model; known ids are "
             + ", ".join(known_ids()),
         )
-    if not volume_mounted():
+    # ONLY VOLUME MODELS NEED A VOLUME. A cache-resident model lives on the
+    # worker's own container disk, which is always there; demanding a mount
+    # for it would refuse every clip on a correctly configured endpoint that
+    # deliberately has no volume attached.
+    if storage_class(model_id) == "volume" and not volume_mounted():
         raise ModelUnavailable(
             "MODEL_VOLUME_UNAVAILABLE",
             f"{VOLUME_ROOT} is not mounted. Attach the network volume to "
@@ -305,6 +376,52 @@ def resolve(model_id: str) -> str:
             + "; ".join(broken[:5]),
         )
     return path
+
+
+def ensure(model_id: str, hydrator) -> str:
+    """Resolve a CACHE-resident model, fetching it first if it is absent.
+
+    THE COLD WORKER IS THE NORMAL CASE, not an error. A worker that has
+    never held these weights has an empty cache, and refusing there would
+    refuse every first clip on every fresh worker — which under option B is
+    every worker RunPod has just placed in a new datacenter.
+
+    So: resolve, and on MODEL_NOT_HYDRATED alone, fetch and resolve again.
+    Every OTHER refusal propagates untouched. MODEL_CORRUPT in particular
+    must NOT trigger a re-fetch here: a checkpoint whose manifest does not
+    verify is a fault to report, and quietly re-downloading over it would
+    turn a diagnosable corruption into an intermittent one.
+
+    VOLUME models are refused outright. Their whole contract is that an
+    operator attaches storage and hydrates deliberately, before anything is
+    dispatched; fetching one mid-job would spend a booted worker on a
+    download the preflight exists to make unnecessary.
+
+    `hydrator` IS REQUIRED, not defaulted to an import. This module imports
+    nothing but json and os, and a test asserts that over the AST — because
+    where weights load from is on the owner's list of things a caller may
+    not steer, and the cheapest way to keep that true is to keep every
+    module that handles a job out of this one's import graph. The caller
+    supplies the fetcher; modelroot stays a registry and a path calculator.
+    """
+    if storage_class(model_id) != "cache":
+        raise ModelUnavailable(
+            "MODEL_NOT_CACHEABLE",
+            f"{model_id!r} is volume-resident; hydrate it deliberately with "
+            "model_hydrate before dispatching, rather than fetching it "
+            "inside a job that is already being paid for.",
+        )
+    try:
+        return resolve(model_id)
+    except ModelUnavailable as first:
+        if first.code != "MODEL_NOT_HYDRATED":
+            raise
+    hydrator(model_id)
+    # RESOLVED AGAIN, NOT TRUSTED. The fetch's own return value would say
+    # where it put the files; only resolve() says the marker is present, the
+    # revision is the pinned one, and every file is the length the manifest
+    # promises.
+    return resolve(model_id)
 
 
 def resolve_production(component: str) -> str:
