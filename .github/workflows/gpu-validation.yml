@@ -611,6 +611,21 @@ jobs:
                       /usr/local/share/boost /usr/local/lib/node_modules \
                       /usr/local/graalvm /usr/local/.ghcup \
                       /usr/local/share/powershell /usr/share/swift || true
+          # MEASURED 2026-09-01, run 33500610541: the list above freed
+          # 13.76 -> 37.82 GiB, +24 not the ~32 image-publish's comment
+          # claims, and the job refused 1.66 GiB short of the 39.48 two
+          # copies need. image-publish survives on that list because it
+          # streams layers out as it builds; this step holds the whole
+          # component twice at once, so it needs the rest.
+          #
+          # The preloaded Docker images are the largest remaining block and
+          # nothing here runs a container. hostedtoolcache is pruned per
+          # language, NEVER wholesale: setup-python put the interpreter this
+          # job is about to run inside it.
+          sudo docker image prune --all --force || true
+          sudo rm -rf /usr/share/miniconda /opt/hostedtoolcache/CodeQL \
+                      /opt/hostedtoolcache/Ruby /opt/hostedtoolcache/go \
+                      /opt/hostedtoolcache/node || true
           after=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
           awk -v b="$before" -v a="$after" 'BEGIN{
             printf "FREE: %.2f -> %.2f GiB (reclaimed %.2f)\n",
