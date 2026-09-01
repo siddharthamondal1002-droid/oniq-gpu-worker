@@ -210,3 +210,53 @@ def test_the_module_builds_no_client_and_holds_no_credential():
     for forbidden in ("boto3", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
                       "HF_TOKEN", "aws_access_key"):
         assert forbidden not in source, forbidden
+
+
+def test_a_failed_archive_download_is_a_named_refusal(tmp_path):
+    """The manifest read, so the checkpoint IS staged — the 17.74 GiB
+    transfer is what failed.
+
+    This call was the one external call in fetch() left bare. A StorageError
+    escaping here is not a WeightsUnavailable, so modelhydrate's translation
+    misses it and the worker reports `unexpected-exception: StorageError`
+    with no key and no cause — a GPU job spent to learn nothing, which is
+    the failure this whole path exists to end.
+    """
+    bucket = Bucket()
+    src = _source(tmp_path)
+    wr.stage(SPEC, src, str(tmp_path / "out.tar"), bucket.upload)
+    # The manifest survives; the archive does not. A half-present pair is
+    # what a failed or interrupted staging run actually leaves behind.
+    del bucket.objects[wr.object_key(SPEC)]
+
+    dest = tmp_path / "dest"
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(wr.WeightsUnavailable) as exc:
+        wr.fetch(SPEC, str(dest), str(work), bucket.download)
+    assert exc.value.code == "download-failed"
+    # The key is IN the message: a refusal that does not say which object
+    # failed sends the next reader to the wrong bucket.
+    assert wr.object_key(SPEC) in exc.value.detail
+    assert not (dest / "text_encoder").exists(), "nothing may be unpacked"
+
+
+def test_an_unreachable_bucket_does_not_claim_the_weights_were_never_staged(
+        tmp_path):
+    """Absent credentials and an absent object fail at the SAME call, and
+    this module cannot tell them apart without importing the storage layer
+    it deliberately does not depend on. So it must not assert one: a
+    confident 'has not been staged' sends the reader to re-run a staging
+    job that already worked."""
+
+    def unreachable(key, dest_path, max_bytes):
+        raise OSError("connection refused")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(wr.WeightsUnavailable) as exc:
+        wr.fetch(SPEC, str(tmp_path / "dest"), str(work), unreachable)
+    assert exc.value.code == "not-staged"
+    assert "EITHER" in exc.value.detail and "unreachable" in exc.value.detail
+    # The underlying cause survives into the message.
+    assert "connection refused" in exc.value.detail

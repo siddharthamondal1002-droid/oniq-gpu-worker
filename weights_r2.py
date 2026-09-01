@@ -192,11 +192,16 @@ def fetch(spec: dict, dest_dir: str, work_dir: str, downloader) -> dict:
     except Exception as exc:
         raise WeightsUnavailable(
             "not-staged",
-            f"no manifest at {manifest_key(spec)} ({type(exc).__name__}). "
-            "This checkpoint has not been staged to R2; there is "
-            "deliberately no fallback to HuggingFace, because an "
-            "unauthenticated fetch of a gated repository is the failure "
-            "this path exists to remove.",
+            f"could not read the manifest at {manifest_key(spec)} "
+            f"({type(exc).__name__}: {exc}). EITHER the checkpoint was "
+            "never staged, OR the bucket is unreachable with the "
+            "credentials this worker holds — this module cannot tell the "
+            "two apart without importing the storage layer it deliberately "
+            "does not depend on, so it names both rather than guessing. "
+            "Check the staging run published this key before assuming the "
+            "credentials are at fault. There is deliberately no fallback "
+            "to HuggingFace, because an unauthenticated fetch of a gated "
+            "repository is the failure this path exists to remove.",
         ) from exc
     with open(manifest_path, encoding="utf-8") as fh:
         record = json.load(fh)
@@ -211,7 +216,22 @@ def fetch(spec: dict, dest_dir: str, work_dir: str, downloader) -> dict:
         )
 
     tar_path = os.path.join(work_dir, "weights.tar")
-    downloader(object_key(spec), tar_path, MAX_WEIGHTS_BYTES)
+    # WRAPPED, like the manifest above. This was the one external call in
+    # this function left bare, and it is the 17.74 GiB one — the transfer
+    # most likely to fail. An escaping StorageError is not a
+    # WeightsUnavailable, so modelhydrate's translation would miss it and
+    # the worker would report `unexpected-exception: StorageError` with no
+    # key and no cause, inside a job already being paid for. Spending a GPU
+    # job to learn nothing is the exact failure this path exists to end.
+    try:
+        downloader(object_key(spec), tar_path, MAX_WEIGHTS_BYTES)
+    except Exception as exc:
+        raise WeightsUnavailable(
+            "download-failed",
+            f"the manifest read but the archive at {object_key(spec)} did "
+            f"not ({type(exc).__name__}: {exc}). The bound is "
+            f"{MAX_WEIGHTS_BYTES} bytes. Nothing was unpacked.",
+        ) from exc
 
     got = digest(tar_path)
     if got != record.get("tar_sha256"):
