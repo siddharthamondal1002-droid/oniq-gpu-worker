@@ -180,11 +180,16 @@ def test_a_removed_datacenter_is_refused_before_any_create():
     assert "US-MO-2" not in vs.KNOWN_DATACENTERS
 
 
-def test_there_is_no_datacenter_default_to_fall_back_on():
-    """A constant here would be a guess wearing the costume of a default: no
-    API says which datacenters sell volumes AND carry the approved cards, and
-    the failure mode is an endpoint with no GPU."""
-    assert vs.DEFAULT_DATACENTER is None
+def test_the_default_datacenter_is_a_recorded_choice_not_a_guess():
+    """This was None on purpose until the owner named one on 2026-09-01.
+
+    No API says which datacenters sell volumes AND carry the approved cards,
+    so an id picked HERE would have been a guess; one read off the console and
+    recorded is a decision. What the constant must never be is unvalidated —
+    a typo in it pins the endpoint to a datacenter that cannot place a worker,
+    which is the US-MO-2 failure with a different name."""
+    assert vs.DEFAULT_DATACENTER in vs.KNOWN_DATACENTERS
+
     client = FakeClient(volumes=[], endpoint=_endpoint())
     with pytest.raises(vs.Refused) as exc:
         vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, "")

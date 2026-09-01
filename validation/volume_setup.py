@@ -56,13 +56,21 @@ DEFAULT_SIZE_GB = 50
 # reports EXISTING: 0 volumes, and the endpoint's networkVolumeId is empty. One
 # stale 360 GB billing line dated 2026-08-30 is all that survives of it.
 #
-# There is deliberately NO replacement default. RunPod exposes no document
-# saying which datacenters sell volumes AND carry the approved cards —
-# introspection is disabled and neither side enumerates it — so a constant here
-# would be a guess wearing the costume of a default, and the failure mode is an
-# endpoint pinned to a datacenter with no GPU. The id is now REQUIRED from the
-# caller, who can read availability off the console.
-DEFAULT_DATACENTER = None
+# OWNER DECISION 2026-09-01: EU-RO-1.
+#
+# For a few hours this was None on purpose. RunPod exposes no document saying
+# which datacenters sell volumes AND carry the approved cards — introspection
+# is disabled and neither side enumerates it, which is why volume-probe's own
+# verdict is UNRESOLVED — so any id CHOSEN HERE would have been a guess wearing
+# the costume of a default. The owner read availability off the console and
+# named this one, which is the difference between a default and a guess.
+#
+# WHAT IS STILL NOT VERIFIED, stated because attaching pins the endpoint: that
+# EU-RO-1 sells network volumes, and that A40 or RTX A6000 is schedulable
+# there. No API answers either. If the card is not available the endpoint gets
+# no GPU rather than a slow one — the same failure US-MO-2 produced — and the
+# repair is `volume-detach`, which restores the endpoint and keeps the volume.
+DEFAULT_DATACENTER = "EU-RO-1"
 
 # The datacenter ids the endpoint PATCH schema accepts, read from the live
 # OpenAPI document on 2026-09-01. Checked BEFORE a volume is created, because
@@ -80,6 +88,10 @@ KNOWN_DATACENTERS = (
     "US-KS-3", "US-GA-1", "AP-IN-1", "US-MD-1",
 )
 DEFAULT_NAME = "oniq-models"
+
+# The default is validated like any caller-supplied id: a typo in the constant
+# above would pin the endpoint to a datacenter that cannot place a worker.
+assert DEFAULT_DATACENTER in KNOWN_DATACENTERS, DEFAULT_DATACENTER
 
 
 class Refused(Exception):
