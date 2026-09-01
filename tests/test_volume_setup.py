@@ -128,27 +128,79 @@ def test_the_datacenter_comes_from_the_volume_not_the_caller():
     assert client.attached == [(ENDPOINT, VOLUME, "US-KS-2")]
 
 
-def test_an_endpoint_that_did_not_take_the_pin_is_refused():
-    """Success on the volume alone is exactly the state that hung."""
+def test_an_endpoint_that_never_reports_the_pin_is_not_refused_for_it():
+    """THE 2026-09-01 CORRECTION, and the reason it is a correction.
+
+    This used to refuse `datacenter-not-pinned` whenever the endpoint
+    document came back without dataCenterIds. Measured that day on BOTH
+    REST routes with validation/endpoint_read.py: the endpoint document
+    has no dataCenterIds key AT ALL — not null, absent — while it does
+    carry networkVolumeId and networkVolumeIds. The field is accepted on
+    write and invisible on read, so that refusal could never pass however
+    the endpoint was really pinned. It blocked a correct attach and
+    reported a fault it had not found.
+
+    The shape below is the LIVE one, copied from that read.
+    """
     client = FakeClient(
         volumes=[_volume()],
         endpoint=_endpoint(),
-        after=_endpoint(networkVolumeId=VOLUME),  # no dataCenterIds
+        after=_endpoint(networkVolumeId=VOLUME, networkVolumeIds=[VOLUME]),
     )
+    result = vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
+    assert result["network_volume_id_after"] == VOLUME
+    assert result["network_volume_ids_after"] == [VOLUME]
+    # The datacenter still travels with the volume on the write; it simply
+    # cannot be read back, so it is not asserted against the response.
+    assert client.attached == [(ENDPOINT, VOLUME, DC)]
+
+
+def test_the_risk_the_old_guard_covered_is_still_refused_earlier():
+    """Moving a check must not delete it.
+
+    An endpoint pinned to a datacenter it cannot place a worker in gets no
+    worker at all. That is refused BEFORE anything is created, against the
+    enum the PATCH schema publishes — a check that can actually fail.
+    """
+    client = FakeClient(volumes=[], endpoint=_endpoint())
     with pytest.raises(vs.Refused) as exc:
-        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
-    assert exc.value.code == "datacenter-not-pinned"
+        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, "US-MO-2")
+    assert exc.value.code == "datacenter-unknown"
+    assert client.created_volumes == [], "refused before spending"
 
 
-def test_a_pin_to_the_wrong_datacenter_is_refused():
+def test_an_attach_the_two_volume_fields_disagree_about_is_refused():
+    """THE 2026-09-01 REVERT, in the shape it actually took.
+
+    A PATCH naming only networkVolumeId returned 2xx and read back
+    correct. Thirty minutes later both routes reported the OLD volume, and
+    networkVolumeIds — which that PATCH had never named — still held the
+    old id. The singular field had followed the plural back. Checking the
+    singular alone cannot tell an attachment that persisted from one that
+    is about to be undone.
+    """
     client = FakeClient(
         volumes=[_volume()],
         endpoint=_endpoint(),
-        after=_endpoint(networkVolumeId=VOLUME, dataCenterIds=["EU-RO-1"]),
+        after=_endpoint(networkVolumeId=VOLUME,
+                        networkVolumeIds=["vhxqqd8vhj"]),
     )
     with pytest.raises(vs.Refused) as exc:
         vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
-    assert exc.value.code == "datacenter-not-pinned"
+    assert exc.value.code == "attach-list-disagrees"
+
+
+def test_the_attach_names_both_volume_fields():
+    """The write itself, not just its echo: the list is the field that
+    survives on this account, so it has to be sent."""
+    import inspect
+
+    import runpod_client as rp
+
+    source = inspect.getsource(rp.attach_network_volume)
+    assert '"networkVolumeIds"' in source, (
+        "sending only the singular field is the write that reverted"
+    )
 
 
 def test_a_volume_document_with_no_datacenter_is_refused():

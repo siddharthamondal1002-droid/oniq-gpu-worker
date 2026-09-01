@@ -203,21 +203,53 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
             "against a volume the endpoint will not mount.",
         )
 
-    # THE DATACENTER IS HALF THE ATTACHMENT, so it is verified like the
-    # other half. MEASURED 2026-08-30: with networkVolumeId set and no
-    # dataCenterIds key at all, the endpoint reported one queued job and
-    # ZERO workers — not even initializing — for fifty minutes. It had
-    # shown initializing=2 before the attach. An attach that lands the
-    # volume and not the pin looks successful and schedules nothing.
-    pinned = after.get("dataCenterIds")
-    if not pinned or landed_dc not in pinned:
+    # BOTH FIELDS, BECAUSE THE SINGULAR ONE LIED FOR THIRTY MINUTES.
+    #
+    # MEASURED 2026-09-01. The check above passed on a PATCH that named
+    # only networkVolumeId: the read-after reported the new volume and
+    # this function returned. Half an hour later both GET routes reported
+    # the OLD volume, and networkVolumeIds — never named by that PATCH —
+    # still held the old id. The singular field had followed the plural
+    # back. Checking it alone cannot tell an attachment that persisted
+    # from one that was about to be undone, so the list is checked too.
+    listed = after.get("networkVolumeIds")
+    if listed is not None and list(listed) != [volume_id]:
         raise Refused(
-            "datacenter-not-pinned",
-            f"the volume is in {landed_dc} but the endpoint reports "
-            f"dataCenterIds={pinned!r}. An endpoint that holds a volume it "
-            "is not allowed to run beside gets no worker at all, and the "
-            "queue simply never drains.",
+            "attach-list-disagrees",
+            f"networkVolumeId reads {landed!r} but networkVolumeIds reads "
+            f"{listed!r}. On this account the list is the field that "
+            "survives, so an attach the two disagree about is one that "
+            "reverts silently after the run has reported success.",
         )
+
+    # THE DATACENTER PIN CANNOT BE READ BACK, so it is checked BEFORE the
+    # volume is created rather than pretended to be verified after.
+    #
+    # WHAT THIS USED TO DO, and why it was wrong: it refused unless
+    # `after["dataCenterIds"]` contained the volume's datacenter. That
+    # refusal fired on 2026-09-01 and blocked a correct attach. Measured
+    # the same day with validation/endpoint_read.py, on BOTH REST routes:
+    # the endpoint document has no dataCenterIds key AT ALL — not null,
+    # absent — while it does carry networkVolumeId and networkVolumeIds.
+    # The field is write-only here. A guard reading it could therefore
+    # never pass, whatever the endpoint was actually pinned to; it was a
+    # wall, not a gate, and a wall that reports a fault it has not found.
+    #
+    # THE GUARD IT REPLACES IS NOT DROPPED, IT IS MOVED EARLIER. The real
+    # risk is unchanged — an endpoint holding a volume it may not run
+    # beside gets no worker at all, which is exactly what US-MO-2 produced
+    # — and two checks above cover it, both of which CAN fail, which is
+    # the whole difference:
+    #
+    #   datacenter-unknown          the caller's id is not in the enum the
+    #                               endpoint PATCH schema accepts. Refused
+    #                               before anything is created.
+    #   volume-datacenter-mismatch  a volume found by NAME sits somewhere
+    #                               other than the id that was checked.
+    #
+    # Together they mean landed_dc is always an id a worker can be placed
+    # in by the time the attach happens. A third check here would be
+    # unreachable by construction — another wall — so there isn't one.
 
     moved = {
         key: {"before": before.get(key), "after": after.get(key)}
@@ -240,6 +272,8 @@ def apply(client, endpoint_id: str, name: str, size_gb: int,
         "endpoint": endpoint_id,
         "network_volume_id_before": before.get("networkVolumeId") or "",
         "network_volume_id_after": landed,
+        "network_volume_ids_before": before.get("networkVolumeIds"),
+        "network_volume_ids_after": listed,
         "data_center_ids_before": before.get("dataCenterIds"),
         "data_center_ids_after": after.get("dataCenterIds"),
         "usd_per_gb_month_measured": USD_PER_GB_MONTH,

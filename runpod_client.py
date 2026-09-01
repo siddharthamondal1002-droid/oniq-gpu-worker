@@ -748,11 +748,34 @@ def attach_network_volume(endpoint_id: str, volume_id: str,
     """
     _, before = get_endpoint(endpoint_id)
     body: dict = {"networkVolumeId": volume_id}
+    # THE PLURAL IS SENT TOO, AND IT IS THE ONE THAT STICKS.
+    #
+    # MEASURED 2026-09-01. A PATCH carrying the SINGULAR field alone
+    # returned 2xx and the read-after immediately following it reported
+    # networkVolumeId == the new volume. Thirty minutes later both GET
+    # routes reported the OLD volume, and networkVolumeIds — which the
+    # PATCH had never named — still held the old id alone. The singular
+    # field followed the plural back. A write that reads back correct and
+    # is gone half an hour later is worse than one that fails, because
+    # the run that made it reports success.
+    #
+    # So both fields are named, and the caller checks both. Detach sends
+    # an empty id, which empties the list as well and so removes the
+    # attachment from whichever field the account actually keeps.
+    body["networkVolumeIds"] = [volume_id] if volume_id else []
     if volume_id and datacenter_id:
         # The caller reads this off the VOLUME document, never off a
         # dispatch input: the only correct value is where the volume
         # actually is, and a typed one could pin the endpoint somewhere
         # its storage is not.
+        #
+        # IT CANNOT BE READ BACK. Measured 2026-09-01 with
+        # validation/endpoint_read.py: neither GET /endpoints/{id} nor GET
+        # /endpoints returns a dataCenterIds key at all — not null, absent
+        # — while both return networkVolumeId and networkVolumeIds. It is
+        # accepted on write and invisible on read, so no caller can verify
+        # it landed; the check that remains is the enum in the PATCH
+        # schema, applied BEFORE the volume is created.
         body["dataCenterIds"] = [datacenter_id]
     status, raw = _request(
         f"{REST_BASE}/endpoints/{endpoint_id}",
