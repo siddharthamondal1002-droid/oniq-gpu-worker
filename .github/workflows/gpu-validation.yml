@@ -16,8 +16,24 @@
 # 5. CI cannot create an endpoint, only verify one: min_workers=0 /
 #    max_workers=1 is checked against the live endpoint before any job is
 #    sent, and refused otherwise.
-# 6. R2 credentials are NOT GitHub secrets. They live in the RunPod
-#    endpoint's environment; CI submits jobs and never touches the bucket.
+# 6. R2 credentials reach exactly ONE job, and only from the gpu-spend
+#    ENVIRONMENT — so touching the bucket still costs a reviewer's click.
+#
+#    AMENDED 2026-09-01 by owner directive. The rule was "R2 credentials
+#    are NOT GitHub secrets; they live in the RunPod endpoint's
+#    environment; CI submits jobs and never touches the bucket." That was
+#    right until the text encoder moved off the network volume — a volume
+#    permanently pins an endpoint to one datacenter — and exposed a split
+#    the project had built on purpose: CI holds the HuggingFace token and
+#    no R2; a worker holds R2 and no HuggingFace token; the checkpoint is
+#    GATED and a standing directive forbids substituting an ungated one.
+#    Nothing had both halves, so nothing could put those weights in the
+#    bucket.
+#
+#    What is kept is the part that mattered: no job that runs without a
+#    human reaches the bucket, and worker-ci — the one workflow that fires
+#    on push — still holds no credential of any kind. The gate test now
+#    asserts that shape rather than the absence of the strings.
 #
 # The spend job requires the gpu-spend environment (owner-configured
 # required reviewers — that click is the "gpu-spend approval"). Owner
@@ -37,7 +53,7 @@ on:
       mode:
         description: "discover = read-only, $0. spend = the gated live path. standby-zero = patch workersStandby to 0 (spend reduction, $0). standby-probe = READ the standby facts and the API schema without attempting any write, $0 — use this once the patch is known to be refused. queue-probe = READ queue counts and one job's status across every endpoint, $0. stale-cancel = cancel ONE named run on ONE named endpoint, $0 (literal token required) - never a queue purge. image-size = build the base stage, measure it, and survey what the media bake would download, $0 - answers whether a hosted runner can build the media image at all. endpoint-timeout = raise executionTimeoutMs on ONE named endpoint, $0 (literal token required) - the ceiling a 32 GiB in-job download cannot fit inside; sends that field alone and refuses if anything else moved. volume-setup = create ONE network volume and attach it to ONE endpoint (literal token required). Storage spend, measured at $0.07/GB-month from this account's own billing; reversible by detaching. hunyuan-preflight = the FREE gate, $0 and zero GPU jobs: reads the pinned checkpoint's configs, derives the legal frame counts from its VAE, and checks every endpoint precondition before anything is dispatched. endpoint-bounds = conform ONE endpoint to workersMin=0/workersMax=1, $0 - exactly the shape validation/admission requires, written as two literals in ONE patch so the worker restarts once rather than twice; a strict spend reduction. workers-min-zero = patch workersMin to 0 on ONE endpoint, $0 - a strict spend reduction, so the GPU is paid for only while a job is on it; the writer takes no value and cannot scale anything up. volume-detach = detach the network volume from ONE endpoint, $0 (type DETACH-VOLUME into volume_token) - the reversible diagnostic for an endpoint that reports a queued job and ZERO workers; detach is NOT delete, the volume and everything hydrated onto it survive. endpoint-template = point ONE endpoint at a template that ALREADY EXISTS, $0 (type POINT-AT-TEMPLATE into attach_token) - the repair for an endpoint whose templateId names a template the account does not have; refuses a target that is not on the account, so one dangling reference cannot become another. volume-probe = READ what RunPod offers for network volumes and whether the A5000 is available in a datacenter that sells them, $0 - the feasibility check before any volume is created. model-bench = measure every candidate in the owner's expanded benchmark against the HuggingFace registry and project its VRAM, $0 and no GPU - weights are measured, working sets are projected, runtime/cost/quality stay PENDING-PROBE. endpoint-gpus = widen ONE endpoint's gpuTypeIds to the cards the owner approved, $0 (type WIDEN-GPUS into attach_token) - the repair for an endpoint whose single named card is throttled and therefore unplaceable; every name is resolved against the LIVE catalogue first and an unresolvable one refuses the whole write, so a string the scheduler can never satisfy cannot reach the field. Widens WHERE a worker may be placed, never HOW MANY. pairing-discover = READ which LTX checkpoint's vae matches the PINNED spatial upsampler's, and whether its transformer fits the A5000, $0 - the measurement behind repointing the LTX bake; it chooses and repoints nothing. volume-delete = DELETE ONE network volume, $0 and IRREVERSIBLE (type DELETE-VOLUME:<volume_id> into volume_token - the literal alone authorizes nothing, the id must be in it). Owner directive 2026-09-01, remove any unnecessary billing: under option B the account's volumes mount nowhere and bill for storage nothing reads. Refuses a volume any endpoint still references, an id not on the account, and an unreadable account - UNKNOWN is never treated as empty. ONE volume per run; there is deliberately no batch shape. endpoint-locations = widen ONE endpoint back to EVERY datacenter the PATCH schema accepts, $0 (type WIDEN-LOCATIONS into attach_token) - the repair for the ONE-WAY pin a network volume leaves behind. Read off the console Releases tab 2026-09-01: attaching a volume narrows `locations` from ALL to the volume's single datacenter, and DETACHING DOES NOT WIDEN IT BACK, so the endpoint is stuck in one datacenter for life and dies the day that datacenter's approved tier runs dry - which is what daily endpoint recreation was actually working around. Refuses while a volume is still attached, because a worker cannot mount storage in a datacenter it was not placed in. advisory = the standalone free preflight, $0 — reads the LIVE endpoint config; expected to end environment-unprotected on this plan (no required reviewers), with the endpoint facts printed before the stop."
         type: choice
-        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, upscaler-discover, pairing-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup, endpoint-template, workers-min-zero, volume-detach, endpoint-bounds, endpoint-gpus, endpoint-locations, volume-delete]
+        options: [discover, spend, standby-zero, standby-probe, advisory, queue-probe, stale-cancel, template-probe, image-size, template-attach, template-retarget, template-env, ltx-discover, upscaler-discover, pairing-discover, frames-pull, model-bench, volume-probe, endpoint-timeout, hunyuan-preflight, volume-setup, endpoint-template, workers-min-zero, volume-detach, endpoint-bounds, endpoint-gpus, endpoint-locations, volume-delete, weights-stage]
         default: discover
       public_base:
         description: "R2 public READ base, e.g. https://pub-<id>.r2.dev. PUBLIC configuration, never a secret and never a presigned URL (one with a query string is refused). Overrides the R2_PUBLIC_BASE_URL repository variable for this run."
@@ -94,7 +110,7 @@ on:
         type: string
         default: ""
       attach_token:
-        description: "Type ATTACH-TEMPLATE (exactly) for template-attach, which CREATES one template and repoints one endpoint. Type POINT-AT-TEMPLATE (exactly) for endpoint-template, which creates nothing and points the endpoint at the existing template named in template_id. Type WIDEN-GPUS (exactly) for endpoint-gpus, which changes no worker count and only widens the set of cards one worker may be placed on. Type WIDEN-LOCATIONS (exactly) for endpoint-locations, which changes no worker count and only widens the set of DATACENTERS one worker may be placed in. One input carries all three literals because workflow_dispatch is capped at 25 inputs and this file is at the cap; mode selects the job, the literal authorizes it."
+        description: "Type ATTACH-TEMPLATE (exactly) for template-attach, which CREATES one template and repoints one endpoint. Type POINT-AT-TEMPLATE (exactly) for endpoint-template, which creates nothing and points the endpoint at the existing template named in template_id. Type WIDEN-GPUS (exactly) for endpoint-gpus, which changes no worker count and only widens the set of cards one worker may be placed on. Type STAGE-WEIGHTS (exactly) for weights-stage, which publishes ONE checkpoint into R2 and dispatches no job. Type WIDEN-LOCATIONS (exactly) for endpoint-locations, which changes no worker count and only widens the set of DATACENTERS one worker may be placed in. One input carries all three literals because workflow_dispatch is capped at 25 inputs and this file is at the cap; mode selects the job, the literal authorizes it."
         type: string
         default: ""
       replaces_template:
@@ -129,7 +145,7 @@ on:
       probe_model:
         description: "model_probe: which benchmark ROW to measure. model_hydrate: which experimental MODEL ID to fetch onto the volume (the upper-case ids). ONE candidate per dispatch. ONE candidate per dispatch — there is deliberately no battery shape, so a single wrong assumption cannot spend five times over before anyone reads a result."
         type: choice
-        options: ["", ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v, hunyuanvideo-1.5-i2v, hunyuanvideo-1.5-i2v-12step, HUNYUAN_15_I2V_480_STEP]
+        options: ["", LTX_TEXT_ENCODER, ltx-13b, wan21-i2v-480p, wan22-i2v-a14b, cogvideox-i2v, hunyuanvideo-1.5-i2v, hunyuanvideo-1.5-i2v-12step, HUNYUAN_15_I2V_480_STEP]
         default: ""
       test_input_key:
         description: "R2 key of the test input image in the oniq-gpu bucket. The previous default, validation/input.jpg, was DELETED from the bucket at some point and nothing noticed until a paid canary refused on it (2026-08-29, 1232ms of billed execution). The worker lists what the bucket actually holds when an input is missing, so that failure is cheap and self-diagnosing - but a default that does not exist is still a trap, and this one is a still that demonstrably exists at the video canvas."
@@ -555,6 +571,55 @@ jobs:
           python -m validation.endpoint_template \
             "${{ inputs.endpoint_id }}" \
             "${{ inputs.template_id }}" \
+            "${{ inputs.attach_token }}"
+
+  weights_stage:
+    # Publishes ONE cache-resident checkpoint's weights into R2 so a worker
+    # can read them with credentials it already has. $0: no GPU, no worker,
+    # no job dispatched — a download and an upload on a hosted runner.
+    #
+    # THE ONLY JOB IN THIS REPOSITORY THAT HOLDS R2 CREDENTIALS, and it
+    # holds them from the gpu-spend ENVIRONMENT rather than as repository
+    # secrets, so reaching the bucket still costs a reviewer's approval.
+    # Owner directive 2026-09-01 amending the previous rule; see
+    # validation/weights_stage.py for the credential split that forced it.
+    name: "weights stage - ONE checkpoint into R2, $0"
+    if: inputs.mode == 'weights-stage' && inputs.attach_token == 'STAGE-WEIGHTS'
+    runs-on: ubuntu-latest
+    environment: gpu-spend
+    permissions:
+      contents: read
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      R2_S3_ENDPOINT: ${{ secrets.R2_S3_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: "Reclaim the runner's toolchains — both copies have to fit"
+        run: |
+          # 17.74 GiB downloaded plus the same again tarred is ~35.5 GiB,
+          # against 13.76 GiB free on a stock runner (measured 2026-08-28).
+          # The same reclaim image-publish depends on frees ~32 GiB. The
+          # module refuses on the number rather than dying at 90%, so this
+          # step failing is visible before anything is fetched.
+          before=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules \
+                      /usr/local/graalvm /usr/local/.ghcup \
+                      /usr/local/share/powershell /usr/share/swift || true
+          after=$(df -B1 --output=avail / | tail -1 | tr -d ' ')
+          awk -v b="$before" -v a="$after" 'BEGIN{
+            printf "FREE: %.2f -> %.2f GiB (reclaimed %.2f)\n",
+                   b/1073741824, a/1073741824, (a-b)/1073741824 }'
+      - run: pip install --quiet -r requirements-dev.txt boto3 huggingface_hub
+      - name: "Fetch from HuggingFace, publish to R2, print the manifest"
+        run: |
+          python -m validation.weights_stage \
+            "${{ inputs.probe_model }}" \
             "${{ inputs.attach_token }}"
 
   volume_delete:

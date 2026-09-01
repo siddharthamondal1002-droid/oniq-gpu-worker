@@ -90,12 +90,47 @@ def test_spend_job_runs_the_tested_driver():
     assert any("validation.spend_run run" in r for r in runs)
 
 
-def test_gate6_r2_credentials_are_not_github_secrets():
-    for name in ("gpu-validation.yml", "worker-ci.yml"):
-        _, raw = _load(name)
-        assert "R2_ACCESS_KEY_ID" not in raw
-        assert "R2_SECRET_ACCESS_KEY" not in raw
-        assert "R2_S3_ENDPOINT" not in raw
+R2_SECRET_NAMES = ("R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+
+
+def test_gate6_r2_credentials_reach_only_a_reviewer_gated_job():
+    """AMENDED 2026-09-01 by owner directive.
+
+    The rule was "R2 credentials are NOT GitHub secrets". It held until the
+    text encoder moved off the network volume — a volume permanently pins
+    an endpoint to one datacenter — and exposed a split this project had
+    built deliberately: CI holds the HuggingFace token and no R2, a worker
+    holds R2 and no HuggingFace token, the checkpoint is GATED, and a
+    standing directive forbids substituting an ungated one. Nothing had
+    both halves, so nothing could stage those weights into the bucket.
+
+    The part worth keeping is not the absence of the strings; it is that
+    NOTHING WHICH RUNS WITHOUT A HUMAN CAN REACH THE BUCKET. So the
+    assertion moved to that shape: any job naming an R2 secret must sit
+    behind the gpu-spend environment, whose required reviewer is the
+    approval click.
+    """
+    doc, _ = _load("gpu-validation.yml")
+    holders = [
+        name for name, job in doc["jobs"].items()
+        if any(secret in yaml.safe_dump(job) for secret in R2_SECRET_NAMES)
+    ]
+    assert holders, "no job references the R2 secrets; the survey is broken"
+    for name in holders:
+        assert doc["jobs"][name].get("environment") == "gpu-spend", (
+            f"job {name} names an R2 secret without requiring the gpu-spend "
+            "environment, so it could reach the bucket with no approval"
+        )
+
+
+def test_gate6_the_push_triggered_workflow_still_holds_no_credential():
+    """worker-ci fires on every commit. It must hold nothing — not the
+    RunPod key, not the R2 credentials, not any secret at all. This is the
+    half of gate 6 that did NOT change on 2026-09-01."""
+    _, raw = _load("worker-ci.yml")
+    for secret in R2_SECRET_NAMES + ("RUNPOD_API_KEY", "HF_TOKEN"):
+        assert secret not in raw, secret
+    assert "secrets." not in raw
 
 
 def test_spend_job_requires_the_gpu_spend_environment():
@@ -658,6 +693,14 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # from elsewhere is how the wrong volume goes. One per run; there is
         # deliberately no batch shape.
         "volume-delete",
+        # weights-stage joined 2026-09-01. It publishes ONE cache-resident
+        # checkpoint into R2 so a worker can read weights it has no
+        # HuggingFace token to fetch — the checkpoint is gated, and a
+        # standing directive forbids substituting an ungated one. $0: a
+        # download and an upload, no GPU and no job dispatched. It is the
+        # ONLY job here that holds R2 credentials, and it holds them from
+        # the gpu-spend environment, so the bucket still costs an approval.
+        "weights-stage",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -924,14 +967,13 @@ def test_gate7_the_read_base_is_a_variable_and_never_a_secret():
     assert "secrets.R2_PUBLIC_BASE_URL" not in raw, (
         "a public read base carried as a secret invites a presigned URL"
     )
-    # And no R2 WRITE credential ever reaches CI (gate 6, restated here
-    # because this is the change that made CI touch the bucket at all).
-    for forbidden in (
-        "secrets.R2_ACCESS_KEY_ID",
-        "secrets.R2_SECRET_ACCESS_KEY",
-        "secrets.R2_S3_ENDPOINT",
-    ):
-        assert forbidden not in raw
+    # The R2 WRITE credentials used to be absent from CI entirely. Since
+    # the 2026-09-01 amendment exactly one job holds them, from the
+    # gpu-spend environment — asserted by
+    # test_gate6_r2_credentials_reach_only_a_reviewer_gated_job rather than
+    # restated here, so there is one place to change if it ever moves
+    # again. What this test still owns is the READ base: a public value
+    # carried as a secret is how a presigned URL gets invited in.
 
 
 def test_gate7_the_frame_puller_never_submits_a_job():
@@ -1053,14 +1095,21 @@ def test_gate9_the_probe_model_input_is_a_closed_choice():
     assert probe["type"] == "choice"
     assert probe["default"] == ""
     # The set is closed over two server-side tables and nothing else: the
-    # benchmark ROWS a model_probe may measure, and the experimental MODEL
-    # IDS a model_hydrate may fetch. Both are constants in this repository,
-    # so a dispatch still cannot name a repository, a revision, a precision
-    # or an offload strategy — it can only pick from what was reviewed.
+    # benchmark ROWS a model_probe may measure, and the MODEL IDS a
+    # model_hydrate or a weights-stage may fetch. Both are constants in
+    # this repository, so a dispatch still cannot name a repository, a
+    # revision, a precision or an offload strategy — it can only pick from
+    # what was reviewed.
+    #
+    # known_ids() rather than EXPERIMENTAL alone since 2026-09-01: it is
+    # EXPERIMENTAL together with CACHE_RESIDENT, and weights-stage offers
+    # the cache-resident ids. Naming one registry here would have let the
+    # other drift out of the closure unnoticed — which is the whole failure
+    # `spec_for` was introduced to end.
     import modelroot
 
     assert set(probe["options"]) == (
-        {""} | set(modelprobe.PROBE_MODELS) | set(modelroot.EXPERIMENTAL)
+        {""} | set(modelprobe.PROBE_MODELS) | set(modelroot.known_ids())
     )
     assert "PROBE_MODEL: ${{ inputs.probe_model }}" in raw
     # Hunyuan is not offerable: its architecture did not resolve without
