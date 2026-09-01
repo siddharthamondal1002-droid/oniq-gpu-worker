@@ -1171,9 +1171,15 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
         # all — only HF_TOKEN — and reads a public registry, so it is a $0
         # mode that cannot become a paid one.
         "model-bench",
+        # endpoint-read joined 2026-09-01, after the list route and the
+        # detail route described the SAME endpoint differently and a
+        # production write was about to be founded on whichever one had
+        # been read last. Two GETs and a diff; no write path exists in it.
+        "endpoint-read",
     ]
     for allowed in ("validation.queue_probe", "validation.template_probe",
-                    "validation.volume_probe", "validation.model_bench"):
+                    "validation.volume_probe", "validation.model_bench",
+                    "validation.endpoint_read"):
         assert allowed in raw
 
     # The spend driver and every endpoint mutation are unreachable from here.
@@ -1186,10 +1192,11 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
     # And the modules it DOES name hold no mutating verb themselves.
     import inspect
 
-    from validation import (model_bench, queue_probe, template_probe,
-                            volume_probe)
+    from validation import (endpoint_read, model_bench, queue_probe,
+                            template_probe, volume_probe)
 
-    for module in (model_bench, queue_probe, template_probe, volume_probe):
+    for module in (model_bench, queue_probe, template_probe, volume_probe,
+                   endpoint_read):
         source = inspect.getsource(module)
         for verb in ("attach_template", "attach_network_volume",
                      "create_network_volume", "set_execution_timeout",
