@@ -76,9 +76,28 @@ def free_gib(path: str) -> float:
     return shutil.disk_usage(path).free / (1024 ** 3)
 
 
+def headroom_gib(download_gib: float) -> float:
+    """Slack on top of the two copies — PROPORTIONAL, with a floor and a cap.
+
+    It was a flat 4 GiB, which is right for the 17.74 GiB encoder and absurd
+    for anything small: a 1 MB component demanded the same 4 GiB of slack as
+    a 17.74 GiB one. The in-image test rig caught it, because that container
+    has 3.50 GiB free in /tmp and this dev machine has more — the local suite
+    passed on a difference in environment rather than on the code being
+    right.
+
+    A quarter of the payload, floored at 0.1 GiB so a tiny component still
+    has room for filesystem overhead and tar block padding, and capped at 4
+    so a future 100 GiB component does not demand 25 GiB of slack. At 17.74
+    GiB the quarter is 4.435, so the cap applies and the production number
+    is exactly what it was: 2 x 17.74 + 4 = 39.48 GiB.
+    """
+    return min(NEED_HEADROOM_GIB, max(0.1, download_gib * 0.25))
+
+
 def check_room(spec: dict, path: str) -> float:
     """Both copies have to fit: the download AND the tar made from it."""
-    need = spec["download_gib"] * 2 + NEED_HEADROOM_GIB
+    need = spec["download_gib"] * 2 + headroom_gib(spec["download_gib"])
     free = free_gib(path)
     if free < need:
         raise Refused(

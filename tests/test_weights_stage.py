@@ -160,9 +160,25 @@ def test_it_refuses_before_downloading_when_the_disk_cannot_hold_both(
 
 
 def test_the_room_check_counts_both_copies():
-    spec = {"download_gib": 10.0}
-    need = spec["download_gib"] * 2 + ws.NEED_HEADROOM_GIB
-    assert need == 24.0, "the tar is a second full copy, not free"
+    """The tar is a second full copy, not free."""
+    # At the real component's size the headroom caps at 4, so the number
+    # the staging job actually enforces is unchanged: 2 x 17.74 + 4.
+    assert 17.74 * 2 + ws.headroom_gib(17.74) == pytest.approx(39.48)
+
+
+def test_the_headroom_is_proportional_not_flat():
+    """It WAS a flat 4 GiB, which is right for a 17.74 GiB component and
+    absurd for a small one: a 1 MB component demanded the same 4 GiB of
+    slack. The in-image rig caught it — that container has 3.50 GiB free in
+    /tmp while this machine has more, so the suite had been passing on a
+    difference in environment rather than on the code being right."""
+    # Capped, so the real component's requirement does not move.
+    assert ws.headroom_gib(17.74) == 4.0
+    assert ws.headroom_gib(100.0) == 4.0, "a 100 GiB component needs 25 slack?"
+    # Floored, so a tiny one still has room for filesystem and tar padding.
+    assert ws.headroom_gib(0.001) == 0.1
+    # And proportional in between.
+    assert ws.headroom_gib(8.0) == 2.0
 
 
 def test_the_source_tree_is_dropped_after_staging(tmp_path):
