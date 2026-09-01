@@ -227,3 +227,48 @@ def test_the_mutating_path_is_still_the_only_writer():
         )
     ]
     assert writers == ["run"], writers
+
+
+def test_the_read_reports_what_the_next_deployment_step_depends_on():
+    """Until 2026-09-01 nothing in this repo could answer "what is this
+    endpoint configured as" without going through a mode that PATCHES it, and
+    three fields decide whether the next step can work at all:
+
+      templateId          ONIQ's endpoint pointed at one that 404s while the
+                          real oniq-gpu-worker template sat on the account
+                          under another id.
+      networkVolumeId     where a volume-resident model hydrates TO. The text
+                          encoder left the image, so no volume means every
+                          clip refuses.
+      executionTimeoutMs  the ceiling a cold pull plus a 17.74 GiB hydrate
+                          has to fit inside.
+    """
+    endpoint = {
+        "id": "ep1", "workersStandby": 0, "workersMin": 0, "workersMax": 1,
+        "templateId": "tpl1", "networkVolumeId": "vol1",
+        "executionTimeoutMs": 900000, "gpuTypeIds": ["NVIDIA RTX A6000"],
+    }
+
+    class Client:
+        def get_endpoints(self):
+            return json.dumps({"endpoints": [endpoint]}), {"endpoints": [endpoint]}
+
+    facts = standby_zero.read_only(Client())
+    assert facts["template_id"] == "tpl1"
+    assert facts["network_volume_id"] == "vol1"
+    assert facts["execution_timeout_ms"] == 900000
+
+
+def test_an_unattached_volume_reads_as_None_not_as_absent_key():
+    """None is the answer that matters — it is the one that makes a hydrate
+    impossible, so it must survive into the facts rather than vanishing."""
+    endpoint = {"id": "ep1", "workersStandby": 0, "workersMin": 0,
+                "workersMax": 1, "templateId": "tpl1"}
+
+    class Client:
+        def get_endpoints(self):
+            return json.dumps({"endpoints": [endpoint]}), {"endpoints": [endpoint]}
+
+    facts = standby_zero.read_only(Client())
+    assert "network_volume_id" in facts
+    assert facts["network_volume_id"] is None

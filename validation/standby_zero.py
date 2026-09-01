@@ -63,9 +63,33 @@ def read_only(client) -> dict:
     standby = endpoint.get("workersStandby")
     print("workersStandby READABLE :", repr(standby))
     print("workersMin / workersMax :", endpoint.get("workersMin"), "/", endpoint.get("workersMax"))
+    # THE REST OF THE ENDPOINT'S SHAPE, because until 2026-09-01 nothing here
+    # could answer "what is this endpoint configured as" without going through
+    # a mode that PATCHES it. Three fields decide whether the next deployment
+    # step can work at all, and each was needed and unavailable:
+    #
+    #   templateId          the endpoint's template. ONIQ's pointed at one
+    #                       that 404s while the real oniq-gpu-worker template
+    #                       sat on the account under another id.
+    #   networkVolumeId     where a volume-resident model is hydrated TO. The
+    #                       text encoder left the image on 2026-08-31, so no
+    #                       volume now means every clip refuses.
+    #   executionTimeoutMs  the ceiling a first-run cold pull plus a 17.74 GiB
+    #                       hydrate has to fit inside.
+    #
+    # NAMES AND IDS ONLY, never env: this is a config read, and the listing
+    # discipline elsewhere in this repo is that a read has no reason to pull
+    # secret values across the wire.
+    print("templateId              :", repr(endpoint.get("templateId")))
+    print("networkVolumeId         :", repr(endpoint.get("networkVolumeId")))
+    print("executionTimeoutMs      :", repr(endpoint.get("executionTimeoutMs")))
+    print("gpuTypeIds              :", repr(endpoint.get("gpuTypeIds")))
     probe_only(client)
     return {
         "endpoint_id": endpoint.get("id"),
+        "template_id": endpoint.get("templateId"),
+        "network_volume_id": endpoint.get("networkVolumeId"),
+        "execution_timeout_ms": endpoint.get("executionTimeoutMs"),
         "workers_standby": standby,
         "workers_min": endpoint.get("workersMin"),
         "workers_max": endpoint.get("workersMax"),
