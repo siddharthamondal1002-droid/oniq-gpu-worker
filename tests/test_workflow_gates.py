@@ -1238,3 +1238,125 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
                      "set_template_env", "set_workers_min_zero",
                      "set_workers_standby_zero", "purge_queue", "run_sync"):
             assert verb not in source, f"{module.__name__}: {verb}"
+
+
+# --------------------------------------------------------------- merge gate
+
+
+def _every_workflow():
+    """(filename, parsed doc, raw text) for every workflow in the repo."""
+    directory = os.path.join(ROOT, ".github", "workflows")
+    out = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        doc, raw = _load(name)
+        out.append((name, doc, raw))
+    return out
+
+
+# `_triggers` is defined once at the top of this file and reused here. An
+# earlier draft redefined it down here, which shadowed the original for the
+# whole module — harmless while the two agreed, and a landmine the moment
+# somebody edited one of them.
+
+# Triggers that fire without a human choosing to. `workflow_call` is here
+# because a reusable workflow can be invoked BY a push-triggered one, which
+# launders the trigger: the callee looks manual and runs automatically.
+AUTOMATIC = ("push", "pull_request", "pull_request_target", "schedule",
+             "repository_dispatch", "workflow_run", "workflow_call", "issues",
+             "issue_comment", "release", "create", "watch")
+
+
+def spend_gate_violations(workflows):
+    """Every way a workflow could rent a GPU without a human dispatching it.
+
+    A PURE FUNCTION over (name, doc, raw) triples, so the rule can be tested
+    against a synthetic offender rather than only against a repository that
+    happens to be clean. A gate that has never been shown to FAIL is a gate
+    nobody knows the shape of.
+    """
+    bad = []
+    for name, doc, raw in workflows:
+        holds_key = "secrets.RUNPOD_API_KEY" in raw
+        fired_by = set(_triggers(doc) or {})
+        automatic = sorted(fired_by.intersection(AUTOMATIC))
+        if holds_key and automatic:
+            bad.append((name, f"holds the RunPod key and fires on {automatic}"))
+        elif holds_key and fired_by != {"workflow_dispatch"}:
+            bad.append((name, f"holds the RunPod key and declares {sorted(fired_by)}"))
+        elif holds_key and not fired_by:
+            bad.append((name, "holds the RunPod key and declares no trigger"))
+    return bad
+
+
+def test_the_spend_gate_actually_bites():
+    """The rule, shown failing. Each case below is a real way this could go
+    wrong during the merge into oniq-sparkle-pay, where workflows that fire
+    on push already exist beside the ones that can spend."""
+    dispatch = {"workflow_dispatch": {}}
+    key = "env:\n  RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}\n"
+
+    # A push trigger added to a key-bearing workflow — the Lovable-sync case.
+    assert spend_gate_violations([("x.yml", {"on": {"push": {}}}, key)])
+    # A key added to a workflow that already fires on push.
+    assert spend_gate_violations(
+        [("ci.yml", {"on": {"push": {}, "workflow_dispatch": {}}}, key)]
+    )
+    # A reusable workflow: looks manual, can be CALLED by a push-triggered one.
+    assert spend_gate_violations([("r.yml", {"on": {"workflow_call": {}}}, key)])
+    # A schedule — nobody chose to spend at 3am.
+    assert spend_gate_violations([("s.yml", {"on": {"schedule": []}}, key)])
+
+    # And the shapes that must stay legal, or the gate is unusable:
+    assert not spend_gate_violations([("ok.yml", {"on": dispatch}, key)])
+    # A push-triggered workflow with no key is exactly worker-ci.yml.
+    assert not spend_gate_violations([("ci.yml", {"on": {"push": {}}}, "no key")])
+
+
+def test_nothing_that_holds_the_runpod_key_can_fire_without_a_human():
+    """THE MERGE-SAFE FORM OF THE SPEND GATE.
+
+    The gate this replaces read: "gpu-validation.yml must remain the ONLY
+    workflow in the repo that references secrets.RUNPOD_API_KEY". That was
+    written when one workflow held the key, and it breaks on contact with
+    a merge — importing this repository into oniq-sparkle-pay would put
+    three key-bearing workflows in one place and the gate would have to be
+    deleted to make room, which is how a control gets lost during a
+    refactor rather than by decision.
+
+    "Only one" was never the property worth protecting. The property is
+    that NOTHING CAN RENT A GPU WITHOUT A HUMAN DISPATCHING IT — that a
+    push, a schedule, or a Lovable sync commit can never reach the key. So
+    that is what is asserted, over however many workflows exist. It is
+    strictly stronger than the old rule: it survives a fourth workflow
+    being added, and it would have caught a push trigger being added to
+    the single workflow the old rule was happy with.
+    """
+    workflows = _every_workflow()
+    # GUARD THE GUARD. A survey that matched nothing would pass this test
+    # while asserting nothing at all — the same failure mode
+    # test_the_closure_actually_reaches_the_engines exists to prevent.
+    holders = [n for n, _, raw in workflows if "secrets.RUNPOD_API_KEY" in raw]
+    assert holders, "no workflow references the RunPod key; the survey is broken"
+
+    assert spend_gate_violations(workflows) == []
+
+
+def test_an_automatically_fired_workflow_holds_no_runpod_key():
+    """The same property from the other side.
+
+    The test above walks key-holders and checks their triggers; this walks
+    automatic workflows and checks they hold no key. Stated once, a new
+    push-triggered workflow that adds the key could be argued into either
+    test's blind spot; stated both ways there is no blind spot to argue
+    into. worker-ci.yml is push-triggered and holds no key, which is what
+    makes CI on every commit safe here.
+    """
+    for name, doc, raw in _every_workflow():
+        if not set(_triggers(doc)).intersection(AUTOMATIC):
+            continue
+        assert "secrets.RUNPOD_API_KEY" not in raw, (
+            f"{name} fires automatically AND references the RunPod key. "
+            "One or the other, never both."
+        )
