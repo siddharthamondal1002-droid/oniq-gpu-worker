@@ -105,7 +105,8 @@ UPSCALER_DIRS = ("latent_upsampler", "spatial_upscaler", "ltxv-spatial-upscaler"
 # timestep lists are the distilled sampler's own schedule; a full checkpoint
 # has no business walking seven steps.
 #
-# ONIQ's baked checkpoint is Lightricks/LTX-Video at revision 8984fa25, and
+# ONIQ's baked checkpoint is Lightricks/LTX-Video-0.9.7-distilled at revision
+# 057509edea14 (owner directive 2026-08-31), and
 # inspect_checkpoint() reads its shipped scheduler at runtime rather than
 # trusting its name. Applying this recipe to a checkpoint the evidence says is
 # NOT distilled would be exactly the "0.9.8 config on a different LTX

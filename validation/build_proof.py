@@ -106,9 +106,9 @@ def run() -> Proof:
 
     bakes = image_size.parse_bakes(docker)
     p.check("LTX bake has exactly one candidate",
-            bakes[0]["candidates"] == ["Lightricks/LTX-Video"])
+            bakes[0]["candidates"] == ["Lightricks/LTX-Video-0.9.7-distilled"])
     p.check("LTX revision pinned",
-            "8984fa25007f376c1a299016d0957a37a2f797bb" in docker)
+            "057509edea1493cae5e62e9d8f780ebda3fb4333" in docker)
     p.check("Qwen licence gate present", "Apache" in docker and "/app/models/story" in docker)
     p.check("Piper baked", "/app/models/piper" in docker)
     p.check("upscaler stage present", "THE SPATIAL LATENT UPSCALER" in docker)
@@ -117,16 +117,62 @@ def run() -> Proof:
             '"temporal_upsample": False' in docker and '"spatial_upsample": True' in docker)
     p.check("upscaler licence gate", "without their terms" in docker)
     p.check("upscaler size guard", "SIZE_GUARD_BYTES" in docker)
+    # THE LATENT-SPACE GATE. Added 2026-08-31 after run 33426496040 measured
+    # that the vae this image bakes and the vae the pinned upsampler was
+    # trained beside are different networks. Everything else about the
+    # upsampler checks out, so nothing upstream of this would have caught it —
+    # the model loads, constructs, and then refines latents it never saw in
+    # training. Silent, on a rented card, visible only in the output.
+    p.check("upscaler latent-space gate present",
+            "LATENT SPACE MISMATCH" in docker
+            and "/app/models/ltx/vae/config.json" in docker)
+    p.check("the gate compares the upstream vae config it fetched",
+            '"vae/config.json",' in docker and "upstream_vae" in docker)
+    # FAIL CLOSED. Nothing to compare against is UNVERIFIED, and unverified is
+    # not a pass — that is the whole lesson of this module's three earlier
+    # false negatives, applied in the safe direction.
+    p.check("the gate refuses rather than assuming when it cannot compare",
+            "ships no vae/config.json" in docker
+            and "refusing rather than" in docker)
+    # THE $0 READ MUST REACH THE BUILD'S VERDICT, or a PINNABLE line gets
+    # pasted into this pin and the build refuses it 25 minutes later.
+    from validation import upscaler_discover as _ud
+    _gated = docker.split("LATENT_SPACE = (", 1)[1].split(")", 1)[0]
+    p.check("the discovery read gates on the same fields the build does",
+            sorted(f.strip().strip('",') for f in _gated.split()
+                   if f.strip(' ,"')) == sorted(_ud.LATENT_SPACE))
 
     print("5. the upscaler pin")
-    pin = _active_lines(_read("ltx-upscaler.pin"))
-    p.check("pin declares no revision, so the stage is a no-op", not pin,
+    pin_text = _read("ltx-upscaler.pin")
+    pin = _active_lines(pin_text)
+    # EMPTY IS LEGAL — the stage is then a no-op and the image ships without
+    # multi-scale. What must never happen is a HALF-declaration: a revision
+    # nobody resolved, a bare branch name, or a repository named without terms.
+    #
+    # Until 2026-08-31 this asserted the pin was empty, which was right while
+    # nothing had been verified. Now that the registry has actually been read,
+    # the check TIGHTENS rather than disappears: a declared pin must be exactly
+    # "<repo> <40-hex>", and the file must carry a dated owner record of the
+    # licence acceptance, because a revision IS the licence and an agent cannot
+    # accept one on anybody's behalf.
+    p.check("pin declares at most one line", len(pin) <= 1,
             f"{len(pin)} declaration(s)")
-    # A sha may legitimately appear in the PROSE (the LTX transformer's own
-    # revision, quoted as the precedent); what must never appear is a
-    # DECLARED upscaler revision nobody verified.
-    p.check("no unverified revision is declared",
-            not any(re.search(r"\b[0-9a-f]{40}\b", l) for l in pin))
+    if pin:
+        parts = pin[0].split()
+        p.check("declared pin is '<repo> <revision>'", len(parts) == 2, pin[0])
+        p.check("declared revision is a 40-char sha, never a branch",
+                len(parts) > 1 and bool(re.fullmatch(r"[0-9a-f]{40}", parts[1])),
+                parts[1] if len(parts) > 1 else "(none)")
+        p.check("declared repository is namespaced",
+                len(parts) > 0 and parts[0].count("/") == 1, parts[0])
+        p.check("the licence acceptance is recorded beside the pin",
+                "OWNER LICENCE ACCEPTANCE" in pin_text)
+    else:
+        # A sha may legitimately appear in the PROSE (the LTX transformer's own
+        # revision, quoted as the precedent); what must never appear is a
+        # DECLARED upscaler revision nobody verified.
+        p.check("no unverified revision is declared",
+                not any(re.search(r"\b[0-9a-f]{40}\b", l) for l in pin))
 
     print("6. container user")
     p.check("runs as non-root", "USER oniq:oniq" in instructions)

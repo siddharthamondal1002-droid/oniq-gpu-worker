@@ -267,10 +267,189 @@ def test_nothing_a_caller_sends_can_steer_the_root():
             assert isinstance(first, _ast.Constant), _ast.dump(first)
             reads.append(first.value)
     assert reads, "no environment read found — the detector must read one"
-    assert set(reads) == {"MODEL_VOLUME_ROOT"}, reads
+    # Both are set by the TEMPLATE and name a root an operator has chosen.
+    # MODEL_CACHE_ROOT joined 2026-09-01 with the container-disk class. The
+    # property guarded here is unchanged and is not the count: no variable
+    # that could carry a job, a request or a user may steer where weights
+    # load from, and an allowlist of two operator paths still satisfies it.
+    assert set(reads) <= {"MODEL_VOLUME_ROOT", "MODEL_CACHE_ROOT"}, reads
 
 
 def test_where_reports_the_refusal_code_rather_than_a_path(volume):
     report = modelroot.where()
     assert report["experimental"][MODEL] == {"error": "MODEL_NOT_HYDRATED"}
     assert report["production"]["ltx"] == "/app/models/ltx"
+
+
+class TestTheTextEncoderLivesOnContainerDisk:
+    """OWNER DIRECTIVE 2026-08-31, amended 2026-09-01.
+
+    Moving the checkpoint to LTX-Video-0.9.7-distilled — needed so its vae
+    matches the pinned spatial upsampler — put the media image at 57.97 GiB,
+    and a hosted runner cannot build that (run 33434875038; the last
+    SUCCESSFUL publish left 5.73 GiB free of 71.61). The text encoder is
+    17.74 GiB of it, so it left the image.
+
+    It went to a NETWORK VOLUME first, and came off one on 2026-09-01. The
+    console's Releases tab showed what no API surface reports: attaching a
+    volume narrows the endpoint's `locations` from ALL to that volume's
+    single datacenter, and DETACHING DOES NOT WIDEN IT BACK. The endpoint is
+    then pinned for life and cannot get a GPU the day that datacenter's
+    approved tier runs dry — the daily-endpoint-recreation treadmill,
+    explained. Owner chose option B: no volume, every datacenter, weights on
+    the worker's own container disk.
+
+    It is still a THIRD class and still fail-closed: ltx/story/piper fall
+    back to the baked copy when their tree is empty, and this one has no
+    baked copy to fall back to. What changed is WHERE it is expected and
+    that an empty cache is now a normal cold-worker state to be fixed by
+    fetching, rather than a configuration error."""
+
+    ID = "LTX_TEXT_ENCODER"
+
+    def test_it_is_registered_and_is_not_experimental(self):
+        assert self.ID in modelroot.CACHE_RESIDENT
+        assert self.ID not in modelroot.EXPERIMENTAL
+        assert self.ID in modelroot.known_ids()
+        assert modelroot.storage_class(self.ID) == "cache"
+
+    def test_one_lookup_serves_both_registries(self):
+        # Five call sites used to index EXPERIMENTAL directly. A second
+        # registry only some of them knew about would resolve for hydration
+        # and not for loading, or the reverse.
+        assert modelroot.spec_for(self.ID) is modelroot.CACHE_RESIDENT[self.ID]
+        assert modelroot.spec_for("HUNYUAN_15_I2V_480_STEP") is (
+            modelroot.EXPERIMENTAL["HUNYUAN_15_I2V_480_STEP"])
+        assert modelroot.spec_for("nope") is None
+
+    def test_it_names_the_checkpoint_it_belongs_to(self):
+        # The encoder and the transformer share an embedding space. A generic
+        # "text-encoder" directory is how one checkpoint's encoder ends up
+        # beside another's transformer — a silent quality failure, not a
+        # crash.
+        spec = modelroot.spec_for(self.ID)
+        assert "0.9.7-distilled" in spec["directory"]
+        assert spec["repo"] == "Lightricks/LTX-Video-0.9.7-distilled"
+        assert spec["allow"] == ["text_encoder/*"]
+
+    def test_the_revision_is_the_dockerfiles(self):
+        docker = open("Dockerfile", encoding="utf-8").read()
+        spec = modelroot.spec_for(self.ID)
+        assert f'PINNED_REVISION = "{spec["revision"]}"' in docker
+        assert f'("{spec["repo"]}", "")' in docker
+
+    def test_the_declared_size_is_the_measured_one(self):
+        # 19,049,290,370 bytes over text_encoder/*, run 33436186203. This
+        # number feeds modelhydrate's disk check; an estimate breaks the gate.
+        assert modelroot.spec_for(self.ID)["download_gib"] == 17.74
+        assert round(19_049_290_370 / 1024**3, 2) == 17.74
+
+    def test_an_absent_volume_no_longer_refuses_it(self, monkeypatch):
+        """THE 2026-09-01 CHANGE. Under option B the production endpoint has
+        NO volume on purpose, so demanding a mount here would refuse every
+        clip on a correctly configured endpoint. The refusal must come from
+        the cache being empty, not from storage that is meant to be absent."""
+        monkeypatch.setattr(modelroot, "volume_mounted", lambda: False)
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.resolve(self.ID)
+        assert exc.value.code == "MODEL_NOT_HYDRATED"
+
+    def test_it_still_fails_closed_with_a_named_reason(self, monkeypatch):
+        # THE POINT OF THE WHOLE CLASS, unchanged by the move. No baked
+        # fallback exists, so a clip that cannot trust its text encoder must
+        # REFUSE and say why — never run on an untrained embedding.
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.resolve(self.ID)
+        assert exc.value.code in ("MODEL_NOT_HYDRATED", "MODEL_CORRUPT")
+        assert exc.value.detail
+
+    def test_it_lands_on_container_disk_not_the_volume(self):
+        path = modelroot.model_dir(self.ID)
+        assert path.startswith(modelroot.CACHE_ROOT), path
+        assert not path.startswith(modelroot.VOLUME_ROOT), path
+        # Same deterministic layout either side, so a model can move between
+        # the two roots by changing registry and nothing else.
+        assert path.endswith(
+            os.path.join("ltx", "text-encoder-0.9.7-distilled"))
+
+    def test_the_experimental_class_still_demands_a_real_volume(self,
+                                                               monkeypatch):
+        """The two classes fail DIFFERENTLY and must not be conflated. A
+        Hunyuan probe with no volume is an operator error to fix before
+        spending; an empty cache on a cold worker is not."""
+        monkeypatch.setattr(modelroot, "volume_mounted", lambda: False)
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.resolve("HUNYUAN_15_I2V_480_STEP")
+        assert exc.value.code == "MODEL_VOLUME_UNAVAILABLE"
+
+    def test_ensure_fetches_only_when_the_cache_is_empty(self, monkeypatch):
+        """A cold worker is the NORMAL first state under option B, so an
+        empty cache is fetched rather than refused."""
+        calls = []
+        seen = {"n": 0}
+
+        def fake_resolve(model_id):
+            seen["n"] += 1
+            if seen["n"] == 1:
+                raise modelroot.ModelUnavailable("MODEL_NOT_HYDRATED", "cold")
+            return "/app/cache/models/oniq/ltx/text-encoder-0.9.7-distilled"
+
+        monkeypatch.setattr(modelroot, "resolve", fake_resolve)
+        path = modelroot.ensure(self.ID, lambda mid: calls.append(mid))
+        assert calls == [self.ID]
+        assert path.startswith("/app/cache")
+        # Resolved AGAIN after the fetch: the hydrator's own return value
+        # would only say where it put files, not that the marker is present,
+        # the revision is pinned and every length matches.
+        assert seen["n"] == 2
+
+    def test_ensure_never_refetches_over_a_corrupt_checkpoint(self,
+                                                             monkeypatch):
+        """Quietly re-downloading over a manifest that does not verify turns
+        a diagnosable corruption into an intermittent one."""
+        calls = []
+
+        def fake_resolve(model_id):
+            raise modelroot.ModelUnavailable("MODEL_CORRUPT", "bad manifest")
+
+        monkeypatch.setattr(modelroot, "resolve", fake_resolve)
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.ensure(self.ID, lambda mid: calls.append(mid))
+        assert exc.value.code == "MODEL_CORRUPT"
+        assert calls == [], "a corrupt checkpoint must not trigger a re-fetch"
+
+    def test_the_image_creates_that_cache_dir_and_gives_it_to_the_runtime_uid(
+            self):
+        """A directory made on demand under a root-owned /app fails EACCES —
+        inside a job already being paid for, forty minutes into a cold
+        start. That exact failure killed the first model probe when the hub
+        tried to create its cache under a root-owned parent.
+
+        The path is compared against modelroot's constant rather than
+        retyped: a Dockerfile that prepares /app/cache while the code reads
+        /app/cache2 looks correct in both files and fails only on a rented
+        card."""
+        docker = open("Dockerfile", encoding="utf-8").read()
+        assert f"mkdir -p {modelroot.CACHE_ROOT}" in docker
+        assert f"chown -R 10001:10001 {modelroot.CACHE_ROOT}" in docker
+        # And it must happen while the build is still root.
+        prepare = docker.index(f"mkdir -p {modelroot.CACHE_ROOT}")
+        assert prepare < docker.rindex("USER oniq:oniq"), (
+            "the cache is prepared after the image drops to uid 10001, so "
+            "the chown cannot succeed"
+        )
+
+    def test_ensure_refuses_to_fetch_a_volume_model_mid_job(self):
+        """Their contract is a deliberate hydrate before dispatch. Fetching
+        one inside a job spends a booted worker on a download the preflight
+        exists to make unnecessary."""
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.ensure("HUNYUAN_15_I2V_480_STEP", lambda mid: None)
+        assert exc.value.code == "MODEL_NOT_CACHEABLE"
+
+    def test_an_unknown_id_lists_every_known_one(self, monkeypatch):
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            modelroot.model_dir("NOT_A_MODEL")
+        assert exc.value.code == "MODEL_UNKNOWN"
+        for known in modelroot.known_ids():
+            assert known in exc.value.detail

@@ -90,3 +90,138 @@
 # film's 1080 becomes a DOWNSCALE of real detail. GPU time is unmeasured; the
 # refine pass is real additional inference at 4x the pixels and no cost claim
 # should be made about it before a real generation.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESOLVED 2026-08-31 — measured from the registry, not transcribed
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# gpu-validation.yml mode `upscaler-discover` read both candidates the diffusers
+# documentation names, with the runner's HF_TOKEN, and measured:
+#
+#   Lightricks/ltxv-spatial-upscaler-0.9.7
+#     revision   c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f
+#     licence    ships LTX-Video-Open-Weights-License-0.X.txt
+#     shape      diffusers PIPELINE — latent_upsampler/, media/, vae/
+#     component  latent_upsampler/ is 505,009,832 bytes
+#     config     declares _class_name and defaults the rest
+#
+#   a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+#     revision   e0c981533db26531c47dec16a124586cea53f11f
+#     licence    NONE. Three files, no LICENSE, no NOTICE, no licence tag.
+#     component  505,009,832 bytes — BYTE-IDENTICAL to the Lightricks one
+#
+# The two components are the same size to the byte, so they are the same
+# weights: one published by Lightricks under their terms, one re-uploaded
+# without any. That settles it. The third-party copy offers nothing the
+# official one does not, and offers it with no licence at all, so this pin
+# names the Lightricks repository.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# OWNER LICENCE ACCEPTANCE — 2026-08-31
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Owner directive, 2026-08-31. The owner verified that ONIQ is below the LTX
+# $10M annual-revenue threshold and therefore qualifies under the LTX-Video 0.X
+# Open Weights community licence, which grants the use, reproduction and
+# distribution rights ONIQ needs at no cost for entities under that threshold;
+# the paid commercial licence applies at or above $10M.
+#
+# The acceptance is NOT a licence to ignore the conditions. The owner's words:
+# "Preserve the applicable licence/attribution and use restrictions in the
+# production distribution." The bake enforces the mechanical half — it refuses
+# to redistribute weights whose LICENSE/NOTICE does not travel with them, and
+# LTX-Video-Open-Weights-License-0.X.txt is moved down beside the component it
+# licenses.
+#
+# An agent did not and cannot accept this on the owner's behalf; the record
+# exists so the acceptance has a date and an author next to the code it governs,
+# the same way the 2026-08-13 movie-on/classic-off flip does.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SETTLED — the upsampler itself
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The two candidates are the SAME FILE: sha256
+# e1d5e5cc4bdda2ff8ece07ab86e746890e1e515848797d2dd1c9e0179f442fdc for both
+# Lightricks' latent_upsampler/diffusion_pytorch_model.safetensors and the
+# third party's diffusion_pytorch_model.safetensors. There is no separate 0.9.8
+# upsampler; it is this component re-uploaded without its licence. The "0.9.7
+# against a 2B checkpoint" worry was about a version label that does not
+# correspond to different weights.
+#
+# From the diffusers source rather than from inference:
+#   - LTXLatentUpsamplerModel's defaults ARE in_channels=128, mid_channels=512,
+#     num_blocks_per_stage=4, dims=3, spatial_upsample=True,
+#     temporal_upsample=False. Lightricks' terse config constructs to exactly
+#     the shape this build asserts.
+#   - The class upsamples VAE LATENTS ("Model to spatially upsample VAE
+#     latents"), never transformer output, so the transformer's size — 2B or
+#     13B — is not a compatibility question at all.
+#   - LTXLatentUpsamplePipeline takes exactly (vae, latent_upsampler) and
+#     normalises with self.vae.latents_mean/latents_std — ONIQ's OWN baked vae.
+#
+# That last point is the one that turned out to matter.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ENABLED — after the CHECKPOINT moved to meet it, 2026-08-31
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# This pin was written out and COMMENTED for part of a day. Everything about
+# the upsampler verified — revision, terms, size, constructed shape, owner
+# acceptance — but run 33426496040 measured that the vae ONIQ baked was a
+# different network from the one it was trained beside:
+#
+#   field                    baked LTX-Video@8984fa25   upscaler 0.9.7
+#   block_out_channels       [128, 256, 512, 512]       [128, 256, 512, 1024, …5]
+#   layers_per_block         [4, 3, 3, 3, …5]           [4, 6, 6, 2, …5]
+#   spatio_temporal_scaling  [T, T, T, F]               [T, T, T, T]
+#   down_block_types         absent                     LTXVideo095DownBlock3D ×4
+#   timestep_conditioning    absent                     True
+#   decoder_* (4 fields)     absent                     present
+#
+# latents_mean, latents_std and latent_channels agreed, so the normalisation
+# matched — but matching per-channel statistics is not a shared latent space,
+# and the upsampler would have refined latents it had never seen. Silently, on
+# a rented card.
+#
+# THE PAIRING WAS FIXED, NOT THE CHECK. Owner directive 2026-08-31: move the
+# checkpoint. Run 33432424021 measured every Lightricks candidate against this
+# upsampler's own vae config:
+#
+#   candidate                              transformer   pairs?
+#   LTX-Video @ 8984fa25 (was baked)          7.17 GiB    NO — 4 fields
+#   LTX-Video-0.9.1                           3.58 GiB    NO — 4 fields
+#   LTX-Video-0.9.5                           3.58 GiB    yes
+#   LTX-Video-0.9.7-dev                      24.29 GiB    yes
+#   LTX-Video-0.9.7-distilled                24.29 GiB    yes   <- CHOSEN
+#   LTX-Video-0.9.8-13B-distilled            24.29 GiB    yes
+#
+# The owner chose 0.9.7-distilled over the 2B-class 0.9.5 that also pairs. The
+# Dockerfile now bakes Lightricks/LTX-Video-0.9.7-distilled at
+# 057509edea1493cae5e62e9d8f780ebda3fb4333, its LATENT SPACE gate compares the
+# two vae configs at build time and refuses on any disagreement, and
+# upscaler-discover mirrors the same field list so a $0 read reaches the same
+# verdict. The line below is live because that comparison now passes — never
+# because the check was relaxed.
+#
+# IF IT EVER FAILS AGAIN, the fix is the same shape: move the pairing. Blanking
+# this file disables multi-scale and leaves the single-scale path running
+# unchanged, which is the safe fallback and costs nothing but detail.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# STILL NOT MEASURED
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Whether multi-scale actually improves ONIQ's output, and what it costs. The
+# checkpoint change lands at the same time, so the first generation on this
+# image changes TWO things at once: 2B non-distilled -> 13B distilled, and
+# single-scale -> multi-scale. Their effects have to be measured apart before
+# either is called an improvement, and the historical $0.0029 / 38.87
+# GPU-seconds economics do not survive either change.
+#
+# ltxcaps picks the distilled sampler by EVIDENCE from the shipped scheduler
+# rather than from the checkpoint's name, so the guidance_scale=1 / seven-step
+# schedule this checkpoint needs is selected by the code that reads it, not by
+# a constant somebody remembered to change.
+
+Lightricks/ltxv-spatial-upscaler-0.9.7 c96c168c2bd8bbc82c9fe8259e5f89f8b2ea293f

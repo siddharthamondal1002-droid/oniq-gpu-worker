@@ -393,3 +393,74 @@ def test_image_engine_refuses_an_empty_generation(tmp_path, fake_checkpoint):
             load_pipeline=lambda: _FakeTextPipe(n_frames=0),
         )
     assert exc.value.code == "no-frames"
+
+
+class TestTheTextEncoderComesFromContainerDisk:
+    """The image no longer carries text_encoder/ (owner directive
+    2026-08-31), so every pipeline load has to supply it.
+
+    It came off the NETWORK VOLUME on 2026-09-01 (owner, option B):
+    attaching a volume permanently narrows the endpoint's `locations` to
+    that volume's one datacenter, so the weights now live on the worker's
+    own container disk and are fetched on a cold worker."""
+
+    def test_all_three_pipelines_are_handed_the_encoder(self):
+        # Three from_pretrained sites: LTXConditionPipeline, the
+        # LTXImageToVideoPipeline fallback, and LTXPipeline for stills. One of
+        # them left un-supplied is an OSError on a rented card, in the one
+        # code path that only runs when the primary has already failed.
+        source = open("videogen.py", encoding="utf-8").read()
+        loads = [l for l in source.splitlines() if ".from_pretrained(" in l
+                 and "Pipeline" in l]
+        assert len(loads) == 3, loads
+        assert source.count("text_encoder=_text_encoder()") == 3
+
+    def test_it_resolves_through_modelroot_and_never_from_the_image(self):
+        source = open("videogen.py", encoding="utf-8").read()
+        body = source.split("def _text_encoder():", 1)[1].split("\ndef ", 1)[0]
+        # `ensure`, not `resolve`: a worker RunPod has just placed has an
+        # empty cache, and refusing there would refuse every first clip on
+        # every fresh worker.
+        assert "modelroot.ensure(LTX_TEXT_ENCODER, modelhydrate.hydrate)" in body
+        # The baked pipeline directory must not be where it looks.
+        assert "_model_dir()" not in body
+
+    def test_the_fetcher_is_injected_so_modelroot_stays_importless(self):
+        """modelroot imports nothing but json and os, and a test in
+        test_modelroot holds it to that over the AST. Defaulting the
+        hydrator to an import inside modelroot would have broken it — and
+        that guard is what keeps "a caller cannot steer where weights load
+        from" cheap to verify."""
+        import inspect
+
+        import modelroot
+
+        sig = inspect.signature(modelroot.ensure)
+        assert sig.parameters["hydrator"].default is inspect.Parameter.empty
+
+    def test_the_refusal_is_not_swallowed(self, monkeypatch):
+        # modelroot raises a NAMED refusal. If _text_encoder caught it and
+        # returned None, diffusers would build a pipeline with no encoder and
+        # the job would fail somewhere far less legible.
+        #
+        # MODEL_CORRUPT rather than MODEL_NOT_HYDRATED, deliberately: an
+        # empty cache is now FETCHED, so the un-swallowed refusal to test is
+        # one `ensure` must never paper over by re-downloading.
+        import modelroot
+        import videogen
+
+        def refuse(_id):
+            raise modelroot.ModelUnavailable("MODEL_CORRUPT", "bad manifest")
+
+        monkeypatch.setattr(modelroot, "resolve", refuse)
+        with pytest.raises(modelroot.ModelUnavailable) as exc:
+            videogen._text_encoder()
+        assert exc.value.code == "MODEL_CORRUPT"
+
+    def test_the_diffusers_contract_this_relies_on_is_recorded(self):
+        # Passing a component is only safe because from_pretrained skips
+        # loading it. That is quoted from diffusers 0.38.0's own
+        # pipeline_utils.py rather than assumed, so a reader can check it.
+        source = open("videogen.py", encoding="utf-8").read()
+        assert "if name in passed_class_obj:" in source
+        assert "loaded_sub_model = passed_class_obj[name]" in source

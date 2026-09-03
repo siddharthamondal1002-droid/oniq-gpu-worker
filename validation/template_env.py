@@ -4,9 +4,21 @@ Owner directive 2026-08-28: the three R2 variables go onto template
 `oniq-gpu-worker` so the worker can write its output. The values are not
 credentials and never become credentials here - they are RunPod secret
 references of the documented form `{{ RUNPOD_SECRET_<name> }}`, which
-RunPod expands inside the container at start-up. The standing rule holds
-unchanged: R2 credentials live in RunPod and nowhere else. No value ever
-enters this repository, a GitHub secret, a log line, or this process.
+RunPod expands inside the container at start-up.
+
+THE RULE HOLDS UNCHANGED FOR THIS MODULE: no R2 value ever enters this
+repository, a log line, or this process. References are all it writes and
+all it can write.
+
+The WIDER rule was amended 2026-09-01 by owner directive, and this file is
+not what changed. R2 credentials now also exist as GitHub secrets on the
+`gpu-spend` ENVIRONMENT, reachable by exactly one job —
+validation/weights_stage.py, which stages a GATED checkpoint into the
+bucket because CI holds the HuggingFace token and a worker does not. The
+amendment is recorded in README.md and in gate 6 of gpu-validation.yml. It
+loosens nothing here: this module still handles no value, and the worker
+still reads its credentials from RunPod's secret store, never from a job
+input.
 
 What this refuses to do matters more than what it does:
 

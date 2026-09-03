@@ -2007,11 +2007,15 @@ def main(argv) -> int:
                     "model_hydrate supports through_phase 16 only",
                 )
             target = os.environ.get("PROBE_MODEL", "").strip()
-            if target not in modelroot.EXPERIMENTAL:
+            # BOTH REGISTRIES, since 2026-08-31 — see contract.py's copy of
+            # this gate. This one at least refuses BEFORE a worker is booted,
+            # but refusing a legitimate model here would simply have made the
+            # text encoder unhydratable.
+            if modelroot.spec_for(target) is None:
                 raise SpendStop(
                     "hydrate-unknown-model",
-                    f"{target!r} is not an experimental model; known ids are "
-                    + ", ".join(sorted(modelroot.EXPERIMENTAL)),
+                    f"{target!r} is not a volume-resident model; known ids are "
+                    + ", ".join(modelroot.known_ids()),
                 )
             rows = [
                 one_job(

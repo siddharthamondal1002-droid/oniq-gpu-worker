@@ -169,3 +169,48 @@ def test_nothing_here_touches_the_gpu():
         source = fh.read()
     for forbidden in ("import torch", "cuda", "diffusers"):
         assert forbidden not in source, forbidden
+
+
+def test_a_weights_refusal_reaches_the_caller_as_a_hydration_refusal(
+        monkeypatch, tmp_path):
+    """EVERY caller of hydrate() handles HydrationRefused and nothing else.
+
+    The cache branch calls weights_r2.fetch, which raises its own type. If
+    one of those escapes untranslated it surfaces as an unhandled error and
+    the named diagnosis — the entire point of these codes — is replaced by
+    `unexpected-exception: WeightsUnavailable`. That is a GPU job spent to
+    learn nothing.
+
+    Nothing covered this seam, which is how the bare archive download in
+    weights_r2.fetch went unnoticed: its own type was correct, and the only
+    thing that could have caught the gap was a test at THIS layer.
+    """
+    import weights_r2
+
+    monkeypatch.setenv("MODEL_CACHE_ROOT", str(tmp_path))
+    importlib.reload(modelroot)
+    importlib.reload(mh)
+    monkeypatch.setattr(mh, "_free_gib", lambda p: 10_000.0)
+
+    cache_model = "LTX_TEXT_ENCODER"
+    assert modelroot.storage_class(cache_model) == "cache", (
+        "this test is about the cache branch; if the registry moved this "
+        "model the test is asserting nothing"
+    )
+
+    def refuse(spec, dest_dir, work_dir, downloader):
+        raise weights_r2.WeightsUnavailable(
+            "download-failed", "the archive did not arrive"
+        )
+
+    monkeypatch.setattr(weights_r2, "fetch", refuse)
+
+    with pytest.raises(mh.HydrationRefused) as exc:
+        mh.hydrate(cache_model)
+    # The CODE survives the translation, not just the fact of failure.
+    assert exc.value.state == "download-failed"
+    assert "the archive did not arrive" in exc.value.detail
+
+    monkeypatch.delenv("MODEL_CACHE_ROOT", raising=False)
+    importlib.reload(modelroot)
+    importlib.reload(mh)

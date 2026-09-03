@@ -111,8 +111,17 @@ gated, on CPU runners: FALSE there carries no information about the image.
   environment. `cancel-in-progress` is false, the orphan sweep runs
   `if: always()` and fails the run when it cannot confirm zero, CI can
   only verify an endpoint (`min_workers=0` / `max_workers=1`), never
-  create one, and R2 credentials are not GitHub secrets — they live in
-  the RunPod endpoint's environment.
+  create one, and R2 credentials reach exactly one job, from the
+  `gpu-spend` environment, so touching the bucket costs a reviewer's
+  click. (Amended 2026-09-01. The rule was "R2 credentials are not GitHub
+  secrets — they live in the RunPod endpoint's environment", and it held
+  until the gated text encoder had to move off the network volume, which
+  permanently pins an endpoint to one datacenter. CI holds the
+  HuggingFace token and no R2; a worker holds R2 and no HuggingFace
+  token; nothing had both, so nothing could stage those weights. What is
+  kept is the part that mattered: nothing which runs without a human
+  reaches the bucket, and `worker-ci` — the workflow that fires on push —
+  still holds no secret at all.)
 
 ## Media inference — measured baseline (2026-08-26)
 

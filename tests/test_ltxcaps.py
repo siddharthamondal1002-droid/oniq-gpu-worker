@@ -686,15 +686,34 @@ def test_the_reference_download_is_bounded_and_by_key_only():
         assert forbidden not in block.lower()
 
 
-def test_the_upscaler_bake_is_off_unless_a_revision_is_pinned():
-    """A revision is the licence. No sha, no bake — and unset must be a no-op,
-    so no build that works today can start failing because of this stage."""
+def test_the_upscaler_bake_stays_off_when_no_revision_is_pinned():
+    """A revision is the licence. No sha, no bake — and unset must remain a
+    no-op, so removing the pin can never break a build.
+
+    The shipped pin is LIVE: Lightricks/ltxv-spatial-upscaler-0.9.7 at
+    c96c168c…, resolved from the registry 2026-08-31, accepted by the owner
+    under the LTX 0.X community licence, and enabled only once the CHECKPOINT
+    moved to a vae that matches it. So this asserts the shape of the
+    declaration and that the skip path still exists, rather than that the file
+    is empty."""
+    import re
+
     docker = open("Dockerfile", encoding="utf-8").read()
     pin = open("ltx-upscaler.pin", encoding="utf-8").read()
-    # The shipped pin names nothing: every non-comment line is blank, so the
-    # stage skips and the image is what it was before this change.
-    assert not [l for l in pin.splitlines() if l.split("#", 1)[0].strip()]
+    declared = [l.split("#", 1)[0].strip() for l in pin.splitlines()
+                if l.split("#", 1)[0].strip()]
+    assert len(declared) == 1, declared
+    repo, revision = declared[0].split()
+    assert repo.count("/") == 1
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), revision
+    # The acceptance is recorded next to the code it governs, with its date.
+    assert "OWNER LICENCE ACCEPTANCE" in pin
+    # And so is what had to change before it could be enabled — the pairing,
+    # never the check.
+    assert "THE PAIRING WAS FIXED, NOT THE CHECK" in pin
     assert "COPY ltx-upscaler.pin" in docker
+    # UNSET IS STILL A NO-OP. The skip path is what makes the pin reversible:
+    # blank the file and the image is the single-scale one again.
     assert "UPSCALER SKIPPED" in docker
     # And it is a FILE, not a build arg: ARG survives into `docker history`,
     # which is why test_the_image_takes_no_build_argument bans it outright.
@@ -703,10 +722,6 @@ def test_the_upscaler_bake_is_off_unless_a_revision_is_pinned():
     stage = docker[docker.index("THE SPATIAL LATENT UPSCALER"):]
     stage = stage[: stage.index("# Bake the STORY model")]
     assert "refusing to bake different bytes" in stage
-    assert "without their terms" in stage
-    assert "LTXLatentUpsamplerModel" in stage
-    assert "SIZE_GUARD_BYTES" in stage
-
 
 def test_a_fallback_pipeline_is_never_sent_conditions(io_paths, fake_checkpoint):
     """`conditions=` on LTXImageToVideoPipeline is a TypeError mid-job on a

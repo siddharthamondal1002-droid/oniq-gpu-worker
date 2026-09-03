@@ -193,6 +193,72 @@ def _video_condition(image, frame_index=None, strength=None):
         return None
 
 
+# THE TEXT ENCODER COMES FROM CONTAINER DISK, NOT FROM THE IMAGE.
+#
+# Owner directive 2026-08-31. The 13B repoint put the image past what a hosted
+# runner can build, and this component is 17.74 GiB of it — see
+# modelroot.CACHE_RESIDENT["LTX_TEXT_ENCODER"] and the Dockerfile's own note.
+#
+# IT WAS ON A NETWORK VOLUME UNTIL 2026-09-01. Owner decision, option B: no
+# volume at all, because attaching one narrows the endpoint's `locations`
+# from ALL to that volume's single datacenter and DETACHING DOES NOT WIDEN IT
+# BACK. The endpoint then cannot get a GPU the day that datacenter's approved
+# tier runs dry, which is what the daily endpoint recreation was working
+# around. Placement breadth beat persistent storage; see modelroot.CACHE_ROOT.
+#
+# WHY PASSING IT IN IS SAFE, verified rather than assumed. diffusers 0.38.0's
+# pipeline_utils.py loads each component with:
+#
+#     if name in passed_class_obj:
+#         loaded_sub_model = passed_class_obj[name]
+#     else:
+#         loaded_sub_model = load_sub_model(...)
+#
+# so a component handed to from_pretrained is used directly and its folder is
+# never read. That is what lets the image ship a pipeline directory with no
+# text_encoder/ in it.
+#
+# IT FAILS CLOSED. modelroot.resolve raises a named ModelUnavailable when the
+# volume is absent, unhydrated or corrupt, and that refusal travels to the
+# caller intact. A clip that cannot find its own text encoder must not run.
+LTX_TEXT_ENCODER = "LTX_TEXT_ENCODER"
+
+
+def _text_encoder():
+    """The T5 encoder, from container disk, on the pipeline's dtype.
+
+    `ensure`, NOT `resolve`. Since the 2026-09-01 no-volume decision these
+    weights live on the worker's own disk, and a worker RunPod has just
+    placed has an empty one. An empty cache on a cold worker is the normal
+    first state, not a fault, so it is fetched here and reused by every
+    later clip that worker serves. Every other refusal — corrupt manifest,
+    wrong revision, unknown id — still propagates untouched: a clip that
+    cannot trust its own text encoder must refuse rather than run with an
+    embedding nobody verified.
+    """
+    # RESOLVED FIRST, before torch or transformers are imported. A missing or
+    # unhydrated cache is a storage fact, and diagnosing it should not depend
+    # on the ML stack loading successfully — nor pay for the import.
+    #
+    # THE FETCHER IS PASSED IN, because modelroot imports nothing but json and
+    # os and a test holds it to that over the AST. Layering, not ceremony:
+    # keeping every module that handles a job out of modelroot's import graph
+    # is what keeps "a caller cannot steer where weights load from" cheap to
+    # verify.
+    import modelhydrate
+
+    path = modelroot.ensure(LTX_TEXT_ENCODER, modelhydrate.hydrate)
+
+    import torch
+    from transformers import T5EncoderModel
+
+    return T5EncoderModel.from_pretrained(
+        os.path.join(path, "text_encoder"),
+        torch_dtype=torch.bfloat16,
+        local_files_only=True,
+    )
+
+
 def _load_real_pipeline():
     """Load the baked pipeline onto CUDA. Never touches the network.
 
@@ -220,7 +286,8 @@ def _load_real_pipeline():
             from diffusers import LTXConditionPipeline
 
             pipe = LTXConditionPipeline.from_pretrained(
-                _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+                _model_dir(), text_encoder=_text_encoder(),
+                torch_dtype=torch.bfloat16, local_files_only=True
             )
             pipe.to("cuda")
             pipe.vae.enable_tiling()
@@ -239,7 +306,8 @@ def _load_real_pipeline():
     from diffusers import LTXImageToVideoPipeline
 
     pipe = LTXImageToVideoPipeline.from_pretrained(
-        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), text_encoder=_text_encoder(),
+        torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()
@@ -288,7 +356,8 @@ def _load_real_text_pipeline():
     from diffusers import LTXPipeline
 
     pipe = LTXPipeline.from_pretrained(
-        _model_dir(), torch_dtype=torch.bfloat16, local_files_only=True
+        _model_dir(), text_encoder=_text_encoder(),
+        torch_dtype=torch.bfloat16, local_files_only=True
     )
     pipe.to("cuda")
     pipe.vae.enable_tiling()

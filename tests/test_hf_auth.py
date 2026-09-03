@@ -13,8 +13,11 @@ import pytest
 from validation import hf_auth
 
 GIB = 1024**3
-REPO = "Lightricks/LTX-Video"
-REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+# Moved 2026-08-31 with the owner's checkpoint directive: the old
+# checkpoint's vae is a different network from the pinned spatial
+# upsampler's, so multi-scale could not be enabled against it.
+REPO = "Lightricks/LTX-Video-0.9.7-distilled"
+REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 SECRET = "hf_thisisnotarealtokenvalue"
 
 
@@ -62,7 +65,7 @@ def test_the_intended_model_is_the_head_of_the_real_candidate_list():
 def test_the_gates_come_from_the_dockerfile_not_from_here():
     want = hf_auth.intended(_dockerfile())
     assert want["guard_prefix"] == "transformer/"
-    assert want["size_guard_bytes"] == 16 * GIB
+    assert want["size_guard_bytes"] == 32 * GIB
     assert "text_encoder" in want["components"]
 
 
@@ -108,9 +111,19 @@ def test_no_commit_sha_means_nothing_to_pin_to():
     assert exc.value.code == "revision-unknown"
 
 
-def test_a_thirteen_b_wearing_the_name_fails_the_shape_guard():
+def test_a_transformer_over_the_guard_fails_the_shape_guard():
+    """The guard is RAISED, not removed, and this is what proves it.
+
+    It used to read "a thirteen B wearing the name", with 26 GiB against a
+    16 GiB guard. A 13B is now what ONIQ deliberately bakes (owner directive
+    2026-08-31), so the size moved to one the 32 GiB guard still refuses —
+    70.75 GiB, which is what run 33432424021 actually measured for
+    Lightricks/LTX-2-Pre-Trained. A guard that admits everything is not a
+    guard, so the refusal is pinned against a real repository rather than an
+    invented number."""
     with pytest.raises(hf_auth.Blocked) as exc:
-        hf_auth.probe(_dockerfile(), SECRET, _ok(_info(transformer=26 * GIB)))
+        hf_auth.probe(_dockerfile(), SECRET,
+                      _ok(_info(transformer=int(70.75 * GIB))))
     assert exc.value.code == "guard-failed"
 
 
@@ -210,7 +223,15 @@ def _bakes_by_role():
     """
     roles = {}
     for block in _bake_blocks():
-        if "LTX_PASS" in block:
+        if "LTX_TX_PASS" in block:
+            # The TRANSFORMER passes, added 2026-08-31 when the checkpoint
+            # moved to 0.9.7-distilled: at 24.29 GiB it can no longer ride in
+            # the first layer. Named BEFORE the /app/models/ltx test below for
+            # the reason this function's docstring gives — these write into
+            # that same directory, so an unnamed pass would be filed as the
+            # transformer bake, silently replacing it and taking the count.
+            roles.setdefault("transformer_passes", []).append(block)
+        elif "LTX_PASS" in block:
             roles.setdefault("ltx_passes", []).append(block)
         elif "ltx-upscaler.pin" in block:
             # BEFORE the /app/models/ltx test below, because the upscaler
@@ -237,13 +258,15 @@ def test_every_bake_is_syntactically_valid_python():
 
     blocks = _bake_blocks()
     roles = _bakes_by_role()
-    # Three named bakes plus however many text-encoder passes the layer
-    # split uses; every one of them is compiled, none is skipped.
-    # Three named bakes, the optional upscaler, plus however many
-    # text-encoder passes the layer split uses; every one compiled, none
-    # skipped.
-    assert len(blocks) == 3 + len(roles.get("ltx_passes", [])) + (
-        1 if "upscaler" in roles else 0
+    # Three named bakes, the optional upscaler, plus however many transformer
+    # and text-encoder passes the layer split uses; every one compiled, none
+    # skipped. The arithmetic is spelled out rather than hardcoded so that
+    # adding a pass cannot quietly drop a block from this check.
+    assert len(blocks) == (
+        3
+        + len(roles.get("transformer_passes", []))
+        + len(roles.get("ltx_passes", []))
+        + (1 if "upscaler" in roles else 0)
     )
     for block in blocks:
         ast.parse(block)
@@ -295,7 +318,7 @@ def test_the_ltx_bake_has_exactly_one_candidate():
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video"]
+    assert bakes[0]["candidates"] == ["Lightricks/LTX-Video-0.9.7-distilled"]
 
 
 def test_the_ltx_bake_pins_the_exact_revision_the_owner_named():
@@ -367,21 +390,28 @@ def test_the_size_guards_both_survive():
 
     with open("Dockerfile", encoding="utf-8") as fh:
         bakes = image_size.parse_bakes(fh.read())
-    assert bakes[0]["size_guard_bytes"] == 16 * 1024**3
+    assert bakes[0]["size_guard_bytes"] == 32 * 1024**3
     assert bakes[1]["size_guard_bytes"] == 20 * 1024**3
 
 
-def test_the_text_encoder_passes_cover_every_file_exactly_once():
-    """The split must be a PARTITION. A file assigned to both passes is
-    wasted bandwidth; a file assigned to neither is a broken pipeline that
-    only shows up when a rented card tries to load it.
+def test_the_transformer_passes_cover_every_file_exactly_once():
+    """The split must be a PARTITION. A file assigned to two passes is wasted
+    bandwidth; a file assigned to none is a broken pipeline that only shows up
+    when a rented card tries to load it.
 
-    This runs the Dockerfile's own grouping arithmetic — lifted from the
-    bake, not reimplemented — over the shard layouts a repository can
-    plausibly have.
+    This runs the Dockerfile's own grouping arithmetic — lifted from the bake,
+    not reimplemented — over the shard layouts a repository can plausibly
+    have.
+
+    RETARGETED 2026-08-31 from the text-encoder passes to the transformer
+    ones. The text encoder left the image entirely (owner directive: a hosted
+    runner cannot build a 57.97 GiB image, and it is 17.74 GiB of that), and
+    the transformer took its place as the component too large for one layer.
+    Same algorithm, same partition property, same reason — so the test moved
+    rather than being deleted with the code it was written for.
     """
-    passes = _bakes_by_role()["ltx_passes"]
-    assert len(passes) == 2, "the split is written as two passes"
+    passes = _bakes_by_role()["transformer_passes"]
+    assert len(passes) == 3, "the split is written as three passes"
 
     def group_of(running, size, total, n_passes):
         return min(int((running + size / 2) * n_passes / total) if total else 0,
@@ -393,30 +423,84 @@ def test_the_text_encoder_passes_cover_every_file_exactly_once():
 
     GB = 1024 ** 3
     layouts = {
-        "four equal shards": [(f"text_encoder/m-{i}.safetensors", 2 * GB)
+        "four equal shards": [(f"transformer/m-{i}.safetensors", 2 * GB)
                               for i in range(4)],
-        "one unsharded file": [("text_encoder/model.safetensors", 9 * GB)],
-        "uneven shards + config": [("text_encoder/config.json", 1000),
-                                   ("text_encoder/m-1.safetensors", 4 * GB),
-                                   ("text_encoder/m-2.safetensors", 4 * GB),
-                                   ("text_encoder/m-3.safetensors", 1 * GB)],
+        "one unsharded file": [("transformer/model.safetensors", 9 * GB)],
+        "uneven shards + config": [("transformer/config.json", 1000),
+                                   ("transformer/m-1.safetensors", 4 * GB),
+                                   ("transformer/m-2.safetensors", 4 * GB),
+                                   ("transformer/m-3.safetensors", 1 * GB)],
     }
     for label, files in layouts.items():
         files = sorted(files)
         total = sum(size for _, size in files)
         assigned, running = {}, 0
         for name, size in files:
-            assigned.setdefault(group_of(running, size, total, 2), []).append(name)
+            assigned.setdefault(group_of(running, size, total, 3), []).append(name)
             running += size
         flat = [n for names in assigned.values() for n in names]
         assert sorted(flat) == sorted(n for n, _ in files), label
-        assert len(flat) == len(set(flat)), f"{label}: a file is in both passes"
+        assert len(flat) == len(set(flat)), f"{label}: a file is in two passes"
 
 
-def test_the_last_text_encoder_pass_refuses_an_incomplete_component():
-    """A split download that lands half an encoder must fail the BUILD, not
-    a paid job. Only the final pass can know the component is whole."""
-    first, last = _bakes_by_role()["ltx_passes"]
-    assert "text_encoder incomplete after all passes" in last
-    assert "TEXT ENCODER COMPLETE" in last
-    assert "incomplete after all passes" not in first
+def test_the_last_transformer_pass_refuses_an_incomplete_component():
+    """A split download that lands part of a transformer must fail the BUILD,
+    not a paid job. Only the final pass can know the component is whole.
+
+    RETARGETED 2026-08-31 with the test above: the text encoder left the image
+    and the transformer took its place as the split component. The check is
+    guarded by `PASS == PASSES - 1` rather than living in a distinct last
+    block, because the three passes share one body — so this asserts the GUARD
+    exists, which is the thing that makes only the final pass verify."""
+    passes = _bakes_by_role()["transformer_passes"]
+    for block in passes:
+        assert "transformer incomplete after all passes" in block
+        assert "TRANSFORMER COMPLETE" in block
+        # The guard is what stops pass 0 declaring a two-thirds download whole.
+        assert "if PASS == PASSES - 1:" in block
+
+
+def test_a_bake_block_only_verifies_what_it_downloads():
+    """MEASURED THE EXPENSIVE WAY, run 33464498069: the first LTX block still
+    weighed DEST/transformer on disk after the transformer had moved into its
+    own split passes, so the build refused itself with "downloaded transformer
+    is 0 bytes".
+
+    A block that verifies a component it does not fetch fails for a reason
+    that has nothing to do with the component. This checks the invariant
+    directly: every component the first block walks on disk must be one
+    FIRST_PASS actually downloads."""
+    import re
+
+    from validation.image_size import _first_strings
+
+    block = _bakes_by_role()["ltx"]
+    first_pass = set(_first_strings(block, "FIRST_PASS", "(", ")"))
+    assert first_pass, "FIRST_PASS is not parseable"
+
+    walked = set(re.findall(r'os\.path\.join\(DEST,\s*"([a-z_]+)"\)', block))
+    # A loop over FIRST_PASS itself is fine — it cannot name a component the
+    # pass does not fetch.
+    stray = walked - first_pass
+    assert not stray, (
+        f"the first LTX bake verifies {sorted(stray)} on disk but FIRST_PASS "
+        f"only downloads {sorted(first_pass)}"
+    )
+
+
+def test_the_on_disk_size_guard_lives_where_the_weights_land():
+    """The metadata guard in survey() refuses an oversized model before a byte
+    moves. The ON-DISK guard is the second half of that pair — a registry that
+    under-reported a size could otherwise smuggle a bigger model past both —
+    and it has to sit in the pass that actually writes the weights."""
+    passes = _bakes_by_role()["transformer_passes"]
+    for block in passes:
+        assert "SIZE_GUARD_BYTES" in block
+        assert "outside the" in block
+    # And it is guarded to the final pass, like the completeness check: an
+    # earlier pass holds only part of the weights and would refuse a model
+    # that is fine.
+    for block in passes:
+        guarded = block.split("if PASS == PASSES - 1:", 1)
+        assert len(guarded) == 2
+        assert "SIZE_GUARD_BYTES" in guarded[1]

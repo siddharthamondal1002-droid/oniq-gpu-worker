@@ -72,6 +72,13 @@ COPY storage.py /app/storage.py
 COPY cudaenv.py /app/cudaenv.py
 COPY modelroot.py /app/modelroot.py
 COPY modelhydrate.py /app/modelhydrate.py
+# weights_r2 is how a cache-resident checkpoint reaches a worker WITHOUT a
+# HuggingFace token: modelhydrate imports it, so it must ship or the worker
+# dies on import at start-up. The checkpoint is gated (see the NO CREDENTIAL
+# refusal below), the build's token deliberately does not survive into this
+# image, and the RunPod template carries only the three R2 variables — so
+# the bytes come from the bucket the worker already writes its output to.
+COPY weights_r2.py /app/weights_r2.py
 COPY preview.py /app/preview.py
 COPY videogen.py /app/videogen.py
 # ltxcaps derives the inference profile from the BAKED checkpoint. videogen
@@ -160,13 +167,23 @@ def auth_refused(exc):
 # walked past the absent head and landed somewhere unrecorded. Guarding a
 # fall-through is weaker than not having one, so there is nothing to fall
 # through to and every failure below is terminal.
+# OWNER DIRECTIVE 2026-08-31 — the 13B distilled 0.9.7 checkpoint.
+#
+# This moved because of a MEASUREMENT, not a preference. Run 33426496040
+# found that the vae at Lightricks/LTX-Video@8984fa25 is a different network
+# from the one the pinned spatial upsampler was trained beside — four stages
+# against five, no timestep-conditioned decoder — so multi-scale could not be
+# enabled without silently refining latents the upsampler had never seen.
+# Run 33432424021 then measured every Lightricks candidate against the
+# upsampler's own vae config; this one PAIRS, and the owner chose it over the
+# 2B-class 0.9.5 that also pairs.
 CANDIDATES = [
-    ("Lightricks/LTX-Video", ""),
+    ("Lightricks/LTX-Video-0.9.7-distilled", ""),
 ]
 # THE PIN. A repository name names a moving branch; a sha names bytes —
 # and it also fixes the LICENCE TERMS, because the terms at a commit
 # cannot change after the fact. The build refuses any other revision.
-PINNED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
+PINNED_REVISION = "057509edea1493cae5e62e9d8f780ebda3fb4333"
 
 # THE LTX LICENCE GATE — owner directive 2026-08-28.
 #
@@ -186,7 +203,19 @@ PINNED_REVISION = "8984fa25007f376c1a299016d0957a37a2f797bb"
 # prevents, and it is why LICENSE*/NOTICE* joined allow_patterns.
 ALLOWED_LICENCES = {"other"}
 DEST = "/app/models/ltx"
-SIZE_GUARD_BYTES = 16 * 1024**3
+# RAISED FROM 16 GiB TO 32 GiB — owner directive 2026-08-31, taken knowingly
+# alongside the checkpoint choice above.
+#
+# The old value was a 2B-CLASS guard: it existed so a 13B checkpoint could not
+# enter the image by accident. The owner has now chosen one on purpose, and
+# 0.9.7-distilled's transformer measures 24.29 GiB, so the guard had to move
+# or the build would refuse the very model it was told to bake.
+#
+# It is RAISED, NOT REMOVED, and the new value is still a real refusal: the
+# same registry read measured Lightricks/LTX-2-Pre-Trained at 70.75 GiB of
+# transformer, which this still rejects. A guard that admits everything is
+# not a guard.
+SIZE_GUARD_BYTES = 32 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 # WHICH COMPONENTS THIS RUN DOWNLOADS. The survey above still checks that
 # EVERY component in COMPONENTS exists before a byte moves; this narrower
@@ -199,7 +228,13 @@ COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 # worker was observed doing for over three hours, re-downloading layers it
 # had already completed. Splitting the text encoder into its own passes
 # caps the worst-case restart at roughly a third of that.
-FIRST_PASS = ("transformer", "vae", "tokenizer", "scheduler")
+# THE TRANSFORMER IS NO LONGER HERE. At 8984fa25 it was 7.17 GiB and rode
+# along with the small components; 0.9.7-distilled's is 24.29 GiB, which would
+# make this single no-resume layer ~27 GiB — worse than the 16.05 GiB layer
+# that was measured re-downloading itself for over three hours. It now goes
+# through its own three-way split below, the same midpoint mechanism the text
+# encoder already uses, capping the worst-case restart at roughly 8 GiB.
+FIRST_PASS = ("vae", "tokenizer", "scheduler")
 
 # The credential arrives on a tmpfs for the duration of this RUN only, via
 # BuildKit's secret mount. Read here, passed explicitly to the two calls
@@ -244,7 +279,8 @@ def survey(api, repo):
     )
     if transformer_bytes > SIZE_GUARD_BYTES:
         raise RuntimeError(
-            f"transformer {transformer_bytes} metadata bytes exceed the 2B-class guard"
+            f"transformer {transformer_bytes} metadata bytes exceed the "
+            f"{SIZE_GUARD_BYTES} guard"
         )
 
     # The commit this build will pin to. A repository name names a moving
@@ -324,13 +360,24 @@ for repo, tag in CANDIDATES:
                 f"components {sorted(declared - accepted)} are not loadable "
                 "by LTXImageToVideoPipeline"
             )
-        on_disk = 0
-        for root, _, files in os.walk(os.path.join(DEST, "transformer")):
-            for name in files:
-                if name.endswith(".safetensors"):
-                    on_disk += os.path.getsize(os.path.join(root, name))
-        if not 0 < on_disk <= SIZE_GUARD_BYTES:
-            raise RuntimeError(f"downloaded transformer is {on_disk} bytes")
+        # A BLOCK VERIFIES WHAT IT DOWNLOADED, AND ONLY THAT.
+        #
+        # This used to weigh DEST/transformer, which was right while the
+        # transformer rode in FIRST_PASS. It no longer does — it goes through
+        # the three-way split below — so the check found 0 bytes and refused
+        # the build (run 33464498069). The metadata guard in survey() is the
+        # one that refuses an oversized model BEFORE anything downloads, and
+        # it still runs; the on-disk guard moved to the final transformer
+        # pass, where the bytes actually are.
+        first_pass_bytes = 0
+        for component in FIRST_PASS:
+            for root, _, files in os.walk(os.path.join(DEST, component)):
+                for name in files:
+                    first_pass_bytes += os.path.getsize(os.path.join(root, name))
+        if first_pass_bytes <= 0:
+            raise RuntimeError(
+                f"first pass downloaded nothing for {list(FIRST_PASS)}"
+            )
 
         # The terms must travel WITH the weights. An image that
         # redistributes someone's model without their licence text beside
@@ -351,7 +398,9 @@ for repo, tag in CANDIDATES:
         resolved = repo + tag
         resolved_revision = revision
         resolved_licence = licence
-        print(f"BAKED {resolved} at {revision} ({on_disk} transformer bytes on disk)")
+        print(f"BAKED {resolved} at {revision} "
+              f"({first_pass_bytes} bytes for {list(FIRST_PASS)}; the "
+              f"transformer follows in its own passes)")
         break
     except Exception as exc:
         # There is nothing to fall through to — the list has one member by
@@ -377,7 +426,7 @@ with open("/app/models/MODEL_ID", "w") as fh:
 # rather than that being knowable only from a build log that scrolls away.
 with open("/app/models/LTX_REVISION", "w") as fh:
     fh.write(resolved_revision + "\n")
-# The BARE repo id, for the text-encoder passes below. MODEL_ID carries
+# The BARE repo id, for the transformer passes below. MODEL_ID carries
 # repo+tag and is what the worker reports; this is what the hub is asked
 # for, and keeping them separate stops a display string from becoming a
 # download argument.
@@ -394,14 +443,17 @@ shutil.rmtree("/root/.cache/huggingface", ignore_errors=True)
 shutil.rmtree("/home/oniq/.cache/huggingface", ignore_errors=True)
 EOF
 
-# THE TEXT ENCODER, IN TWO LAYERS. Same repository, same pinned revision,
-# same token — split only so no single layer is large enough to be
-# un-pullable. Each pass lists the component's files from metadata, splits
-# them by cumulative size, and downloads its own half; snapshot_download
-# skips what is already on disk, so the passes compose rather than
-# duplicate. A repository whose encoder is one unsharded file puts it all
-# in pass 0 and leaves pass 1 empty — still correct, just unsplit.
-RUN --mount=type=secret,id=hf_token LTX_PASS=0 python3 - <<'EOF'
+# THE TRANSFORMER, IN THREE LAYERS. Identical mechanism to the text encoder
+# below — list the component's shards from metadata, split them by cumulative
+# size on each file's MIDPOINT, download this pass's share — and here for the
+# same reason: a container layer is one download stream with NO RESUME, so a
+# worker that loses the stream restarts the whole layer. 0.9.7-distilled's
+# transformer is 24.29 GiB; in one layer that is the failure mode this image
+# has already paid for once, and in three it is roughly 8 GiB.
+#
+# A repository whose transformer is one unsharded file puts it all in pass 0
+# and leaves the others empty — still correct, just unsplit.
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=0 python3 - <<'EOF'
 import os
 
 from huggingface_hub import HfApi, snapshot_download
@@ -411,8 +463,12 @@ if os.path.exists("/run/secrets/hf_token"):
     with open("/run/secrets/hf_token") as fh:
         TOKEN = fh.read().strip() or None
 DEST = "/app/models/ltx"
-PASSES = 2
-PASS = int(os.environ["LTX_PASS"])
+PREFIX = "transformer/"
+PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
+PASS = int(os.environ["LTX_TX_PASS"])
 
 with open("/app/models/LTX_REPO") as fh:
     repo = fh.read().strip()
@@ -424,93 +480,252 @@ if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
     raise SystemExit(f"registry answered for a different repository than {repo}")
 files = sorted(
     (s.rfilename, s.size or 0) for s in info.siblings
-    if s.rfilename.startswith("text_encoder/")
+    if s.rfilename.startswith(PREFIX)
 )
 if not files:
-    raise SystemExit("the pinned revision carries no text_encoder files")
+    raise SystemExit("the pinned revision carries no transformer files")
 total = sum(size for _, size in files)
 mine, running = [], 0
 for name, size in files:
     # The file's MIDPOINT decides its group, not its start: a large shard
-    # beginning just before the halfway mark would otherwise land wholly in
-    # the first pass and rebuild the imbalance this split exists to remove.
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
     group = min(int((running + size / 2) * PASSES / total) if total else 0,
                 PASSES - 1)
     if group == PASS:
         mine.append(name)
     running += size
-print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
 if not mine:
-    print("nothing for this pass — the encoder is not sharded this finely")
+    print("nothing for this pass — the transformer is not sharded this finely")
 else:
-    snapshot_download(repo, revision=revision, token=TOKEN,
-                      local_dir=DEST, allow_patterns=mine)
-import shutil
-shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
-for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
-             "/home/oniq/.cache/huggingface"):
-    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
-EOF
-
-RUN --mount=type=secret,id=hf_token LTX_PASS=1 python3 - <<'EOF'
-import os
-
-from huggingface_hub import HfApi, snapshot_download
-
-TOKEN = None
-if os.path.exists("/run/secrets/hf_token"):
-    with open("/run/secrets/hf_token") as fh:
-        TOKEN = fh.read().strip() or None
-DEST = "/app/models/ltx"
-PASSES = 2
-PASS = int(os.environ["LTX_PASS"])
-
-with open("/app/models/LTX_REPO") as fh:
-    repo = fh.read().strip()
-with open("/app/models/LTX_REVISION") as fh:
-    revision = fh.read().strip()
-
-info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
-if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
-    raise SystemExit(f"registry answered for a different repository than {repo}")
-files = sorted(
-    (s.rfilename, s.size or 0) for s in info.siblings
-    if s.rfilename.startswith("text_encoder/")
-)
-if not files:
-    raise SystemExit("the pinned revision carries no text_encoder files")
-total = sum(size for _, size in files)
-mine, running = [], 0
-for name, size in files:
-    # The file's MIDPOINT decides its group, not its start: a large shard
-    # beginning just before the halfway mark would otherwise land wholly in
-    # the first pass and rebuild the imbalance this split exists to remove.
-    group = min(int((running + size / 2) * PASSES / total) if total else 0,
-                PASSES - 1)
-    if group == PASS:
-        mine.append(name)
-    running += size
-print(f"TEXT ENCODER PASS {PASS}: {len(mine)} of {len(files)} file(s)")
-if mine:
     snapshot_download(repo, revision=revision, token=TOKEN,
                       local_dir=DEST, allow_patterns=mine)
 
 # THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
-# silently landed half an encoder would fail at job time on a rented card,
-# which is the class of failure this whole bake exists to prevent.
-missing = [name for name, _ in files
-           if not os.path.exists(os.path.join(DEST, name))]
-if missing:
-    raise SystemExit(f"text_encoder incomplete after all passes: {missing[:5]}")
-landed = sum(os.path.getsize(os.path.join(DEST, name)) for name, _ in files)
-print(f"TEXT ENCODER COMPLETE: {len(files)} file(s), {landed} bytes")
-
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
 import shutil
 shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
 for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
              "/home/oniq/.cache/huggingface"):
     shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
 EOF
+
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=1 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PREFIX = "transformer/"
+PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
+PASS = int(os.environ["LTX_TX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith(PREFIX)
+)
+if not files:
+    raise SystemExit("the pinned revision carries no transformer files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
+if not mine:
+    print("nothing for this pass — the transformer is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+
+# THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+RUN --mount=type=secret,id=hf_token LTX_TX_PASS=2 python3 - <<'EOF'
+import os
+
+from huggingface_hub import HfApi, snapshot_download
+
+TOKEN = None
+if os.path.exists("/run/secrets/hf_token"):
+    with open("/run/secrets/hf_token") as fh:
+        TOKEN = fh.read().strip() or None
+DEST = "/app/models/ltx"
+PREFIX = "transformer/"
+PASSES = 3
+# The same ceiling the first block's survey() applies from metadata, repeated
+# here because this is a separate process and this is where the bytes land.
+SIZE_GUARD_BYTES = 32 * 1024**3
+PASS = int(os.environ["LTX_TX_PASS"])
+
+with open("/app/models/LTX_REPO") as fh:
+    repo = fh.read().strip()
+with open("/app/models/LTX_REVISION") as fh:
+    revision = fh.read().strip()
+
+info = HfApi().model_info(repo, revision=revision, files_metadata=True, token=TOKEN)
+if (getattr(info, "id", None) or getattr(info, "modelId", None)) != repo:
+    raise SystemExit(f"registry answered for a different repository than {repo}")
+files = sorted(
+    (s.rfilename, s.size or 0) for s in info.siblings
+    if s.rfilename.startswith(PREFIX)
+)
+if not files:
+    raise SystemExit("the pinned revision carries no transformer files")
+total = sum(size for _, size in files)
+mine, running = [], 0
+for name, size in files:
+    # The file's MIDPOINT decides its group, not its start: a large shard
+    # beginning just before a boundary would otherwise land wholly in the
+    # earlier pass and rebuild the imbalance this split exists to remove.
+    group = min(int((running + size / 2) * PASSES / total) if total else 0,
+                PASSES - 1)
+    if group == PASS:
+        mine.append(name)
+    running += size
+print(f"TRANSFORMER PASS {PASS}: {len(mine)} of {len(files)} file(s), "
+      f"{sum(s for n, s in files if n in set(mine))} bytes")
+if not mine:
+    print("nothing for this pass — the transformer is not sharded this finely")
+else:
+    snapshot_download(repo, revision=revision, token=TOKEN,
+                      local_dir=DEST, allow_patterns=mine)
+
+# THE COMPONENT MUST BE WHOLE AFTER THE LAST PASS. A split download that
+# silently landed two thirds of a transformer would fail at job time on a
+# rented card, which is the class of failure this whole bake exists to
+# prevent. Only the FINAL pass can know the component is complete.
+if PASS == PASSES - 1:
+    missing = [name for name, _ in files
+               if not os.path.exists(os.path.join(DEST, name))]
+    if missing:
+        raise SystemExit(
+            f"transformer incomplete after all passes: {missing[:5]}")
+    landed = sum(os.path.getsize(os.path.join(DEST, name))
+                 for name, _ in files)
+    # THE ON-DISK SIZE GUARD, moved here from the first bake block when the
+    # transformer moved into these passes. survey() already refused an
+    # oversized model from METADATA before any byte moved; this is the same
+    # ceiling applied to what actually landed, so a registry that under-reports
+    # a size cannot smuggle a bigger model past both.
+    weights = sum(os.path.getsize(os.path.join(DEST, name))
+                  for name, _ in files if name.endswith(".safetensors"))
+    if not 0 < weights <= SIZE_GUARD_BYTES:
+        raise SystemExit(
+            f"transformer weighs {weights} bytes on disk, outside the "
+            f"{SIZE_GUARD_BYTES} guard")
+    print(f"TRANSFORMER COMPLETE: {len(files)} file(s), {landed} bytes "
+          f"({weights} in weights)")
+import shutil
+shutil.rmtree(os.path.join(DEST, ".cache"), ignore_errors=True)
+for home in ("~/.cache/huggingface", "/root/.cache/huggingface",
+             "/home/oniq/.cache/huggingface"):
+    shutil.rmtree(os.path.expanduser(home), ignore_errors=True)
+EOF
+
+# THE TEXT ENCODER IS NOT IN THIS IMAGE — owner directive 2026-08-31.
+#
+# It used to be baked here in two layers. Moving the checkpoint to
+# LTX-Video-0.9.7-distilled, so its vae matches the pinned spatial upsampler,
+# put the media image at 57.97 GiB, and a hosted runner cannot build that:
+# run 33434875038 measured 33.76 GiB after reclaim, and the last SUCCESSFUL
+# publish (33327318610) finished a 40.10 GiB image with 5.73 GiB to spare.
+#
+# The text encoder is the single largest component the image can do without —
+# 17.74 GiB, measured in run 33436186203 as 19,049,290,370 bytes over
+# text_encoder/*. Taking it out brings the image to ~40.2 GiB, which is the
+# size that already builds. The owner chose this over paying for a larger
+# build runner or giving up the 13B checkpoint.
+#
+# IT NOW LIVES ON THE NETWORK VOLUME as modelroot.VOLUME_RESIDENT
+# ["LTX_TEXT_ENCODER"], hydrated once by the model_hydrate op and loaded by
+# videogen through modelroot.resolve. That is a REAL CHANGE IN FAILURE MODE
+# and it is deliberate: ltx/story/piper fall back to the baked copy when the
+# volume is absent, and this one has no baked copy to fall back to. A clip
+# that cannot find its text encoder REFUSES and names the reason. It must
+# never quietly run with an untrained embedding, which is what a silent
+# fallback would produce.
+#
+# The survey above still requires text_encoder to EXIST in the repository
+# before a byte moves — the pipeline is incomplete without it. What changed is
+# only where the bytes are fetched to.
+
 
 # ---------------------------------------------------------------------------
 # THE SPATIAL LATENT UPSCALER — OFF BY DEFAULT, AND OFF MEANS ABSENT.
@@ -609,21 +824,86 @@ if getattr(info, "sha", None) != REVISION:
         f"pinned to {REVISION} — refusing to bake different bytes"
     )
 
+# WHICH FILES ARE THE COMPONENT? Two repository shapes ship this model and
+# the difference is load-bearing.
+#
+#   BARE COMPONENT  config.json at the root, weights beside it.
+#   PIPELINE        model_index.json at the root, the component in a
+#                   subfolder, and a vae alongside it.
+#
+# MEASURED 2026-08-31 against the registry. a-r-r-o-w/LTX-0.9.8-Latent-Upsampler
+# is the first shape and ships NO licence of any kind, so this bake refuses it.
+# Lightricks/ltxv-spatial-upscaler-0.9.7 is the second, ships
+# LTX-Video-Open-Weights-License-0.X.txt, and its latent_upsampler component is
+# 505,009,832 bytes — byte-identical to the third party's, so they are the same
+# weights and only one of them carries terms ONIQ can accept. Reading both
+# shapes is exactly what lets the licence-clean copy be the one baked.
+names = {f.rfilename: (f.size or 0) for f in info.siblings}
+subdirs = sorted({p.split("/", 1)[0] for p in names if "/" in p})
+config_rel = next(
+    (c for c in ["config.json"] + [f"{d}/config.json" for d in subdirs
+                                   if "upsampl" in d.lower() or "upscal" in d.lower()]
+     if c in names),
+    None,
+)
+if not config_rel:
+    raise SystemExit(
+        f"{REPO} at {REVISION} carries no upsampler config.json (root files "
+        f"{sorted(p for p in names if '/' not in p)}, subfolders {subdirs})"
+    )
+PREFIX = config_rel.rsplit("/", 1)[0] + "/" if "/" in config_rel else ""
+
+# THE GUARD IS ON THE COMPONENT, NOT THE REPOSITORY. A pipeline repo carries a
+# vae as well; counting its bytes against a component guard would refuse a
+# repository that is entirely correct.
 weights = sum(
-    (f.size or 0) for f in info.siblings
-    if f.rfilename.endswith((".safetensors", ".bin"))
+    size for path, size in names.items()
+    if path.startswith(PREFIX) and path.endswith((".safetensors", ".bin"))
 )
 if not 0 < weights <= SIZE_GUARD_BYTES:
     raise SystemExit(
-        f"{REPO} carries {weights} weight bytes; the upscaler guard is "
-        f"{SIZE_GUARD_BYTES}. That is not a spatial latent upsampler."
+        f"{REPO} component {PREFIX or '(root)'} carries {weights} weight "
+        f"bytes; the upscaler guard is {SIZE_GUARD_BYTES}. That is not a "
+        "spatial latent upsampler."
     )
 
+STAGE = DEST + "_src"
 snapshot_download(
-    REPO, revision=REVISION, token=TOKEN, local_dir=DEST,
-    allow_patterns=["*.json", "*.safetensors", "LICENSE*", "NOTICE*",
-                    "*icense*.txt", "*icence*.txt"],
+    REPO, revision=REVISION, token=TOKEN, local_dir=STAGE,
+    allow_patterns=[f"{PREFIX}*.json", f"{PREFIX}*.safetensors",
+                    # The vae CONFIG only — kilobytes, and the thing the
+                    # latent-space gate below compares against. Its weights
+                    # are deliberately not fetched: this image decodes with
+                    # its OWN vae, and a second one would be gigabytes.
+                    "vae/config.json",
+                    "LICENSE*", "NOTICE*", "*icense*.txt", "*icence*.txt"],
 )
+
+# Read before the staging tree is removed; the flatten below only moves files
+# that sit at the root or in the component folder.
+upstream_vae_path = os.path.join(STAGE, "vae", "config.json")
+upstream_vae = None
+if os.path.isfile(upstream_vae_path):
+    with open(upstream_vae_path, encoding="utf-8") as fh:
+        upstream_vae = json.load(fh)
+
+# FLATTEN, so DEST *is* the component. ltxcaps finds the upsampler by scanning
+# UPSCALER_DIRS under the model root and videogen calls
+# LTXLatentUpsamplerModel.from_pretrained(DEST); both expect the config and the
+# weights directly in DEST rather than one level down.
+os.makedirs(DEST, exist_ok=True)
+component_dir = os.path.join(STAGE, PREFIX.rstrip("/")) if PREFIX else STAGE
+for name in os.listdir(component_dir):
+    src = os.path.join(component_dir, name)
+    if os.path.isfile(src):
+        shutil.move(src, os.path.join(DEST, name))
+# The terms travel WITH the weights. In a pipeline repo they sit at the root,
+# so they are moved down beside the component they license.
+for name in os.listdir(STAGE):
+    src = os.path.join(STAGE, name)
+    if os.path.isfile(src):
+        shutil.move(src, os.path.join(DEST, name))
+shutil.rmtree(STAGE, ignore_errors=True)
 
 # THE TERMS MUST TRAVEL WITH THE WEIGHTS — the same compliance check the LTX
 # bake makes, for the same reason: an image that redistributes someone's model
@@ -639,24 +919,35 @@ if not licence_files:
         "redistribute the weights without their terms"
     )
 
-# IT MUST BE THE MODEL THE CODE WILL CONSTRUCT, field by field.
+# IT MUST BE THE MODEL THE CODE WILL CONSTRUCT.
 #
-# A config that merely LOADS under the right class is not enough: a temporal
-# upsampler, a 2-D variant or a different channel width would all construct
-# happily and then produce latents the refine pass cannot use — at job time,
-# on a rented card, which is the class of failure this whole bake exists to
-# prevent.
+# CHECKED ON THE CONSTRUCTED MODEL, NOT ON THE RAW JSON. Measured 2026-08-31:
+# Lightricks' latent_upsampler/config.json declares _class_name and leaves the
+# architecture to LTXLatentUpsamplerModel's own defaults, so asserting raw keys
+# refused a component that is in fact correct. Constructing it and reading the
+# resolved config back is STRICTER rather than looser — it verifies what the
+# model IS once defaults resolve, instead of what someone happened to write in
+# a file.
+#
+# A config that merely LOADS under the right class is still not enough: a
+# temporal upsampler, a 2-D variant or a different channel width would all
+# construct happily and then produce latents the refine pass cannot use — at
+# job time, on a rented card, which is the class of failure this whole bake
+# exists to prevent. Hence the resolved values are asserted too.
 #
 # The expected shape is VERIFIED FROM UPSTREAM (diffusers 0.38.0,
 # pipelines/ltx/modeling_latent_upsampler.py) and cross-checks against the
 # published artifact size: 128/512/4 with dims=3 is 126.25 M parameters, which
-# at fp32 is 505 MB — the size the 0.9.8 upsampler actually ships at, to the
-# megabyte. Two independent facts agreeing is why these are assertions rather
-# than hopes.
+# at fp32 is 505 MB — the size BOTH published copies ship at, to the byte. Two
+# independent facts agreeing is why these are assertions rather than hopes.
 with open(os.path.join(DEST, "config.json")) as fh:
     cfg = json.load(fh)
+if cfg.get("_class_name") != "LTXLatentUpsamplerModel":
+    raise SystemExit(
+        f"{DEST}/config.json declares {cfg.get('_class_name')!r}, not "
+        "LTXLatentUpsamplerModel"
+    )
 EXPECTED = {
-    "_class_name": "LTXLatentUpsamplerModel",
     "dims": 3,
     "in_channels": 128,
     "mid_channels": 512,
@@ -666,14 +957,91 @@ EXPECTED = {
     # is 97 frames. This one must move pixels, not time.
     "temporal_upsample": False,
 }
-wrong = {k: cfg.get(k) for k, v in EXPECTED.items() if cfg.get(k) != v}
+from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
+model = LTXLatentUpsamplerModel.from_config(cfg)  # raises if not loadable
+resolved = {k: getattr(model.config, k, None) for k in EXPECTED}
+wrong = {k: resolved[k] for k, v in EXPECTED.items() if resolved[k] != v}
 if wrong:
     raise SystemExit(
-        f"{DEST}/config.json is not the 0.9.8 spatial upsampler: {wrong} "
-        f"(expected {EXPECTED})"
+        f"{DEST} constructs to {wrong}, which is not the spatial upsampler "
+        f"this pipeline needs (expected {EXPECTED})"
     )
-from diffusers.pipelines.ltx.modeling_latent_upsampler import LTXLatentUpsamplerModel
-LTXLatentUpsamplerModel.from_config(cfg)  # raises if the config is not loadable
+print(f"UPSCALER CONFIG resolved {resolved} from {config_rel}")
+
+# THE UPSAMPLER'S LATENT SPACE MUST BE THE ONE THIS IMAGE BAKES.
+#
+# MEASURED 2026-08-31, run 33426496040, and this gate exists because the
+# measurement came back wrong. LTXLatentUpsamplePipeline takes (vae,
+# latent_upsampler) and normalises with self.vae.latents_mean/latents_std —
+# ONIQ'S OWN baked vae, never the one the upsampler shipped beside. So an
+# upsampler trained in a DIFFERENT vae's latent space would load, construct,
+# pass every check above, and then refine latents it was never trained on:
+# a silent quality failure on a rented card, visible only by watching the
+# output.
+#
+# The two configs measured, side by side:
+#
+#   field                    baked LTX-Video@8984fa25   upscaler 0.9.7
+#   block_out_channels       [128, 256, 512, 512]       [128, 256, 512, 1024, …5]
+#   layers_per_block         [4, 3, 3, 3, …5]           [4, 6, 6, 2, …5]
+#   spatio_temporal_scaling  [T, T, T, F]               [T, T, T, T]
+#   down_block_types         absent                     LTXVideo095DownBlock3D ×4
+#   timestep_conditioning    absent                     True
+#   decoder_* (4 fields)     absent                     present
+#
+# Different encoders. latents_mean, latents_std and latent_channels DO agree,
+# so the normalisation constants match — but the network producing those 128
+# channels is not the same network, and matching per-channel statistics is not
+# a shared latent space.
+#
+# WHAT IS COMPARED, and what deliberately is not. Encoder shape and latent
+# normalisation decide what the upsampler receives. decoder_* fields do not:
+# this image decodes with its own vae whatever happens, so a decoder
+# difference changes the picture, not the compatibility. spatial/temporal
+# compression ratios are DERIVED from the fields below, so including them
+# would only add noise — newer configs write them out, older ones do not.
+LATENT_SPACE = (
+    "latent_channels", "latents_mean", "latents_std", "in_channels",
+    "block_out_channels", "layers_per_block", "spatio_temporal_scaling",
+    "down_block_types", "patch_size", "patch_size_t",
+)
+baked_vae_path = "/app/models/ltx/vae/config.json"
+if upstream_vae is None:
+    raise SystemExit(
+        f"{REPO} at {REVISION} ships no vae/config.json, so the latent space "
+        "the upsampler was trained in CANNOT be compared against the one this "
+        "image bakes. That is unverified, not verified — refusing rather than "
+        "enabling multi-scale on faith."
+    )
+with open(baked_vae_path, encoding="utf-8") as fh:
+    baked_vae = json.load(fh)
+# The identity the LTX bake recorded, read rather than re-declared: this RUN
+# is a separate Python process and PINNED_REPO/PINNED_REVISION are not in it.
+with open("/app/models/LTX_REPO", encoding="utf-8") as fh:
+    baked_repo = fh.read().strip()
+with open("/app/models/LTX_REVISION", encoding="utf-8") as fh:
+    baked_revision = fh.read().strip()
+latent_delta = {
+    k: (baked_vae.get(k), upstream_vae.get(k))
+    for k in LATENT_SPACE if baked_vae.get(k) != upstream_vae.get(k)
+}
+if latent_delta:
+    lines = "\n".join(
+        f"    {k}\n      baked    {b!r:.120}\n      upscaler {u!r:.120}"
+        for k, (b, u) in sorted(latent_delta.items())
+    )
+    raise SystemExit(
+        f"LATENT SPACE MISMATCH — refusing to bake {REPO} at {REVISION}.\n"
+        f"The upsampler was trained beside a vae that differs from the one "
+        f"this image bakes ({baked_repo} at {baked_revision}) on "
+        f"{len(latent_delta)} field(s):\n{lines}\n"
+        "  Fix the PAIRING, never this check: bake the checkpoint whose vae "
+        "matches the upsampler, or pin an upsampler trained for this vae. "
+        "Clearing ltx-upscaler.pin disables multi-scale and leaves the "
+        "single-scale path running unchanged."
+    )
+print(f"LATENT SPACE VERIFIED — the baked vae and {REPO}'s agree on "
+      f"all of {list(LATENT_SPACE)}")
 
 on_disk = sum(
     os.path.getsize(os.path.join(r, n))
@@ -845,6 +1213,23 @@ for name in ("en-us-ryan-high.onnx", "en-us-ryan-high.onnx.json"):
         raise SystemExit(f"voice tarball lacked {name}")
 print("BAKED piper voice en-us-ryan-high")
 EOF
+
+# THE CONTAINER-DISK CACHE, created here and OWNED BY THE RUNTIME USER.
+#
+# OWNER DECISION 2026-09-01, option B. The 17.74 GiB text encoder is fetched
+# to /app/cache on a cold worker rather than living on a network volume,
+# because attaching a volume permanently narrows the endpoint's `locations`
+# from ALL to that volume's single datacenter — and detaching does NOT widen
+# it back. See modelroot.CACHE_ROOT for the whole finding.
+#
+# CREATED AT BUILD TIME, DELIBERATELY. Every stage builds as root and runs as
+# uid 10001, so a directory made on demand by the worker would be created
+# under a root-owned /app and fail with EACCES — inside a job already being
+# paid for, forty minutes into a cold start. That exact failure killed the
+# first model probe when the hub tried to make its cache under a root-owned
+# parent; this is the same mistake, and it is cheaper to prevent here than
+# to diagnose on a rented card.
+RUN mkdir -p /app/cache && chown -R 10001:10001 /app/cache
 
 USER oniq:oniq
 

@@ -113,7 +113,7 @@ def state(model_id: str) -> str:
         # Files with no marker: an interrupted fetch. Not CORRUPT — nothing
         # promised them — but not usable either.
         return MISSING if not manifest(path) else DOWNLOADING
-    spec = modelroot.EXPERIMENTAL[model_id]
+    spec = modelroot.spec_for(model_id)
     if marker.get("revision") != spec["revision"]:
         return CORRUPT
     if modelroot.verify(path, marker):
@@ -162,12 +162,19 @@ def _release_lock(path: str) -> None:
 
 def hydrate(model_id: str, downloader=None, token=None) -> dict:
     """Fetch one experimental model onto the volume. Idempotent."""
-    spec = modelroot.EXPERIMENTAL.get(model_id)
+    spec = modelroot.spec_for(model_id)
     if spec is None:
         raise HydrationRefused(
-            CORRUPT, f"{model_id!r} is not a known experimental model"
+            CORRUPT,
+            f"{model_id!r} is not a known volume-resident model; known ids "
+            "are " + ", ".join(modelroot.known_ids()),
         )
-    if not modelroot.volume_mounted():
+    # ONLY VOLUME MODELS NEED A VOLUME. A cache-resident model hydrates onto
+    # the worker's own container disk, which is always present — requiring a
+    # mount for it would refuse the very fetch that makes a cold worker
+    # usable under the 2026-09-01 no-volume decision.
+    if (modelroot.storage_class(model_id) == "volume"
+            and not modelroot.volume_mounted()):
         raise HydrationRefused(
             MISSING,
             f"{modelroot.VOLUME_ROOT} is not mounted; there is nowhere to "
@@ -187,8 +194,19 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
             "bytes": marker.get("bytes"),
         }
 
-    need = spec["download_gib"] + DISK_HEADROOM_GIB
-    free = _free_gib(modelroot.oniq_root())
+    # A CACHE FETCH LANDS TWICE: weights_r2 downloads a tar and then
+    # extracts it beside itself, so the peak is two full copies. The volume
+    # path streams files straight from the hub and peaks at one. Checking
+    # for one copy on a path that needs two is the shape of guard this
+    # repository has spent a day removing — it passes and then the write
+    # fails halfway, inside a job already being paid for.
+    copies = 2 if modelroot.storage_class(model_id) == "cache" else 1
+    need = spec["download_gib"] * copies + DISK_HEADROOM_GIB
+    # THE ROOT THIS MODEL ACTUALLY LANDS ON. Checking the volume's free
+    # space before a fetch that goes to container disk would measure the
+    # wrong filesystem — and on an endpoint with no volume it would measure
+    # a path that does not exist.
+    free = _free_gib(modelroot.root_for(model_id))
     if free < need:
         raise HydrationRefused(
             DISK_INSUFFICIENT,
@@ -201,17 +219,62 @@ def hydrate(model_id: str, downloader=None, token=None) -> dict:
     _take_lock(path)
     started = time.monotonic()
     try:
-        if downloader is None:  # pragma: no cover - network path
+        if downloader is not None:
+            # An explicit downloader is the caller's decision and is used as
+            # given — that is what the tests inject, and second-guessing it
+            # here would make the tested path different from the real one.
+            downloader(
+                spec["repo"],
+                revision=spec["revision"],
+                local_dir=path,
+                allow_patterns=spec["allow"],
+                token=token or os.environ.get("HF_TOKEN") or None,
+            )
+        elif modelroot.storage_class(model_id) == "cache":
+            # THE WORKER HAS NO HUGGINGFACE TOKEN, and this checkpoint is
+            # GATED — the Dockerfile refuses to build without one and says
+            # so. The build's token arrives on a BuildKit tmpfs and a
+            # publish proof asserts it does NOT survive into the image, so
+            # an anonymous fetch here would 401 inside a billed worker
+            # after a ~40 GiB image pull.
+            #
+            # OWNER DECISION 2026-09-01, option B: the bytes come from R2,
+            # which the worker already has credentials for because it
+            # writes every output through them. No new credential reaches a
+            # rented machine. Fails closed — see weights_r2 for why there
+            # is deliberately no HuggingFace fallback.
+            import storage
+            import weights_r2
+
+            work = os.path.join(path, ".staging")
+            os.makedirs(work, exist_ok=True)
+            try:
+                weights_r2.fetch(spec, path, work, storage.download)
+            except weights_r2.WeightsUnavailable as refusal:
+                # TRANSLATED, not re-raised as-is. Every caller of hydrate
+                # handles HydrationRefused; a second exception type reaching
+                # them would escape as an unhandled error and lose the
+                # named diagnosis that is the whole point of these codes.
+                raise HydrationRefused(
+                    refusal.code, refusal.detail
+                ) from refusal
+            finally:
+                # The archive is unpacked INTO `path`, so the staging
+                # directory sits inside the tree the manifest is about to
+                # walk. Removing it here — before manifest() runs — is what
+                # keeps a download artefact out of the record of what the
+                # checkpoint contains.
+                shutil.rmtree(work, ignore_errors=True)
+        else:  # pragma: no cover - network path
             from huggingface_hub import snapshot_download
 
-            downloader = snapshot_download
-        downloader(
-            spec["repo"],
-            revision=spec["revision"],
-            local_dir=path,
-            allow_patterns=spec["allow"],
-            token=token or os.environ.get("HF_TOKEN") or None,
-        )
+            snapshot_download(
+                spec["repo"],
+                revision=spec["revision"],
+                local_dir=path,
+                allow_patterns=spec["allow"],
+                token=token or os.environ.get("HF_TOKEN") or None,
+            )
         elapsed_ms = int((time.monotonic() - started) * 1000)
 
         files = manifest(path)

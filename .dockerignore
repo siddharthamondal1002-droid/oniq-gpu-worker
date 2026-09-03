@@ -16,6 +16,9 @@
 !cudaenv.py
 !modelroot.py
 !modelhydrate.py
+# How a cache-resident checkpoint reaches a worker with no HuggingFace
+# token: modelhydrate imports it, so denying it here fails the build.
+!weights_r2.py
 !preview.py
 !videogen.py
 !ltxcaps.py

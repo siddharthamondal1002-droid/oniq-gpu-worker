@@ -3,7 +3,11 @@
 MEASURED 2026-08-30. The attach sent networkVolumeId alone, on a
 one-field-per-PATCH principle that is right for most endpoint writes and
 wrong for this one. A network volume is datacenter-scoped: an endpoint
-holding a volume in US-MO-2 can only run in US-MO-2. With the volume set
+holding a volume in one datacenter can only run in that datacenter. That
+was measured against US-MO-2, which RunPod has since removed — taking the
+account's only volume with it and leaving the endpoint's networkVolumeId
+empty. The fixture below therefore uses a LIVE id; the lesson is about the
+pinning, not about that datacenter. With the volume set
 and no dataCenterIds key at all, the endpoint reported
 
     jobs    {inQueue: 1}
@@ -23,7 +27,12 @@ from validation import volume_setup as vs
 
 ENDPOINT = "9gh6qbou1in8yb"
 VOLUME = "j2e7do8hcl"
-DC = "US-MO-2"
+# A datacenter the endpoint schema actually accepts. It was US-MO-2 until
+# 2026-09-01, when that id stopped existing; apply() now refuses an id the
+# endpoint could never place a worker in, so the fixture has to name a real
+# one. Any member of KNOWN_DATACENTERS would do — the tests are about the
+# pinning behaviour, not this id.
+DC = "US-KS-2"
 
 
 class FakeClient:
@@ -119,36 +128,125 @@ def test_the_datacenter_comes_from_the_volume_not_the_caller():
     assert client.attached == [(ENDPOINT, VOLUME, "US-KS-2")]
 
 
-def test_an_endpoint_that_did_not_take_the_pin_is_refused():
-    """Success on the volume alone is exactly the state that hung."""
+def test_an_endpoint_that_never_reports_the_pin_is_not_refused_for_it():
+    """THE 2026-09-01 CORRECTION, and the reason it is a correction.
+
+    This used to refuse `datacenter-not-pinned` whenever the endpoint
+    document came back without dataCenterIds. Measured that day on BOTH
+    REST routes with validation/endpoint_read.py: the endpoint document
+    has no dataCenterIds key AT ALL — not null, absent — while it does
+    carry networkVolumeId and networkVolumeIds. The field is accepted on
+    write and invisible on read, so that refusal could never pass however
+    the endpoint was really pinned. It blocked a correct attach and
+    reported a fault it had not found.
+
+    The shape below is the LIVE one, copied from that read.
+    """
     client = FakeClient(
         volumes=[_volume()],
         endpoint=_endpoint(),
-        after=_endpoint(networkVolumeId=VOLUME),  # no dataCenterIds
+        after=_endpoint(networkVolumeId=VOLUME, networkVolumeIds=[VOLUME]),
     )
+    result = vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
+    assert result["network_volume_id_after"] == VOLUME
+    assert result["network_volume_ids_after"] == [VOLUME]
+    # The datacenter still travels with the volume on the write; it simply
+    # cannot be read back, so it is not asserted against the response.
+    assert client.attached == [(ENDPOINT, VOLUME, DC)]
+
+
+def test_the_risk_the_old_guard_covered_is_still_refused_earlier():
+    """Moving a check must not delete it.
+
+    An endpoint pinned to a datacenter it cannot place a worker in gets no
+    worker at all. That is refused BEFORE anything is created, against the
+    enum the PATCH schema publishes — a check that can actually fail.
+    """
+    client = FakeClient(volumes=[], endpoint=_endpoint())
     with pytest.raises(vs.Refused) as exc:
-        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
-    assert exc.value.code == "datacenter-not-pinned"
+        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, "US-MO-2")
+    assert exc.value.code == "datacenter-unknown"
+    assert client.created_volumes == [], "refused before spending"
 
 
-def test_a_pin_to_the_wrong_datacenter_is_refused():
+def test_an_attach_the_two_volume_fields_disagree_about_is_refused():
+    """THE 2026-09-01 REVERT, in the shape it actually took.
+
+    A PATCH naming only networkVolumeId returned 2xx and read back
+    correct. Thirty minutes later both routes reported the OLD volume, and
+    networkVolumeIds — which that PATCH had never named — still held the
+    old id. The singular field had followed the plural back. Checking the
+    singular alone cannot tell an attachment that persisted from one that
+    is about to be undone.
+    """
     client = FakeClient(
         volumes=[_volume()],
         endpoint=_endpoint(),
-        after=_endpoint(networkVolumeId=VOLUME, dataCenterIds=["EU-RO-1"]),
+        after=_endpoint(networkVolumeId=VOLUME,
+                        networkVolumeIds=["vhxqqd8vhj"]),
     )
     with pytest.raises(vs.Refused) as exc:
         vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
-    assert exc.value.code == "datacenter-not-pinned"
+    assert exc.value.code == "attach-list-disagrees"
+
+
+def test_the_attach_names_both_volume_fields():
+    """The write itself, not just its echo: the list is the field that
+    survives on this account, so it has to be sent."""
+    import inspect
+
+    import runpod_client as rp
+
+    source = inspect.getsource(rp.attach_network_volume)
+    assert '"networkVolumeIds"' in source, (
+        "sending only the singular field is the write that reverted"
+    )
 
 
 def test_a_volume_document_with_no_datacenter_is_refused():
+    """A volume whose document names no datacenter cannot be pinned against.
+
+    Reaching this refusal used to mean blanking the caller's id so the
+    DEFAULT_DATACENTER fallback was exposed. There is no default any more —
+    blanking it now stops earlier, at datacenter-required — so the caller
+    passes a REAL id and the refusal comes from the volume document itself,
+    which is the case this test was always about.
+    """
     client = FakeClient(volumes=[_volume(dataCenterId=None)],
                         endpoint=_endpoint())
-    # DEFAULT_DATACENTER still covers it, so blank BOTH to reach the refusal.
+    with pytest.raises(vs.Refused) as exc:
+        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
+    assert exc.value.code == "volume-datacenter-unknown"
+
+
+def test_a_removed_datacenter_is_refused_before_any_create():
+    """US-MO-2 was this module's default until RunPod removed it. A create
+    against a dead id costs a run to discover; an endpoint pinned to a
+    datacenter it cannot be placed in is worse, and is exactly how this
+    endpoint was stranded."""
+    client = FakeClient(volumes=[], endpoint=_endpoint())
+    with pytest.raises(vs.Refused) as exc:
+        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, "US-MO-2")
+    assert exc.value.code == "datacenter-unknown"
+    assert client.attached == []
+    assert "US-MO-2" not in vs.KNOWN_DATACENTERS
+
+
+def test_the_default_datacenter_is_a_recorded_choice_not_a_guess():
+    """This was None on purpose until the owner named one on 2026-09-01.
+
+    No API says which datacenters sell volumes AND carry the approved cards,
+    so an id picked HERE would have been a guess; one read off the console and
+    recorded is a decision. What the constant must never be is unvalidated —
+    a typo in it pins the endpoint to a datacenter that cannot place a worker,
+    which is the US-MO-2 failure with a different name."""
+    assert vs.DEFAULT_DATACENTER in vs.KNOWN_DATACENTERS
+
+    client = FakeClient(volumes=[], endpoint=_endpoint())
     with pytest.raises(vs.Refused) as exc:
         vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, "")
-    assert exc.value.code == "volume-datacenter-unknown"
+    assert exc.value.code == "datacenter-required"
+    assert client.attached == []
 
 
 def test_a_volume_with_no_id_is_refused_before_anything_is_attached():
@@ -209,3 +307,18 @@ def test_detaching_sends_no_datacenter_so_the_pin_goes_with_the_volume():
     assert "if volume_id and datacenter_id:" in source, (
         "the datacenter must be conditional on there being a volume"
     )
+
+
+def test_a_volume_in_another_datacenter_is_refused_not_attached():
+    """A volume reused BY NAME can sit somewhere else entirely, and attaching
+    it pins the endpoint there — which is how US-MO-2 stranded this endpoint.
+
+    The old code read `volume.get("dataCenterId") or datacenter_id`, so a
+    mismatch was invisible: the caller's own id stood in for the answer. That
+    fallback asserted the very thing that must be verified."""
+    client = FakeClient(volumes=[_volume(dataCenterId="EU-RO-1")],
+                        endpoint=_endpoint())
+    with pytest.raises(vs.Refused) as exc:
+        vs.apply(client, ENDPOINT, vs.DEFAULT_NAME, 50, DC)
+    assert exc.value.code == "volume-datacenter-mismatch"
+    assert client.attached == []

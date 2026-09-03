@@ -90,12 +90,47 @@ def test_spend_job_runs_the_tested_driver():
     assert any("validation.spend_run run" in r for r in runs)
 
 
-def test_gate6_r2_credentials_are_not_github_secrets():
-    for name in ("gpu-validation.yml", "worker-ci.yml"):
-        _, raw = _load(name)
-        assert "R2_ACCESS_KEY_ID" not in raw
-        assert "R2_SECRET_ACCESS_KEY" not in raw
-        assert "R2_S3_ENDPOINT" not in raw
+R2_SECRET_NAMES = ("R2_S3_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+
+
+def test_gate6_r2_credentials_reach_only_a_reviewer_gated_job():
+    """AMENDED 2026-09-01 by owner directive.
+
+    The rule was "R2 credentials are NOT GitHub secrets". It held until the
+    text encoder moved off the network volume — a volume permanently pins
+    an endpoint to one datacenter — and exposed a split this project had
+    built deliberately: CI holds the HuggingFace token and no R2, a worker
+    holds R2 and no HuggingFace token, the checkpoint is GATED, and a
+    standing directive forbids substituting an ungated one. Nothing had
+    both halves, so nothing could stage those weights into the bucket.
+
+    The part worth keeping is not the absence of the strings; it is that
+    NOTHING WHICH RUNS WITHOUT A HUMAN CAN REACH THE BUCKET. So the
+    assertion moved to that shape: any job naming an R2 secret must sit
+    behind the gpu-spend environment, whose required reviewer is the
+    approval click.
+    """
+    doc, _ = _load("gpu-validation.yml")
+    holders = [
+        name for name, job in doc["jobs"].items()
+        if any(secret in yaml.safe_dump(job) for secret in R2_SECRET_NAMES)
+    ]
+    assert holders, "no job references the R2 secrets; the survey is broken"
+    for name in holders:
+        assert doc["jobs"][name].get("environment") == "gpu-spend", (
+            f"job {name} names an R2 secret without requiring the gpu-spend "
+            "environment, so it could reach the bucket with no approval"
+        )
+
+
+def test_gate6_the_push_triggered_workflow_still_holds_no_credential():
+    """worker-ci fires on every commit. It must hold nothing — not the
+    RunPod key, not the R2 credentials, not any secret at all. This is the
+    half of gate 6 that did NOT change on 2026-09-01."""
+    _, raw = _load("worker-ci.yml")
+    for secret in R2_SECRET_NAMES + ("RUNPOD_API_KEY", "HF_TOKEN"):
+        assert secret not in raw, secret
+    assert "secrets." not in raw
 
 
 def test_spend_job_requires_the_gpu_spend_environment():
@@ -168,6 +203,14 @@ def test_dockerfile_copies_exactly_the_shipped_files():
         # modelhydrate puts an experimental checkpoint on the volume. It is
         # what makes a model change a data change.
         "modelhydrate.py",
+        # weights_r2 joined 2026-09-01. The text encoder moved to container
+        # disk (owner option B) because a network volume permanently pins an
+        # endpoint to one datacenter — but the checkpoint is GATED, the
+        # build's HF token deliberately does not survive into the image, and
+        # the template carries only the three R2 variables. So the bytes come
+        # from the bucket the worker already writes its output to, and no new
+        # credential reaches a rented machine.
+        "weights_r2.py",
         # preview joined 2026-08-29: the bucket is private, so the only way
         # to LOOK at what the worker made is for the worker to hand a
         # thumbnail back with the reply.
@@ -272,6 +315,7 @@ def test_dockerignore_denies_by_default():
         "!cudaenv.py",
         "!modelroot.py",
         "!modelhydrate.py",
+        "!weights_r2.py",
         "!preview.py",
         "!ltxcaps.py",
         "!videogen.py",
@@ -381,6 +425,11 @@ def test_the_closure_actually_reaches_the_engines():
         # walk finds it anyway — which is the point: storygen once reached CI
         # missing from both locks and the image died on import at start-up.
         "modelprobe",
+        # weights_r2 joined 2026-09-01, imported by modelhydrate inside the
+        # cache-resident branch. The walk found it there, which is exactly
+        # the behaviour modelprobe's note describes — and it had to, because
+        # every clip goes through the text encoder it fetches.
+        "weights_r2",
         # modelroot joined 2026-08-30 with the owner's directive to move
         # the weights onto a network volume. Every engine reaches its
         # weights through it, so it is the one module whose absence from
@@ -536,6 +585,19 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # Dockerfile names a checkpoint which does not exist. Read-only,
         # and it picks nothing.
         "ltx-discover",
+        # upscaler-discover joined 2026-08-31. The read that fills
+        # ltx-upscaler.pin: it measures both spatial-upsampler candidates the
+        # diffusers docs name against the exact gates the Dockerfile applies,
+        # and chooses neither. Metadata and one config.json, no weights, no
+        # RunPod credential — a $0 read like ltx-discover beside it.
+        "upscaler-discover",
+        # pairing-discover joined 2026-08-31, the read-only MIRROR of the
+        # above: upscaler-discover measured that no published upsampler pairs
+        # with the checkpoint baked today, so this asks the other half —
+        # which CHECKPOINT pairs with the pinned upsampler, and does its
+        # transformer fit the cards the endpoint may use. Same shape: metadata
+        # and config.json, no weights, no RunPod credential, $0.
+        "pairing-discover",
         # frames-pull joined 2026-08-29 (owner directive: judge LTX from
         # frames, not metadata). It READS objects that already exist over
         # the bucket's public base and cuts stills out of them. It holds
@@ -611,6 +673,34 @@ def test_standby_zero_mode_is_gated_and_carries_no_worker_count():
         # is token-gated, and the approved set stays a module constant no
         # dispatch input can reach.
         "endpoint-gpus",
+        # endpoint-locations joined 2026-09-01, after the console's Releases
+        # tab showed what no API surface does: attaching a network volume
+        # narrows `locations` from ALL to that volume's single datacenter,
+        # and DETACHING DOES NOT WIDEN IT BACK. The endpoint is then pinned
+        # for life and dies the day that one datacenter's approved tier runs
+        # dry — which is what the daily endpoint recreation was really
+        # working around. Token-gated, because widening WHERE a worker may
+        # be placed changes which datacenters' prices apply; it changes no
+        # worker count, and the id list is a module constant shared with the
+        # volume path so the two can never disagree.
+        "endpoint-locations",
+        # volume-delete joined 2026-09-01 with the owner's "remove any
+        # unnecessary billing". THE ONLY IRREVERSIBLE MODE in this file:
+        # every other writer is undone by running its opposite, and a
+        # deleted volume is gone with everything on it. So its literal is
+        # the only one that must carry its own target — DELETE-VOLUME:<id>
+        # — because authorizing a deletion in the abstract and taking the id
+        # from elsewhere is how the wrong volume goes. One per run; there is
+        # deliberately no batch shape.
+        "volume-delete",
+        # weights-stage joined 2026-09-01. It publishes ONE cache-resident
+        # checkpoint into R2 so a worker can read weights it has no
+        # HuggingFace token to fetch — the checkpoint is gated, and a
+        # standing directive forbids substituting an ungated one. $0: a
+        # download and an upload, no GPU and no job dispatched. It is the
+        # ONLY job here that holds R2 credentials, and it holds them from
+        # the gpu-spend environment, so the bucket still costs an approval.
+        "weights-stage",
     ]
     assert mode["default"] == "discover"
     standby = doc["jobs"]["standby"]
@@ -824,9 +914,18 @@ def test_the_proofs_all_run_before_the_push():
     steps = _publish_steps()
     names = [s.get("name") or s.get("uses") for s in steps]
     push_at = next(i for i, n in enumerate(names) if n and "Push" in n)
-    for needle in ("The image starts", "uid 10001", "LTX 2B", "credential did NOT"):
+    for needle in ("The image starts", "uid 10001", "credential did NOT"):
         at = next(i for i, n in enumerate(names) if n and needle in n)
         assert at < push_at, needle
+
+    # THE MODEL-IDENTITY PROOF, matched by what it RUNS rather than by its
+    # name. This needle used to be "LTX 2B" and broke the moment the step was
+    # renamed for the 13B checkpoint — a proof's position in the pipeline has
+    # nothing to do with the marketing size in its title, and a test that
+    # conflates the two fails for the wrong reason.
+    proof_at = next(i for i, s in enumerate(steps)
+                    if "baked_assets.py" in (s.get("run") or ""))
+    assert proof_at < push_at, "the baked-asset proof must run before the push"
 
 
 # ------------------------------------------- gate 7: frames, never metadata
@@ -868,14 +967,13 @@ def test_gate7_the_read_base_is_a_variable_and_never_a_secret():
     assert "secrets.R2_PUBLIC_BASE_URL" not in raw, (
         "a public read base carried as a secret invites a presigned URL"
     )
-    # And no R2 WRITE credential ever reaches CI (gate 6, restated here
-    # because this is the change that made CI touch the bucket at all).
-    for forbidden in (
-        "secrets.R2_ACCESS_KEY_ID",
-        "secrets.R2_SECRET_ACCESS_KEY",
-        "secrets.R2_S3_ENDPOINT",
-    ):
-        assert forbidden not in raw
+    # The R2 WRITE credentials used to be absent from CI entirely. Since
+    # the 2026-09-01 amendment exactly one job holds them, from the
+    # gpu-spend environment — asserted by
+    # test_gate6_r2_credentials_reach_only_a_reviewer_gated_job rather than
+    # restated here, so there is one place to change if it ever moves
+    # again. What this test still owns is the READ base: a public value
+    # carried as a secret is how a presigned URL gets invited in.
 
 
 def test_gate7_the_frame_puller_never_submits_a_job():
@@ -997,14 +1095,21 @@ def test_gate9_the_probe_model_input_is_a_closed_choice():
     assert probe["type"] == "choice"
     assert probe["default"] == ""
     # The set is closed over two server-side tables and nothing else: the
-    # benchmark ROWS a model_probe may measure, and the experimental MODEL
-    # IDS a model_hydrate may fetch. Both are constants in this repository,
-    # so a dispatch still cannot name a repository, a revision, a precision
-    # or an offload strategy — it can only pick from what was reviewed.
+    # benchmark ROWS a model_probe may measure, and the MODEL IDS a
+    # model_hydrate or a weights-stage may fetch. Both are constants in
+    # this repository, so a dispatch still cannot name a repository, a
+    # revision, a precision or an offload strategy — it can only pick from
+    # what was reviewed.
+    #
+    # known_ids() rather than EXPERIMENTAL alone since 2026-09-01: it is
+    # EXPERIMENTAL together with CACHE_RESIDENT, and weights-stage offers
+    # the cache-resident ids. Naming one registry here would have let the
+    # other drift out of the closure unnoticed — which is the whole failure
+    # `spec_for` was introduced to end.
     import modelroot
 
     assert set(probe["options"]) == (
-        {""} | set(modelprobe.PROBE_MODELS) | set(modelroot.EXPERIMENTAL)
+        {""} | set(modelprobe.PROBE_MODELS) | set(modelroot.known_ids())
     )
     assert "PROBE_MODEL: ${{ inputs.probe_model }}" in raw
     # Hunyuan is not offerable: its architecture did not resolve without
@@ -1149,9 +1254,15 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
         # all — only HF_TOKEN — and reads a public registry, so it is a $0
         # mode that cannot become a paid one.
         "model-bench",
+        # endpoint-read joined 2026-09-01, after the list route and the
+        # detail route described the SAME endpoint differently and a
+        # production write was about to be founded on whichever one had
+        # been read last. Two GETs and a diff; no write path exists in it.
+        "endpoint-read",
     ]
     for allowed in ("validation.queue_probe", "validation.template_probe",
-                    "validation.volume_probe", "validation.model_bench"):
+                    "validation.volume_probe", "validation.model_bench",
+                    "validation.endpoint_read"):
         assert allowed in raw
 
     # The spend driver and every endpoint mutation are unreachable from here.
@@ -1164,10 +1275,11 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
     # And the modules it DOES name hold no mutating verb themselves.
     import inspect
 
-    from validation import (model_bench, queue_probe, template_probe,
-                            volume_probe)
+    from validation import (endpoint_read, model_bench, queue_probe,
+                            template_probe, volume_probe)
 
-    for module in (model_bench, queue_probe, template_probe, volume_probe):
+    for module in (model_bench, queue_probe, template_probe, volume_probe,
+                   endpoint_read):
         source = inspect.getsource(module)
         for verb in ("attach_template", "attach_network_volume",
                      "create_network_volume", "set_execution_timeout",
@@ -1175,3 +1287,125 @@ def test_the_readonly_workflow_cannot_spend_and_runs_beside_the_paid_one():
                      "set_template_env", "set_workers_min_zero",
                      "set_workers_standby_zero", "purge_queue", "run_sync"):
             assert verb not in source, f"{module.__name__}: {verb}"
+
+
+# --------------------------------------------------------------- merge gate
+
+
+def _every_workflow():
+    """(filename, parsed doc, raw text) for every workflow in the repo."""
+    directory = os.path.join(ROOT, ".github", "workflows")
+    out = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith((".yml", ".yaml")):
+            continue
+        doc, raw = _load(name)
+        out.append((name, doc, raw))
+    return out
+
+
+# `_triggers` is defined once at the top of this file and reused here. An
+# earlier draft redefined it down here, which shadowed the original for the
+# whole module — harmless while the two agreed, and a landmine the moment
+# somebody edited one of them.
+
+# Triggers that fire without a human choosing to. `workflow_call` is here
+# because a reusable workflow can be invoked BY a push-triggered one, which
+# launders the trigger: the callee looks manual and runs automatically.
+AUTOMATIC = ("push", "pull_request", "pull_request_target", "schedule",
+             "repository_dispatch", "workflow_run", "workflow_call", "issues",
+             "issue_comment", "release", "create", "watch")
+
+
+def spend_gate_violations(workflows):
+    """Every way a workflow could rent a GPU without a human dispatching it.
+
+    A PURE FUNCTION over (name, doc, raw) triples, so the rule can be tested
+    against a synthetic offender rather than only against a repository that
+    happens to be clean. A gate that has never been shown to FAIL is a gate
+    nobody knows the shape of.
+    """
+    bad = []
+    for name, doc, raw in workflows:
+        holds_key = "secrets.RUNPOD_API_KEY" in raw
+        fired_by = set(_triggers(doc) or {})
+        automatic = sorted(fired_by.intersection(AUTOMATIC))
+        if holds_key and automatic:
+            bad.append((name, f"holds the RunPod key and fires on {automatic}"))
+        elif holds_key and fired_by != {"workflow_dispatch"}:
+            bad.append((name, f"holds the RunPod key and declares {sorted(fired_by)}"))
+        elif holds_key and not fired_by:
+            bad.append((name, "holds the RunPod key and declares no trigger"))
+    return bad
+
+
+def test_the_spend_gate_actually_bites():
+    """The rule, shown failing. Each case below is a real way this could go
+    wrong during the merge into oniq-sparkle-pay, where workflows that fire
+    on push already exist beside the ones that can spend."""
+    dispatch = {"workflow_dispatch": {}}
+    key = "env:\n  RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}\n"
+
+    # A push trigger added to a key-bearing workflow — the Lovable-sync case.
+    assert spend_gate_violations([("x.yml", {"on": {"push": {}}}, key)])
+    # A key added to a workflow that already fires on push.
+    assert spend_gate_violations(
+        [("ci.yml", {"on": {"push": {}, "workflow_dispatch": {}}}, key)]
+    )
+    # A reusable workflow: looks manual, can be CALLED by a push-triggered one.
+    assert spend_gate_violations([("r.yml", {"on": {"workflow_call": {}}}, key)])
+    # A schedule — nobody chose to spend at 3am.
+    assert spend_gate_violations([("s.yml", {"on": {"schedule": []}}, key)])
+
+    # And the shapes that must stay legal, or the gate is unusable:
+    assert not spend_gate_violations([("ok.yml", {"on": dispatch}, key)])
+    # A push-triggered workflow with no key is exactly worker-ci.yml.
+    assert not spend_gate_violations([("ci.yml", {"on": {"push": {}}}, "no key")])
+
+
+def test_nothing_that_holds_the_runpod_key_can_fire_without_a_human():
+    """THE MERGE-SAFE FORM OF THE SPEND GATE.
+
+    The gate this replaces read: "gpu-validation.yml must remain the ONLY
+    workflow in the repo that references secrets.RUNPOD_API_KEY". That was
+    written when one workflow held the key, and it breaks on contact with
+    a merge — importing this repository into oniq-sparkle-pay would put
+    three key-bearing workflows in one place and the gate would have to be
+    deleted to make room, which is how a control gets lost during a
+    refactor rather than by decision.
+
+    "Only one" was never the property worth protecting. The property is
+    that NOTHING CAN RENT A GPU WITHOUT A HUMAN DISPATCHING IT — that a
+    push, a schedule, or a Lovable sync commit can never reach the key. So
+    that is what is asserted, over however many workflows exist. It is
+    strictly stronger than the old rule: it survives a fourth workflow
+    being added, and it would have caught a push trigger being added to
+    the single workflow the old rule was happy with.
+    """
+    workflows = _every_workflow()
+    # GUARD THE GUARD. A survey that matched nothing would pass this test
+    # while asserting nothing at all — the same failure mode
+    # test_the_closure_actually_reaches_the_engines exists to prevent.
+    holders = [n for n, _, raw in workflows if "secrets.RUNPOD_API_KEY" in raw]
+    assert holders, "no workflow references the RunPod key; the survey is broken"
+
+    assert spend_gate_violations(workflows) == []
+
+
+def test_an_automatically_fired_workflow_holds_no_runpod_key():
+    """The same property from the other side.
+
+    The test above walks key-holders and checks their triggers; this walks
+    automatic workflows and checks they hold no key. Stated once, a new
+    push-triggered workflow that adds the key could be argued into either
+    test's blind spot; stated both ways there is no blind spot to argue
+    into. worker-ci.yml is push-triggered and holds no key, which is what
+    makes CI on every commit safe here.
+    """
+    for name, doc, raw in _every_workflow():
+        if not set(_triggers(doc)).intersection(AUTOMATIC):
+            continue
+        assert "secrets.RUNPOD_API_KEY" not in raw, (
+            f"{name} fires automatically AND references the RunPod key. "
+            "One or the other, never both."
+        )

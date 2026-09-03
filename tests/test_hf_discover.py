@@ -72,11 +72,11 @@ def test_a_named_model_absent_from_the_catalogue_is_reported_as_not_existing(cap
     hf_discover.report(_dockerfile(), SECRET, get)
     out = capsys.readouterr().out
     assert "does not exist" in out
-    assert "Lightricks/LTX-Video" in out
+    assert "Lightricks/LTX-Video-0.9.7-distilled" in out
 
 
 def test_the_named_model_being_present_says_the_404_was_something_else(capsys):
-    named = "Lightricks/LTX-Video"
+    named = "Lightricks/LTX-Video-0.9.7-distilled"
     get = _registry([named], {named: _model()})
     hf_discover.report(_dockerfile(), SECRET, get)
     assert "the 404 was something else" in capsys.readouterr().out
@@ -85,12 +85,16 @@ def test_the_named_model_being_present_says_the_404_was_something_else(capsys):
 def test_an_over_guard_candidate_is_reported_not_hidden(capsys):
     get = _registry(
         ["Lightricks/LTX-Video-0.9.7-distilled"],
-        {"Lightricks/LTX-Video-0.9.7-distilled": _model(transformer=24 * GIB)},
+        # OVER the raised 32 GiB guard. 24 GiB used to be over the old
+        # 16 GiB one; the guard moved with the 0.9.7-distilled repoint, and
+        # the property under test is the REPORTING of an over-guard
+        # candidate, not any particular size.
+        {"Lightricks/LTX-Video-0.9.7-distilled": _model(transformer=40 * GIB)},
     )
     code, rows = hf_discover.report(_dockerfile(), SECRET, get)
     out = capsys.readouterr().out
     assert rows[0]["verdict"] == "OVER-GUARD"
-    assert "24.00 GiB transformer" in out
+    assert "40.00 GiB transformer" in out
     assert code == 1
 
 
@@ -124,7 +128,7 @@ def test_eligible_candidates_are_listed_with_revision_and_licence(capsys):
     get = _registry(
         ["Lightricks/a", "Lightricks/b"],
         {"Lightricks/a": _model(sha="aaa1111", licence="apache-2.0"),
-         "Lightricks/b": _model(transformer=24 * GIB)},
+         "Lightricks/b": _model(transformer=40 * GIB)},
     )
     code, _ = hf_discover.report(_dockerfile(), SECRET, get)
     out = capsys.readouterr().out
@@ -168,4 +172,4 @@ def test_the_gates_are_the_dockerfiles_own():
 
     bake = image_size.parse_bakes(_dockerfile())[0]
     assert bake["guard_prefix"] == "transformer/"
-    assert bake["size_guard_bytes"] == 16 * GIB
+    assert bake["size_guard_bytes"] == 32 * GIB

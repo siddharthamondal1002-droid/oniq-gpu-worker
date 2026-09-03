@@ -55,11 +55,32 @@ API = "https://huggingface.co/api/models/{repo}?blobs=true"
 # only reason a build of this size is even arguable.
 RUNNER_TOTAL_BYTES = 76887154688
 RUNNER_FREE_BYTES = 14773895168
-# What the reclaim step frees, NOT MEASURED as a total — the workflow
-# prints df after it so a real number replaces this the first time a build
-# gets that far. Deliberately conservative: overstating it would let this
-# module bless a build that then dies at 90%.
-RECLAIMABLE_BYTES = 20 * 1024**3
+# What the reclaim step frees. This used to be a deliberately conservative
+# 20 GiB placeholder, with a note saying a real number should replace it once
+# a build got far enough to print one. Several have, so here it is.
+#
+# DERIVED FROM MEASUREMENT, and stated as a LOWER BOUND rather than a total —
+# the arithmetic can only under-state it, which keeps the error on the safe
+# side. From run 33327318610, the last successful publish:
+#
+#     total on /            76,887,154,688      (71.61 GiB)
+#     used when it finished 70,713,978,880      (65.86 GiB)
+#     the image it built    43,053,207,454      (40.10 GiB)
+#
+# A build only ADDS, so everything used at the end that is not the image was
+# already there after the reclaim: 27,660,771,426 bytes. Free after reclaim is
+# therefore AT LEAST 76,887,154,688 - 27,660,771,426 = 49,226,383,262 bytes
+# (45.85 GiB), and the reclaim freed at least 34,452,488,094 (32.09 GiB) over
+# the 14,773,895,168 the runner starts with.
+#
+# WHY THIS MATTERS RIGHT NOW: with 20 GiB the module answered DOES NOT FIT for
+# a 40.23 GiB image — while a 40.10 GiB image had demonstrably just been built
+# and pushed on this exact runner. A conservative placeholder is fine until it
+# starts contradicting a measurement; then it is simply wrong.
+#
+# It is still a lower bound, not the printed df figure, so it cannot bless a
+# build that would die at 90%: the real reclaim is larger than this.
+RECLAIMABLE_BYTES = 34_452_488_094
 RUNNER_USABLE_BYTES = RUNNER_FREE_BYTES + RECLAIMABLE_BYTES
 
 
@@ -186,6 +207,42 @@ def _guard_prefix(block: str) -> str:
     return match.group(1) if match else ""
 
 
+def _split_prefixes(text: str, dest: str) -> list:
+    """Components this DEST downloads in SEPARATE layers, not in its main bake.
+
+    MEASURED 2026-08-31, run 33434036705: the projection reported the LTX bake
+    at 2.32 GiB and said the image FITS, for a pipeline the registry measures
+    at 44.36 GiB. `_block` isolates ONE block per DEST, so every component
+    moved out of it into a split pass became invisible — the text encoder had
+    already been invisible this way since the 2026-08-30 split, and moving the
+    24.29 GiB transformer out too made the under-count larger than the thing
+    being counted.
+
+    An under-count here is not a harmless inaccuracy: this projection is what
+    decides whether to start a build that takes a hosted runner the best part
+    of an hour, so reading FITS off a number missing 42 GiB is exactly the
+    forty wasted minutes the check exists to prevent.
+
+    The passes declare what they fetch as `PREFIX = "<component>/"`, so they
+    are read rather than assumed.
+    """
+    prefixes = []
+    for match in re.finditer(rf'DEST = "{re.escape(dest)}"', text):
+        end = text.find("\nEOF", match.start())
+        block = text[match.start(): end if end != -1 else len(text)]
+        # TWO FORMS, because the two splits are written differently: the
+        # transformer passes name a PREFIX constant, the text-encoder passes
+        # (2026-08-30, written first) inline the component in a startswith.
+        # Reading only the first form left the text encoder — the larger of
+        # the two at ~17 GiB — still invisible.
+        found = re.search(r'^PREFIX\s*=\s*["\']([^"\']+)["\']', block, re.M)
+        if found:
+            prefixes.append(found.group(1))
+        for hit in re.finditer(r'startswith\(["\']([^"\']+/)["\']\)', block):
+            prefixes.append(hit.group(1))
+    return sorted(set(prefixes))
+
+
 def parse_bakes(text: str) -> list:
     """Every model bake in the Dockerfile, in build order."""
     bakes = []
@@ -197,11 +254,18 @@ def parse_bakes(text: str) -> list:
         components = []
         if re.search(r"^COMPONENTS\s*=\s*\(", block, re.M):
             components = _first_strings(block, "COMPONENTS", "(", ")")
+        # The main block's patterns PLUS whatever the split passes fetch into
+        # the same DEST; see _split_prefixes for what omitting them cost.
+        patterns = _patterns(block)
+        for prefix in _split_prefixes(text, dest):
+            pattern = prefix + "*"
+            if pattern not in patterns:
+                patterns.append(pattern)
         bakes.append(
             {
                 "dest": dest,
                 "candidates": _first_strings(block, "CANDIDATES", "[", "]"),
-                "patterns": _patterns(block),
+                "patterns": patterns,
                 "needed_files": _needed_files(block),
                 "components": components,
                 "guard_prefix": _guard_prefix(block),

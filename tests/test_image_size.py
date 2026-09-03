@@ -24,7 +24,7 @@ CANDIDATES = [
     ("Vendor/ltx", ""),
 ]
 DEST = "/app/models/ltx"
-SIZE_GUARD_BYTES = 16 * 1024**3
+SIZE_GUARD_BYTES = 32 * 1024**3
 COMPONENTS = ("transformer", "vae", "text_encoder", "tokenizer", "scheduler")
 if "model_index.json" not in paths:
     raise RuntimeError("no model_index.json")
@@ -144,11 +144,16 @@ def test_only_files_matching_the_patterns_are_counted():
 
 
 def test_a_candidate_over_its_guard_is_skipped_and_never_sized():
-    """The second regression, measured in run 50: the 13B repository was
+    """The second regression, measured in run 50: an over-guard repository was
     sized at 44 GiB and the image declared not to fit, when the build
-    would have refused that candidate outright."""
+    would have refused that candidate outright.
+
+    The size here is 40 GiB rather than the original 26: a 13B is what ONIQ
+    now deliberately bakes, so the guard moved 16 -> 32 GiB with it. What is
+    under test is that an over-guard candidate is SKIPPED rather than sized,
+    whatever the guard happens to be."""
     bake = isz.parse_bakes(DOCKERFILE)[LTX]
-    out = isz.survey("r", bake, lambda _: _ltx(26))
+    out = isz.survey("r", bake, lambda _: _ltx(40))
     assert out["verdict"] == "SKIP"
     assert out["bytes"] is None
     assert "guard" in out["detail"]
@@ -209,7 +214,10 @@ def test_an_unreachable_first_candidate_falls_through_to_a_passing_one(capsys):
         if repo == "Vendor/ltx-2b":
             raise urllib.error.HTTPError("u", 429, "Too Many", {}, None)
         if repo == "Vendor/ltx-13b":
-            return _ltx(26)
+            # Over the raised 32 GiB guard, so the fall-through still has
+            # something to fall through past. 26 GiB was over the OLD guard;
+            # a 13B is now what ONIQ bakes on purpose.
+            return _ltx(40)
         return _ltx(4)
 
     code, rows = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
@@ -350,7 +358,10 @@ def test_a_404_still_falls_through_because_that_is_a_judgement(capsys):
         if repo == "Vendor/ltx-2b":
             raise urllib.error.HTTPError("u", 404, "Not Found", {}, None)
         if repo == "Vendor/ltx-13b":
-            return _ltx(26)
+            # Over the raised 32 GiB guard, so the fall-through still has
+            # something to fall through past. 26 GiB was over the OLD guard;
+            # a 13B is now what ONIQ bakes on purpose.
+            return _ltx(40)
         return _ltx(4)
 
     code, rows = isz.report(DOCKERFILE, base_image_bytes=GIB, fetch=fetch, head=lambda u: 1)
@@ -365,3 +376,86 @@ def test_the_dockerfile_bakes_refuse_an_auth_error_in_both_blocks():
     assert text.count("def auth_refused(exc):") == 2
     assert text.count("AUTH REFUSED for") == 2
     assert text.count("status in (401, 403)") == 2
+
+
+def test_components_moved_into_split_passes_are_still_counted():
+    """MEASURED 2026-08-31, run 33434036705: the projection reported the LTX
+    bake at 2.32 GiB and printed "VERDICT: FITS" for a pipeline the registry
+    measures at 44.36 GiB.
+
+    `_block` isolates ONE block per DEST, so any component moved out of the
+    main bake into a split layer stopped being counted. The text encoder had
+    been invisible this way since the 2026-08-30 split; moving the 24.29 GiB
+    transformer out on 2026-08-31 made the omission larger than the number
+    being reported.
+
+    This is not a harmless inaccuracy. This projection is what decides whether
+    to start a build that takes a hosted runner the best part of an hour, and
+    a FITS read off a number missing 42 GiB is exactly the wasted forty
+    minutes it exists to prevent."""
+    bake = isz.parse_bakes(DOCKERFILE)[LTX]
+    counted = {p for p in bake["patterns"] if p.endswith("/*")}
+    # Every component the bake declares must be reachable by some pattern, no
+    # matter which layer fetches it.
+    for component in bake["components"]:
+        assert f"{component}/*" in counted, (component, sorted(counted))
+
+
+def test_both_ways_a_split_pass_names_its_component_are_read():
+    """A split pass can name its component two ways — a PREFIX constant, or an
+    inline startswith. Reading only one form is what left the text encoder
+    uncounted and produced a FITS verdict on an image 42 GiB larger than
+    reported.
+
+    Checked against a FIXTURE, not against the live Dockerfile. It was written
+    against the Dockerfile and broke within the hour when the text-encoder
+    passes were removed — a parser capability should not be tested by which
+    forms a particular file happens to use today."""
+    fixture = '''
+CANDIDATES = ["a/b"]
+DEST = "/app/models/thing"
+allow_patterns=["model_index.json"]
+EOF
+DEST = "/app/models/thing"
+PREFIX = "transformer/"
+EOF
+DEST = "/app/models/thing"
+files = [s for s in sibs if s.rfilename.startswith("text_encoder/")]
+EOF
+'''
+    prefixes = isz._split_prefixes(fixture, "/app/models/thing")
+    assert prefixes == ["text_encoder/", "transformer/"]
+
+    # And the live Dockerfile's own split really is picked up.
+    text = open("Dockerfile", encoding="utf-8").read()
+    assert "transformer/" in isz._split_prefixes(text, "/app/models/ltx")
+
+
+def test_the_reclaim_figure_does_not_contradict_a_real_build():
+    """A conservative placeholder is fine until it starts contradicting a
+    measurement; then it is simply wrong.
+
+    With RECLAIMABLE_BYTES at its old 20 GiB placeholder this module answered
+    DOES NOT FIT for a 40.23 GiB image — while a 40.10 GiB image had
+    demonstrably just been built and pushed on this exact runner (run
+    33327318610). The figure is now derived from that run's own end state, and
+    it must stay large enough to admit the image that provably fits."""
+    PROVEN_BUILT_BYTES = 43_053_207_454  # measured, run 33327318610
+    assert isz.RUNNER_USABLE_BYTES > PROVEN_BUILT_BYTES
+
+    # And it stays a LOWER bound, never the whole disk: a figure that admitted
+    # everything could bless a build that dies at 90%.
+    assert isz.RUNNER_USABLE_BYTES < isz.RUNNER_TOTAL_BYTES
+
+
+def test_the_image_without_the_text_encoder_fits_the_runner():
+    """The whole point of moving it. 40.23 GiB against a reclaim floor of
+    45.85 GiB — measured in run 33437051402 after the move."""
+    # THE REAL Dockerfile, not this module's DOCKERFILE fixture — the claim
+    # is about what ONIQ actually ships, and a synthetic string cannot make it.
+    real = open("Dockerfile", encoding="utf-8").read()
+    bake = isz.parse_bakes(real)[LTX]
+    assert "text_encoder/*" not in bake["patterns"]
+    # Every OTHER component the pipeline needs is still fetched by the image.
+    for component in ("transformer", "vae", "tokenizer", "scheduler"):
+        assert f"{component}/*" in bake["patterns"]
