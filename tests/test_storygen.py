@@ -272,7 +272,8 @@ def test_chatgpt_request_posts_expected_payload(monkeypatch):
     text, model = storygen._openai_story("write a story", 321, urlopen=fake_urlopen)
     assert seen["url"] == "https://api.openai.com/v1/chat/completions"
     assert seen["timeout"] == storygen.OPENAI_TIMEOUT_SECONDS
-    assert seen["auth"] == "******"
+    assert seen["auth"].startswith("Bearer ")
+    assert seen["auth"].endswith("test-key")
     assert b'"max_tokens": 321' in seen["body"]
     assert text == "hello"
     assert model == "gpt-test"
