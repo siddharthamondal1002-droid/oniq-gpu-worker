@@ -24,7 +24,9 @@ from __future__ import annotations
 # because it appears in source."
 import cudaenv  # noqa: F401  (imported for its import-time effect)
 
+import os
 import shutil
+import sys
 import tempfile
 import time
 
@@ -73,6 +75,105 @@ def _error(code: str, message: str) -> dict:
     return contract.filter_output(
         {"ok": False, "code": code, "error": message}
     )
+
+
+# Every module this image ships sits beside handler.py under /app, and
+# nothing installed from PyPI does. That is what lets `_own_refusal`
+# recognise ONIQ's own exceptions WITHOUT a list to forget to extend —
+# and forgetting to extend one is exactly what happened: six shipped
+# refusal classes were added after the except-chain below was written and
+# not one of them was added to it.
+_OWN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# A refusal's detail travels into an error body and a log on the caller's
+# side. ONIQ's own messages are short by construction; the bound is here
+# so that stays true of one written later.
+MAX_REFUSAL_DETAIL = 400
+
+# A path is the whole diagnosis of an OSError and is not free-form text,
+# but it is still unbounded, so it is bounded here.
+MAX_REFUSAL_PATH = 200
+
+
+def _is_own_exception(exc: BaseException) -> bool:
+    """Was this class defined in THIS worker, rather than a dependency?"""
+    module = sys.modules.get(type(exc).__module__)
+    path = getattr(module, "__file__", None)
+    if not path:
+        return False
+    return os.path.dirname(os.path.abspath(path)) == _OWN_DIR
+
+
+def _code_for(exc: BaseException) -> str:
+    """CheckpointInconsistent -> checkpoint-inconsistent.
+
+    Only for a refusal that carries no code of its own. Deriving it from
+    the class name means a new one is reportable the day it is written,
+    rather than on the day somebody remembers to name it here.
+    """
+    name = type(exc).__name__
+    out = []
+    for index, char in enumerate(name):
+        if char.isupper() and index:
+            out.append("-")
+        out.append(char.lower())
+    return "".join(out)
+
+
+def _own_refusal(exc: BaseException):
+    """(code, detail) if ONIQ raised this, else None.
+
+    THE MESSAGE IS OURS, SO IT MAY TRAVEL. The rule the except-chain below
+    protects is that text from a DEPENDENCY never reaches the caller,
+    because nobody here wrote it and it could carry anything. A refusal
+    this repository raises is the opposite: the message is the diagnosis,
+    written here, and `storage.StorageError` has returned its own since
+    the beginning — so this extends an existing precedent rather than
+    relaxing a rule.
+
+    Every message of the six classes that reach this path was read before
+    it was widened (2026-09-12): they carry object keys, paths, byte
+    counts, digests and revisions. The two that embed a caught exception
+    wrap `storage.StorageError`, whose own docstring promises it "never
+    carries key material".
+
+    Three shapes exist and all three are read, because a refusal that
+    reports `None: None` is no better than the class name it replaced:
+    `.code`/`.message` (ContractError, StorageError, GpuUnavailable,
+    ConcatRefused), `.code`/`.detail` (WeightsUnavailable,
+    ModelUnavailable), `.state`/`.detail` (HydrationRefused). A bare one
+    such as CheckpointInconsistent falls back to its class name and
+    `str(exc)`.
+    """
+    if not _is_own_exception(exc):
+        return None
+    code = getattr(exc, "code", None) or getattr(exc, "state", None) or _code_for(exc)
+    detail = getattr(exc, "message", None) or getattr(exc, "detail", None) or str(exc)
+    return str(code)[:80], str(detail)[:MAX_REFUSAL_DETAIL]
+
+
+def _foreign_detail(exc: BaseException) -> str:
+    """What may be said about an exception ONIQ did not write.
+
+    The class name, as before — its message is a dependency's text and
+    could carry anything.
+
+    OSError IS THE ONE EXCEPTION, and it is a measured one. `errno` and
+    `filename` are STRUCTURED fields the operating system sets, not
+    free-form text, and the path is the entire diagnosis: on 2026-09-12
+    the first still of job a7b9c3b9 came back `PermissionError` with
+    nothing else, and which directory could not be written was
+    unknowable from outside the container.
+    """
+    name = type(exc).__name__
+    if not isinstance(exc, OSError):
+        return name
+    parts = [name]
+    if exc.errno is not None:
+        parts.append(f"errno={exc.errno}")
+    if exc.filename:
+        parts.append(f"path={str(exc.filename)[:MAX_REFUSAL_PATH]}")
+    return " ".join(parts)
 
 
 def handle(event) -> dict:
@@ -204,9 +305,34 @@ def handle(event) -> dict:
     except videogen.ConcatRefused as exc:
         return _error(exc.code, exc.message)
     except Exception as exc:
-        # Never echo arbitrary exception text to the caller: the class
-        # name is diagnostic enough and cannot carry a credential.
-        return _error("unexpected-exception", type(exc).__name__)
+        # ONIQ'S OWN REFUSALS CARRY THEIR MESSAGE; NOTHING ELSE DOES.
+        #
+        # The clauses above name six refusal classes. Six MORE are shipped
+        # and named nowhere — CheckpointInconsistent, WeightsUnavailable,
+        # ModelUnavailable, HydrationRefused, ReferenceUnsupported and
+        # OutOfMemory — so every one of them arrived here and was reduced
+        # to its class name. Two of those classes say in their own
+        # docstring that "`code` is the whole diagnosis", and the code was
+        # the thing being dropped.
+        #
+        # It cost a day. `ltxcaps.CheckpointInconsistent` is raised with
+        # five DISTINCT messages — a missing directory, an unreadable
+        # model_index.json, a non-LTX pipeline, contradictory distillation
+        # evidence, and missing components — and on 2026-09-12 job
+        # a7b9c3b9 reported the bare word `CheckpointInconsistent` three
+        # times. Which of the five had happened was not knowable from
+        # outside the container, and is not in the worker's log either:
+        # the only print here is the cleanup line.
+        #
+        # A DIAGNOSTIC MAY NOT FALL BACK TO THE THING IT WAS BUILT TO
+        # EXPLAIN. The same shape has now cost this project three
+        # investigations: Firebase's `auth/internal-error` hiding
+        # `customData.serverResponse`, `vertexPost` reporting `http 404`
+        # instead of Google's sentence, and this.
+        own = _own_refusal(exc)
+        if own is not None:
+            return _error(own[0], own[1])
+        return _error("unexpected-exception", _foreign_detail(exc))
     finally:
         cleanup_result = Cleanup(workdir).run()
         if not cleanup_result["ok"]:

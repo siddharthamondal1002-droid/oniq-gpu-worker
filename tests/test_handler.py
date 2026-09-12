@@ -318,3 +318,200 @@ def test_a_probe_downloads_its_reference_before_it_fetches_any_weights(monkeypat
     }})
     assert result["ok"] is False
     assert [name for name, _ in called] == ["download"]
+
+
+# ---------------------------------------------------------------------------
+# ONIQ's own refusals must carry their message (2026-09-12)
+#
+# On 2026-09-12 the first still of Story job a7b9c3b9 came back three times
+# as `engine job FAILED: CheckpointInconsistent` — a bare class name with
+# five possible causes behind it, none of them recoverable from outside the
+# container or from the worker's log. These tests pin the two halves of the
+# fix: ONIQ's own refusals say what happened, and a dependency's exception
+# still says only its class.
+# ---------------------------------------------------------------------------
+
+import ltxcaps
+import modelhydrate
+import modelroot
+import storygen
+import weights_r2
+
+
+def test_checkpoint_inconsistent_reports_which_of_its_five_causes(wired, monkeypatch):
+    """The failure that cost 2026-09-12. `ltxcaps` raises this with five
+    distinct messages; before the fix all five read `CheckpointInconsistent`."""
+    def boom(key, dest, max_bytes=None):
+        raise ltxcaps.CheckpointInconsistent(
+            "distillation evidence disagrees: "
+            "{'name_says_distilled': True, 'scheduler_says_distilled': False}"
+            " — refusing to choose a sampler profile"
+        )
+
+    monkeypatch.setattr(storage, "download", boom)
+    result = handler.handle(GOOD_EVENT)
+
+    assert result["ok"] is False
+    assert result["code"] == "checkpoint-inconsistent"
+    assert "distillation evidence disagrees" in result["error"]
+    assert result["error"] != "CheckpointInconsistent"
+
+
+@pytest.mark.parametrize("exc,code,needle", [
+    (ltxcaps.CheckpointInconsistent("model_index.json missing or unreadable"),
+     "checkpoint-inconsistent", "model_index.json"),
+    (weights_r2.WeightsUnavailable("not-staged", "could not read the manifest"),
+     "not-staged", "manifest"),
+    (modelroot.ModelUnavailable("MODEL_UNKNOWN", "'x' is not a known model"),
+     "MODEL_UNKNOWN", "not a known model"),
+    (modelhydrate.HydrationRefused("DISK_INSUFFICIENT", "37.82 GiB free, need 39.48"),
+     "DISK_INSUFFICIENT", "37.82 GiB free"),
+    (videogen.ReferenceUnsupported("the reference could not be honoured"),
+     "reference-unsupported", "could not be honoured"),
+    (videogen.OutOfMemory("the canvas did not fit"),
+     "out-of-memory", "did not fit"),
+])
+def test_every_shipped_refusal_class_reports_its_own_diagnosis(exc, code, needle):
+    """All six were shipped, none was named in the except-chain, and every
+    one of them therefore arrived as its class name alone. Two of these
+    classes say in their own docstring that "`code` is the whole diagnosis"
+    — and the code was exactly what was being dropped."""
+    own = handler._own_refusal(exc)
+    assert own is not None, f"{type(exc).__name__} is not recognised as ONIQ's own"
+    assert own[0] == code
+    assert needle in own[1]
+
+
+def test_a_dependency_exception_still_says_only_its_class():
+    """THE RULE THAT IS NOT BEING RELAXED. Text from a module nobody here
+    wrote never reaches the caller, because it could carry anything."""
+    leaky = ValueError("Bearer sk-live-0000000000 leaked from a dependency")
+    assert handler._own_refusal(leaky) is None
+    assert handler._foreign_detail(leaky) == "ValueError"
+    assert "sk-live" not in handler._foreign_detail(leaky)
+
+
+def test_a_dependency_exception_reaches_the_caller_unchanged(wired, monkeypatch):
+    def boom(key, dest, max_bytes=None):
+        raise ValueError("Bearer sk-live-0000000000 leaked from a dependency")
+
+    monkeypatch.setattr(storage, "download", boom)
+    result = handler.handle(GOOD_EVENT)
+
+    assert result["code"] == "unexpected-exception"
+    assert result["error"] == "ValueError"
+    assert "sk-live" not in result["error"]
+
+
+def test_permission_error_names_the_path_it_could_not_write():
+    """2026-09-12 attempt 1 of that same still was `PermissionError` and
+    nothing else. errno and filename are STRUCTURED fields the OS sets,
+    not a dependency's prose, and the path is the whole diagnosis."""
+    exc = PermissionError(13, "Permission denied")
+    exc.filename = "/app/cache/models/oniq/ltx/LTX-Video-0.9.7-distilled"
+    detail = handler._foreign_detail(exc)
+
+    assert "PermissionError" in detail
+    assert "errno=13" in detail
+    assert "/app/cache/models/oniq/ltx" in detail
+
+
+def test_an_oserror_without_errno_or_path_still_names_its_class():
+    assert handler._foreign_detail(OSError()) == "OSError"
+
+
+def test_the_detail_is_bounded():
+    exc = ltxcaps.CheckpointInconsistent("x" * 5000)
+    code, detail = handler._own_refusal(exc)
+    assert len(detail) == handler.MAX_REFUSAL_DETAIL
+
+
+def test_a_refusal_defined_in_a_test_is_not_mistaken_for_oniqs_own():
+    """`_is_own_exception` keys on the DIRECTORY the class was defined in,
+    so this class — defined in tests/ — must not be recognised. Without
+    that, the guarantee would be 'anything importable', which is every
+    dependency in the image."""
+    class NotOurs(RuntimeError):
+        pass
+
+    assert handler._own_refusal(NotOurs("secret")) is None
+    assert handler._foreign_detail(NotOurs("secret")) == "NotOurs"
+
+
+def test_the_code_is_derived_from_the_class_name():
+    assert handler._code_for(ltxcaps.CheckpointInconsistent("x")) == "checkpoint-inconsistent"
+    assert handler._code_for(videogen.OutOfMemory("x")) == "out-of-memory"
+
+
+def test_every_exception_class_the_worker_ships_is_reportable():
+    """THE GUARANTEE THAT CANNOT DRIFT, and the reason this is not a list.
+
+    Six refusal classes were added after the except-chain was written and
+    not one was added to it. This walks the modules the Dockerfile actually
+    COPYs, finds every exception class defined in them, and requires each to
+    be recognised as ONIQ's own with a non-empty code and detail — so the
+    seventh is covered on the day it is written rather than on the day it
+    costs a job.
+    """
+    import ast
+    import importlib
+
+    shipped = []
+    for line in _source("Dockerfile").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "COPY" and parts[1].endswith(".py"):
+            shipped.append(parts[1])
+    assert "ltxcaps.py" in shipped, "the COPY parser found no ltxcaps — it is wrong"
+
+    checked = []
+    for name in shipped:
+        tree = ast.parse(_source(name))
+        module = importlib.import_module(name[:-3])
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            cls = getattr(module, node.name, None)
+            if not isinstance(cls, type) or not issubclass(cls, BaseException):
+                continue
+            try:
+                instance = cls("a-code", "a detail")
+            except TypeError:
+                instance = cls("a detail")
+            own = handler._own_refusal(instance)
+            assert own is not None, f"{name}:{node.name} is not recognised as ONIQ's own"
+            assert own[0], f"{name}:{node.name} reports an empty code"
+            assert own[1], f"{name}:{node.name} reports an empty detail"
+            checked.append(f"{name}:{node.name}")
+
+    # Measured 2026-09-12: 13 classes across the 14 shipped modules.
+    assert len(checked) >= 13, f"the walk found only {checked}"
+
+
+@pytest.mark.parametrize("exc,code", [
+    (contract.ContractError("invalid-input", "prompt exceeds 1000 characters"),
+     "invalid-input"),
+    (storage.StorageNotConfigured(["R2_BUCKET"]), "storage-not-configured"),
+    (storage.StorageError("r2-read-failed", "the read failed"), "r2-read-failed"),
+    (preprocess.GpuUnavailable("CUDA is not available"), "cuda-unavailable"),
+    (videogen.ConcatRefused("concat-refused", "clips disagree"), "concat-refused"),
+])
+def test_the_codes_the_app_already_reads_are_unchanged(wired, monkeypatch, exc, code):
+    """The six named clauses run BEFORE the new fallback and must keep the
+    exact codes they had. `oniqImage.ts` classifies retryability off this
+    text, so a changed code is a changed retry decision in production —
+    and `StoryModelUnavailable` in particular maps to `local-model-unavailable`,
+    which is NOT what deriving it from the class name would produce."""
+    def boom(key, dest, max_bytes=None):
+        raise exc
+
+    monkeypatch.setattr(storage, "download", boom)
+    assert handler.handle(GOOD_EVENT)["code"] == code
+
+
+def test_story_model_unavailable_keeps_its_hand_written_code():
+    """Deriving from the class name would give `story-model-unavailable`.
+    The clause above the fallback gives `local-model-unavailable`, and that
+    is the one the app has always seen."""
+    exc = storygen.StoryModelUnavailable("no checkpoint")
+    assert handler._code_for(exc) == "story-model-unavailable"
+    assert 'return _error("local-model-unavailable", str(exc))' in _source("handler.py")
