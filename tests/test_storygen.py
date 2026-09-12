@@ -7,6 +7,7 @@ handed back on every path, including the failing ones.
 """
 
 import os
+import urllib.error
 
 import pytest
 
@@ -116,6 +117,23 @@ def test_absent_weights_refuse_and_name_no_provider(monkeypatch, tmp_path):
     assert "no provider" in str(exc.value)
 
 
+def test_story_provider_defaults_to_local(monkeypatch):
+    monkeypatch.delenv("ONIQ_STORY_PROVIDER", raising=False)
+    assert storygen._story_provider() == "local"
+
+
+def test_story_provider_accepts_chatgpt_alias(monkeypatch):
+    monkeypatch.setenv("ONIQ_STORY_PROVIDER", "chatgpt")
+    assert storygen._story_provider() == "openai"
+
+
+def test_story_provider_refuses_unknown_values(monkeypatch):
+    monkeypatch.setenv("ONIQ_STORY_PROVIDER", "anthropic")
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._story_provider()
+    assert exc.value.code == "story-provider-invalid"
+
+
 def test_weights_present_needs_a_config_and_a_shard(tmp_path):
     assert storygen.weights_present(str(tmp_path)) is False
     (tmp_path / "config.json").write_text("{}")
@@ -198,6 +216,96 @@ def test_the_worker_does_not_validate_the_story_itself():
     source = open(os.path.join(os.path.dirname(storygen.__file__), "storygen.py")).read()
     assert "json.loads" not in source
     assert "StoryIr" not in source
+
+
+def test_chatgpt_path_returns_text_without_loading_local_weights(monkeypatch):
+    monkeypatch.setenv("ONIQ_STORY_PROVIDER", "openai")
+    called = []
+    out = storygen.run(
+        _job(),
+        load_model=lambda: called.append("local"),
+        request_story=lambda prompt, max_tokens: ('{"title":"Cloud"}', "gpt-4o-mini"),
+    )
+    assert called == []
+    assert out["model"] == "gpt-4o-mini"
+    assert out["model_load_ms"] == 0
+    assert out["precision"] is None
+    assert out["story_text"] == '{"title":"Cloud"}'
+
+
+def test_chatgpt_path_requires_an_api_key(monkeypatch):
+    monkeypatch.setenv("ONIQ_STORY_PROVIDER", "openai")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story("write a story", 512, urlopen=lambda *a, **k: None)
+    assert exc.value.code == "story-provider-not-configured"
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def read(self):
+        return self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_chatgpt_request_posts_expected_payload(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-test")
+    seen = {}
+
+    def fake_urlopen(req, timeout):
+        seen["url"] = req.full_url
+        seen["timeout"] = timeout
+        seen["auth"] = req.headers["Authorization"]
+        seen["body"] = req.data
+        return _FakeHttpResponse(
+            b'{"model":"gpt-test","choices":[{"message":{"content":"hello"}}]}'
+        )
+
+    text, model = storygen._openai_story("write a story", 321, urlopen=fake_urlopen)
+    assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+    assert seen["timeout"] == storygen.OPENAI_TIMEOUT_SECONDS
+    assert seen["auth"] == "******"
+    assert b'"max_tokens": 321' in seen["body"]
+    assert text == "hello"
+    assert model == "gpt-test"
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (401, "story-provider-unauthorized"),
+        (429, "story-provider-rate-limited"),
+        (500, "story-provider-failed"),
+    ],
+)
+def test_chatgpt_request_maps_http_errors(monkeypatch, code, expected):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def failing(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, code, "no", {}, None)
+
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story("write a story", 321, urlopen=failing)
+    assert exc.value.code == expected
+
+
+def test_chatgpt_request_maps_network_errors(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def failing(req, timeout):
+        raise urllib.error.URLError("offline")
+
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story("write a story", 321, urlopen=failing)
+    assert exc.value.code == "story-provider-unreachable"
 
 
 # --------------------------------------------------------- load precision

@@ -7,6 +7,7 @@ import contract
 import handler
 import preprocess
 import storage
+import storygen
 import videogen
 
 
@@ -143,6 +144,27 @@ def test_storage_not_configured_fails_closed_naming_vars():
     assert result["ok"] is False
     assert result["code"] == "storage-not-configured"
     assert "R2_S3_ENDPOINT" in result["error"]
+
+
+def test_story_generate_does_not_require_storage(monkeypatch):
+    monkeypatch.setattr(storygen, "run", lambda job: {
+        "ok": True,
+        "op": "story_generate",
+        "model": "gpt-4o-mini",
+        "model_load_ms": 0,
+        "precision": None,
+        "inference_ms": 12,
+        "story_text": '{"title":"x"}',
+        "story_chars": 13,
+        "duration_ms": 12,
+    })
+    result = handler.handle({"input": {
+        "op": "story_generate",
+        "params": {"prompt": "write a story", "max_tokens": 512},
+    }})
+    assert result["ok"] is True
+    assert result["op"] == "story_generate"
+    assert result["story_text"] == '{"title":"x"}'
 
 
 def test_r2_read_failure(wired, monkeypatch):

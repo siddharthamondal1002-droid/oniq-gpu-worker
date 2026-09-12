@@ -16,7 +16,7 @@ The worker must never move into `oniq-sparkle-pay`.
 | `preprocess.py`           | the workload; CUDA-only by default via `run_gpu_op`         |
 | `videogen.py`             | `video_generate` (LTX image-to-video), `image_generate` (LTX text-to-video, frame 0), `video_concat` — all CUDA |
 | `audio.py`                | `audio_mux` — in-house narration muxed under a video, CPU   |
-| `storygen.py`             | `story_generate` — ONIQ's own causal LLM, loaded and UNLOADED before LTX |
+| `storygen.py`             | `story_generate` — local Qwen by default, optionally ChatGPT, always isolated from LTX |
 | `storage.py`              | R2 by reference (bucket `oniq-gpu`), fails closed           |
 | `handler.py`              | serverless handler, runtime ceiling, deterministic cleanup  |
 | `modelprobe.py`           | `model_probe` — the open-source video model benchmark, off the production path |
@@ -25,10 +25,10 @@ The worker must never move into `oniq-sparkle-pay`.
 | `validation/admission.py` | financial admission — pure functions, no network            |
 
 `story_generate` (2026-08-27, owner directive: Qwen3-8B conditionally
-approved) runs ONIQ's own causal LLM. The weights are baked behind a
-LICENCE GATE — the build reads the checkpoint's licence from the HF
-metadata and refuses to download anything that is not Apache-2.0, so
-"we believe it is Apache" is something the image cannot be built
+approved) runs ONIQ's own causal LLM by default. The weights are baked
+behind a LICENCE GATE — the build reads the checkpoint's licence from
+the HF metadata and refuses to download anything that is not Apache-2.0,
+so "we believe it is Apache" is something the image cannot be built
 without. At job time the model loads `local_files_only`, and the card is
 handed back in a `finally`: load, generate, DELETE, `empty_cache`. LTX
 peaked at 15.9GB of 24GB, so a story job that left the model resident
@@ -36,6 +36,10 @@ would not fail loudly — it would make the NEXT video job fail
 mysteriously. The worker deliberately does NOT parse or validate the
 story: the Story IR validator lives in the application, where an invalid
 story must stop before any GPU job is planned.
+
+If `ONIQ_STORY_PROVIDER=openai` is set, `story_generate` calls ChatGPT
+instead of the local checkpoint. That path requires `OPENAI_API_KEY`,
+accepts optional `OPENAI_MODEL`, and leaves the job contract unchanged.
 
 `image_generate` (2026-08-27, fully in-house directive) is ONIQ's OWN
 image engine, and it is deliberately not a second model: the same baked

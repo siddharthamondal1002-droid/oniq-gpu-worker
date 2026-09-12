@@ -75,6 +75,10 @@ def _error(code: str, message: str) -> dict:
     )
 
 
+def _needs_storage(op: str) -> bool:
+    return op not in ("story_generate", "model_hydrate")
+
+
 def handle(event) -> dict:
     started = time.monotonic()
     workdir = None
@@ -83,7 +87,8 @@ def handle(event) -> dict:
         job = contract.validate_job(
             event.get("input") if isinstance(event, dict) else None
         )
-        storage.require_configured()
+        if _needs_storage(job["op"]):
+            storage.require_configured()
 
         workdir = tempfile.mkdtemp(prefix="oniq-gpu-")
         input_path = f"{workdir}/input.bin"

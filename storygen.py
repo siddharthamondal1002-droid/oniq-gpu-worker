@@ -1,9 +1,9 @@
-"""The story_generate workload — ONIQ's own causal LLM, on CUDA.
+"""The story_generate workload — local by default, ChatGPT-capable by config.
 
-Owner directive 2026-08-27 (Qwen3-8B conditionally approved). The model is
-baked into MODEL_DIR at build time behind a licence gate and loaded with
-local_files_only, so a job never reaches Hugging Face, never reaches any
-provider, and fails clearly when the weights are absent.
+Owner directive 2026-08-27 (Qwen3-8B conditionally approved). The default
+path keeps the local model baked into MODEL_DIR behind a licence gate and
+loaded with local_files_only. When ONIQ_STORY_PROVIDER=openai is set, the
+same op may be served by ChatGPT instead.
 
 THE LIFECYCLE IS THE POINT. LTX peaked at 15.9GB of the A5000's 24GB on
 the measured 2026-08-27 job. The story model therefore runs ALONE:
@@ -23,6 +23,10 @@ from __future__ import annotations
 
 import os
 import time
+import io
+import json
+import urllib.error
+import urllib.request
 
 import contract
 import modelroot
@@ -48,10 +52,110 @@ MAX_NEW_TOKENS = 8192
 TEMPERATURE = 0.7
 TOP_P = 0.9
 SEED = 42
+OPENAI_TIMEOUT_SECONDS = 120
+DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+OPENAI_PROVIDERS = frozenset({"openai", "chatgpt"})
 
 
 class StoryModelUnavailable(Exception):
     """No local checkpoint. NEVER a reason to call a provider."""
+
+
+def _story_provider() -> str:
+    raw = (os.environ.get("ONIQ_STORY_PROVIDER") or "").strip().lower()
+    if not raw:
+        return "local"
+    if raw == "local":
+        return "local"
+    if raw in OPENAI_PROVIDERS:
+        return "openai"
+    raise contract.ContractError(
+        "story-provider-invalid",
+        "ONIQ_STORY_PROVIDER must be local, openai, or chatgpt",
+    )
+
+
+def _openai_model() -> str:
+    return (os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
+
+
+def _openai_url() -> str:
+    return (
+        os.environ.get("OPENAI_API_URL")
+        or "https://api.openai.com/v1/chat/completions"
+    ).strip()
+
+
+def _json_from_bytes(raw: bytes) -> dict:
+    return json.load(io.StringIO(raw.decode("utf-8")))
+
+
+def _openai_story(prompt: str, max_new_tokens: int, urlopen=None) -> tuple[str, str]:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise contract.ContractError(
+            "story-provider-not-configured",
+            "OPENAI_API_KEY is required when ONIQ_STORY_PROVIDER selects ChatGPT",
+        )
+
+    body = json.dumps(
+        {
+            "model": _openai_model(),
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": TEMPERATURE,
+            "top_p": TOP_P,
+            "max_tokens": max_new_tokens,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        _openai_url(),
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    opener = urlopen or urllib.request.urlopen
+    try:
+        with opener(req, timeout=OPENAI_TIMEOUT_SECONDS) as response:
+            payload = _json_from_bytes(response.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise contract.ContractError(
+                "story-provider-unauthorized",
+                "ChatGPT refused the API key",
+            ) from exc
+        if exc.code == 429:
+            raise contract.ContractError(
+                "story-provider-rate-limited",
+                "ChatGPT rate-limited the request",
+            ) from exc
+        raise contract.ContractError(
+            "story-provider-failed",
+            f"ChatGPT request failed with HTTP {exc.code}",
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise contract.ContractError(
+            "story-provider-unreachable",
+            "ChatGPT could not be reached",
+        ) from exc
+
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise contract.ContractError(
+            "story-provider-failed",
+            "ChatGPT returned no choices",
+        )
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    text = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(text, str):
+        raise contract.ContractError(
+            "story-provider-failed",
+            "ChatGPT returned no text",
+        )
+    return text, str(payload.get("model") or _openai_model())
 
 
 def model_id() -> str:
@@ -183,7 +287,7 @@ def _generate(model, tokenizer, prompt: str, max_new_tokens: int) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True)
 
 
-def run(job: dict, load_model=None) -> dict:
+def run(job: dict, load_model=None, request_story=None) -> dict:
     """Generate one story. Returns the model's raw text plus measurements.
 
     THE WORKER DOES NOT VALIDATE THE STORY. Parsing, repair and the Story
@@ -193,6 +297,29 @@ def run(job: dict, load_model=None) -> dict:
     ONIQ's own model, measure it, and release the card.
     """
     started = time.monotonic()
+    provider = _story_provider()
+
+    if provider == "openai":
+        request_story = request_story or _openai_story
+        infer_started = time.monotonic()
+        text, remote_model = request_story(
+            job["params"]["prompt"], job["params"]["max_tokens"]
+        )
+        inference_ms = int((time.monotonic() - infer_started) * 1000)
+        if not text.strip():
+            raise contract.ContractError("story-empty", "the model produced no text")
+        return {
+            "ok": True,
+            "op": "story_generate",
+            "model": remote_model,
+            "model_load_ms": 0,
+            "precision": None,
+            "inference_ms": inference_ms,
+            "story_text": text,
+            "story_chars": len(text),
+            "vram_peak_mb": None,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        }
 
     if load_model is None:
         if not weights_present():
