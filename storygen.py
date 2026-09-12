@@ -82,6 +82,9 @@ def _openai_model() -> str:
 
 
 def _openai_url() -> str:
+    # This worker sends the Chat Completions payload shape below. A custom
+    # endpoint is therefore supported only when it is that exact HTTPS route;
+    # pointing the bearer token at some other path is misconfiguration.
     chosen = (os.environ.get("OPENAI_API_URL") or "").strip()
     url = chosen or "https://api.openai.com/v1/chat/completions"
     parsed = urllib.parse.urlparse(url)

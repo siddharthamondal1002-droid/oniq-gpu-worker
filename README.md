@@ -39,7 +39,9 @@ story must stop before any GPU job is planned.
 
 If `ONIQ_STORY_PROVIDER=openai` is set, `story_generate` calls ChatGPT
 instead of the local checkpoint. That path requires `OPENAI_API_KEY`,
-accepts optional `OPENAI_MODEL`, and leaves the job contract unchanged.
+accepts optional `OPENAI_MODEL`, and accepts optional `OPENAI_API_URL`
+only when it is an HTTPS `/chat/completions` endpoint. The job contract
+itself is unchanged.
 
 `image_generate` (2026-08-27, fully in-house directive) is ONIQ's OWN
 image engine, and it is deliberately not a second model: the same baked
