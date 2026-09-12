@@ -76,14 +76,13 @@ def _story_provider() -> str:
 
 
 def _openai_model() -> str:
-    return (os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip()
+    chosen = (os.environ.get("OPENAI_MODEL") or "").strip()
+    return chosen or DEFAULT_OPENAI_MODEL
 
 
 def _openai_url() -> str:
-    return (
-        os.environ.get("OPENAI_API_URL")
-        or "https://api.openai.com/v1/chat/completions"
-    ).strip()
+    chosen = (os.environ.get("OPENAI_API_URL") or "").strip()
+    return chosen or "https://api.openai.com/v1/chat/completions"
 
 
 def _json_from_bytes(raw: bytes) -> dict:
@@ -150,6 +149,15 @@ def _openai_story(prompt: str, max_new_tokens: int, urlopen=None) -> tuple[str, 
         )
     message = choices[0].get("message") if isinstance(choices[0], dict) else None
     text = message.get("content") if isinstance(message, dict) else None
+    if isinstance(text, list):
+        parts = []
+        for part in text:
+            if not isinstance(part, dict):
+                continue
+            value = part.get("text")
+            if isinstance(value, str):
+                parts.append(value)
+        text = "".join(parts)
     if not isinstance(text, str):
         raise contract.ContractError(
             "story-provider-failed",

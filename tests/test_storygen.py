@@ -127,6 +127,16 @@ def test_story_provider_accepts_chatgpt_alias(monkeypatch):
     assert storygen._story_provider() == "openai"
 
 
+def test_openai_model_defaults_when_blank(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "   ")
+    assert storygen._openai_model() == storygen.DEFAULT_OPENAI_MODEL
+
+
+def test_openai_url_defaults_when_blank(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_URL", "   ")
+    assert storygen._openai_url() == "https://api.openai.com/v1/chat/completions"
+
+
 def test_story_provider_refuses_unknown_values(monkeypatch):
     monkeypatch.setenv("ONIQ_STORY_PROVIDER", "anthropic")
     with pytest.raises(contract.ContractError) as exc:
@@ -276,6 +286,19 @@ def test_chatgpt_request_posts_expected_payload(monkeypatch):
     assert seen["auth"].endswith("test-key")
     assert b'"max_tokens": 321' in seen["body"]
     assert text == "hello"
+    assert model == "gpt-test"
+
+
+def test_chatgpt_request_accepts_structured_content_parts(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    text, model = storygen._openai_story(
+        "write a story",
+        321,
+        urlopen=lambda req, timeout: _FakeHttpResponse(
+            b'{"model":"gpt-test","choices":[{"message":{"content":[{"type":"output_text","text":"hello "},{"type":"output_text","text":"world"}]}}]}'
+        ),
+    )
+    assert text == "hello world"
     assert model == "gpt-test"
 
 
