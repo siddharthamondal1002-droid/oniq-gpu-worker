@@ -325,6 +325,17 @@ def test_chatgpt_request_refuses_unreadable_json(monkeypatch):
     assert exc.value.code == "story-provider-failed"
 
 
+def test_chatgpt_request_refuses_non_object_json(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story(
+            "write a story",
+            321,
+            urlopen=lambda req, timeout: _FakeHttpResponse(b'["not","an","object"]'),
+        )
+    assert exc.value.code == "story-provider-failed"
+
+
 @pytest.mark.parametrize(
     ("code", "expected"),
     [

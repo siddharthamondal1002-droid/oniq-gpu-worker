@@ -101,7 +101,7 @@ def _openai_url() -> str:
     return url
 
 
-def _json_from_bytes(raw: bytes) -> dict:
+def _json_from_bytes(raw: bytes) -> object:
     return json.load(io.StringIO(raw.decode("utf-8")))
 
 
@@ -142,6 +142,11 @@ def _openai_story(prompt: str, max_new_tokens: int, urlopen=None) -> tuple[str, 
                     "story-provider-failed",
                     "ChatGPT returned an unreadable response",
                 ) from exc
+            if not isinstance(payload, dict):
+                raise contract.ContractError(
+                    "story-provider-failed",
+                    "ChatGPT returned a non-object response",
+                )
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             raise contract.ContractError(
