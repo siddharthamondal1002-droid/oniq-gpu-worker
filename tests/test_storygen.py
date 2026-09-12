@@ -274,6 +274,8 @@ def test_chatgpt_request_posts_expected_payload(monkeypatch):
         seen["url"] = req.full_url
         seen["timeout"] = timeout
         seen["auth"] = req.headers["Authorization"]
+        seen["method"] = req.get_method()
+        seen["content_type"] = req.headers["Content-type"]
         seen["body"] = req.data
         return _FakeHttpResponse(
             b'{"model":"gpt-test","choices":[{"message":{"content":"hello"}}]}'
@@ -284,6 +286,8 @@ def test_chatgpt_request_posts_expected_payload(monkeypatch):
     assert seen["timeout"] == storygen.OPENAI_TIMEOUT_SECONDS
     assert seen["auth"].startswith("Bearer ")
     assert seen["auth"].endswith("test-key")
+    assert seen["method"] == "POST"
+    assert seen["content_type"] == "application/json"
     assert b'"max_tokens": 321' in seen["body"]
     assert text == "hello"
     assert model == "gpt-test"
@@ -300,6 +304,17 @@ def test_chatgpt_request_accepts_structured_content_parts(monkeypatch):
     )
     assert text == "hello world"
     assert model == "gpt-test"
+
+
+def test_chatgpt_request_refuses_unreadable_json(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story(
+            "write a story",
+            321,
+            urlopen=lambda req, timeout: _FakeHttpResponse(b"not-json"),
+        )
+    assert exc.value.code == "story-provider-failed"
 
 
 @pytest.mark.parametrize(

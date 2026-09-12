@@ -119,7 +119,13 @@ def _openai_story(prompt: str, max_new_tokens: int, urlopen=None) -> tuple[str, 
     opener = urlopen or urllib.request.urlopen
     try:
         with opener(req, timeout=OPENAI_TIMEOUT_SECONDS) as response:
-            payload = _json_from_bytes(response.read())
+            try:
+                payload = _json_from_bytes(response.read())
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise contract.ContractError(
+                    "story-provider-failed",
+                    "ChatGPT returned an unreadable response",
+                ) from exc
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             raise contract.ContractError(
