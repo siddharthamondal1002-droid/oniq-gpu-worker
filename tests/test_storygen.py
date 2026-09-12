@@ -137,6 +137,14 @@ def test_openai_url_defaults_when_blank(monkeypatch):
     assert storygen._openai_url() == "https://api.openai.com/v1/chat/completions"
 
 
+@pytest.mark.parametrize("value", ["http://example.com/v1/chat/completions", "https://example.com/v1/responses"])
+def test_openai_url_rejects_non_https_or_wrong_route(monkeypatch, value):
+    monkeypatch.setenv("OPENAI_API_URL", value)
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_url()
+    assert exc.value.code == "story-provider-invalid"
+
+
 def test_story_provider_refuses_unknown_values(monkeypatch):
     monkeypatch.setenv("ONIQ_STORY_PROVIDER", "anthropic")
     with pytest.raises(contract.ContractError) as exc:
@@ -341,6 +349,18 @@ def test_chatgpt_request_maps_network_errors(monkeypatch):
 
     def failing(req, timeout):
         raise urllib.error.URLError("offline")
+
+    with pytest.raises(contract.ContractError) as exc:
+        storygen._openai_story("write a story", 321, urlopen=failing)
+    assert exc.value.code == "story-provider-unreachable"
+
+
+@pytest.mark.parametrize("error", [OSError("socket"), TimeoutError("slow")])
+def test_chatgpt_request_maps_transport_read_errors(monkeypatch, error):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def failing(req, timeout):
+        raise error
 
     with pytest.raises(contract.ContractError) as exc:
         storygen._openai_story("write a story", 321, urlopen=failing)

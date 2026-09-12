@@ -26,6 +26,7 @@ import time
 import io
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import contract
@@ -82,7 +83,19 @@ def _openai_model() -> str:
 
 def _openai_url() -> str:
     chosen = (os.environ.get("OPENAI_API_URL") or "").strip()
-    return chosen or "https://api.openai.com/v1/chat/completions"
+    url = chosen or "https://api.openai.com/v1/chat/completions"
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise contract.ContractError(
+            "story-provider-invalid",
+            "OPENAI_API_URL must be an https:// chat completions endpoint",
+        )
+    if not parsed.netloc or not parsed.path.endswith("/chat/completions"):
+        raise contract.ContractError(
+            "story-provider-invalid",
+            "OPENAI_API_URL must end in /chat/completions",
+        )
+    return url
 
 
 def _json_from_bytes(raw: bytes) -> dict:
@@ -141,7 +154,7 @@ def _openai_story(prompt: str, max_new_tokens: int, urlopen=None) -> tuple[str, 
             "story-provider-failed",
             f"ChatGPT request failed with HTTP {exc.code}",
         ) from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise contract.ContractError(
             "story-provider-unreachable",
             "ChatGPT could not be reached",
